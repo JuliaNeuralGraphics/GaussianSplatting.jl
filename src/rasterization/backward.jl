@@ -1,3 +1,7 @@
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
+
 """
 Compute loss gradients w.r.t. RGB of Gaussians, opacity, conic matrix
 and 2D mean positions from per-pixel loss gradients.
@@ -9,17 +13,17 @@ and 2D mean positions from per-pixel loss gradients.
     ∂L∂conic_opacities::AbstractArray{Float32, 3},
     ∂L∂means_2d::AbstractMatrix{Float32},
     # Inputs.
-    ∂L∂pixels::AbstractMatrix{SVector{3, Float32}},
+    @Const(∂L∂pixels), # ::AbstractMatrix{SVector{3, Float32}},
     # (output from the forward `render!` pass)
-    n_contrib::AbstractMatrix{UInt32},
-    accum_α::AbstractMatrix{Float32},
+    @Const(n_contrib), #::AbstractMatrix{UInt32},
+    @Const(accum_α), #::AbstractMatrix{Float32},
 
-    gaussian_values_sorted::AbstractVector{UInt32},
-    means_2d::AbstractVector{SVector{2, Float32}},
-    conic_opacities::AbstractVector{SVector{4, Float32}},
-    rgb_features::AbstractVector{SVector{3, Float32}},
+    @Const(gaussian_values_sorted), #::AbstractVector{UInt32},
+    @Const(means_2d), #::AbstractVector{SVector{2, Float32}},
+    @Const(conic_opacities), #::AbstractVector{SVector{4, Float32}},
+    @Const(rgb_features), #::AbstractVector{SVector{3, Float32}},
 
-    ranges::AbstractMatrix{UInt32},
+    @Const(ranges), #::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{3, Float32},
     grid::SVector{2, Int32}, block::SVector{2, Int32},
@@ -175,22 +179,23 @@ end
     # Outputs.
     ∂L∂means::AbstractVector{SVector{3, Float32}},
     ∂L∂cov::AbstractMatrix{Float32},
+    ∂L∂τ::Maybe{AbstractMatrix{Float32}}, # (6, N)
     # Inputs.
-    ∂L∂conic_opacities::AbstractArray{Float32, 3},
-    cov3Ds::AbstractVector{SVector{6, Float32}},
-    radii::AbstractVector{Int32},
-    means::AbstractVector{SVector{3, Float32}},
+    @Const(∂L∂conic_opacities), #::AbstractArray{Float32, 3},
+    @Const(cov3Ds), #::AbstractVector{SVector{6, Float32}},
+    @Const(radii), #::AbstractVector{Int32},
+    @Const(means), #::AbstractVector{SVector{3, Float32}},
     view::SMatrix{4, 4, Float32, 16},
     focal_xy::SVector{2, Float32}, tan_fov_xy::SVector{2, Float32},
 )
     i = @index(Global)
-    @inbounds if radii[i] > 0
+    if @inbounds(radii[i]) > 0
         @inbounds ∂L∂conic = SVector{3, Float32}( # Symmetric 2x2 matrix.
             ∂L∂conic_opacities[1, 1, i],
             ∂L∂conic_opacities[2, 1, i],
             ∂L∂conic_opacities[2, 2, i])
 
-        @inbounds cov, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
+        @inbounds cov, J, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
             to_homogeneous(means[i]), focal_xy, tan_fov_xy,
             cov3Ds[i], view, Val{true}())
 
@@ -289,6 +294,67 @@ end
             view[2, 1], view[2, 2], view[2, 3],
             view[3, 1], view[3, 2], view[3, 3])
         @inbounds ∂L∂means[i] = rot_inv * ∂L∂t
+
+        # Compute camera gradients.
+        # TODO inbounds
+        if !isnothing(∂L∂τ)
+            ∂pC_∂ρ = SMatrix{3, 3, Float32}(I)
+            ∂pC_∂θ = skew_sym_mat(-t)
+
+            ∂τ = MVector{6, Float32}(undef)
+            for j in 1:3
+                ∂τ[j] =
+                    ∂L∂t[1] * ∂pC_∂ρ[1, j] +
+                    ∂L∂t[2] * ∂pC_∂ρ[2, j] +
+                    ∂L∂t[3] * ∂pC_∂ρ[3, j]
+                ∂τ[j + 3] =
+                    ∂L∂t[1] * ∂pC_∂θ[1, j] +
+                    ∂L∂t[2] * ∂pC_∂θ[2, j] +
+                    ∂L∂t[3] * ∂pC_∂θ[3, j]
+            end
+            for j in 1:6
+                # NOTE: without @inbounds we get LLVM IR error: gc_frame...
+                @inbounds ∂L∂τ[j, i] += ∂τ[j]
+            end
+
+            ∂L∂W₁₁ = J[1, 1] * ∂L∂T₁₁
+            ∂L∂W₁₂ = J[1, 1] * ∂L∂T₁₂
+            ∂L∂W₁₃ = J[1, 1] * ∂L∂T₁₃
+
+            ∂L∂W₂₁ = J[2, 2] * ∂L∂T₂₁
+            ∂L∂W₂₂ = J[2, 2] * ∂L∂T₂₂
+            ∂L∂W₂₃ = J[2, 2] * ∂L∂T₂₃
+
+            ∂L∂W₃₁ = J[1, 3] * ∂L∂T₁₁ + J[2, 3] * ∂L∂T₂₁
+            ∂L∂W₃₂ = J[1, 3] * ∂L∂T₁₂ + J[2, 3] * ∂L∂T₂₂
+            ∂L∂W₃₃ = J[1, 3] * ∂L∂T₁₃ + J[2, 3] * ∂L∂T₂₃
+
+            ∂L∂W = SMatrix{3, 3, Float32, 9}(
+                ∂L∂W₁₁, ∂L∂W₂₁, ∂L∂W₃₁,
+                ∂L∂W₁₂, ∂L∂W₂₂, ∂L∂W₃₂,
+                ∂L∂W₁₃, ∂L∂W₂₃, ∂L∂W₃₃)
+
+            n_W1_x = skew_sym_mat(-view[:, 1])
+            n_W2_x = skew_sym_mat(-view[:, 2])
+            n_W3_x = skew_sym_mat(-view[:, 3])
+
+            ∂L∂θ = SVector{3, Float32}(
+                ∂L∂W[:, 1] ⋅ n_W1_x[:, 1] +
+                ∂L∂W[:, 2] ⋅ n_W2_x[:, 1] +
+                ∂L∂W[:, 3] ⋅ n_W3_x[:, 1],
+
+                ∂L∂W[:, 1] ⋅ n_W1_x[:, 2] +
+                ∂L∂W[:, 2] ⋅ n_W2_x[:, 2] +
+                ∂L∂W[:, 3] ⋅ n_W3_x[:, 2],
+
+                ∂L∂W[:, 1] ⋅ n_W1_x[:, 3] +
+                ∂L∂W[:, 2] ⋅ n_W2_x[:, 3] +
+                ∂L∂W[:, 3] ⋅ n_W3_x[:, 3])
+
+            ∂L∂τ[4, i] += ∂L∂θ[1]
+            ∂L∂τ[5, i] += ∂L∂θ[2]
+            ∂L∂τ[6, i] += ∂L∂θ[3]
+        end
     end
 end
 
@@ -302,22 +368,26 @@ for the covariance computation and inversion,
     ∂L∂shs::AbstractMatrix{SVector{3, Float32}},
     ∂L∂scales::AbstractVector{SVector{3, Float32}},
     ∂L∂rot::AbstractVector{SVector{4, Float32}},
+    ∂L∂τ::Maybe{AbstractMatrix{Float32}}, # (6, N), [ρ, θ]
     # Inputs.
-    ∂L∂cov::AbstractMatrix{Float32},
-    ∂L∂colors::AbstractVector{SVector{3, Float32}},
-    ∂L∂means_2d::AbstractVector{SVector{2, Float32}},
-    radii::AbstractVector{Int32},
-    means::AbstractVector{SVector{3, Float32}},
-    scales::AbstractVector{SVector{3, Float32}}, # For cov 3D
-    rotations::AbstractVector{SVector{4, Float32}}, # For cov 3D
-    spherical_harmonics::AbstractMatrix{SVector{3, Float32}}, sh_degree,
-    clamped::AbstractVector{SVector{3, Bool}},
+    @Const(∂L∂cov), #::AbstractMatrix{Float32},
+    @Const(∂L∂colors), #::AbstractVector{SVector{3, Float32}},
+    @Const(∂L∂means_2d), #::AbstractVector{SVector{2, Float32}},
+    @Const(radii), #::AbstractVector{Int32},
+    @Const(means), #::AbstractVector{SVector{3, Float32}},
+    @Const(scales), #::AbstractVector{SVector{3, Float32}}, # For cov 3D
+    @Const(rotations), #::AbstractVector{SVector{4, Float32}}, # For cov 3D
+    @Const(spherical_harmonics), #::AbstractMatrix{SVector{3, Float32}},
+    sh_degree,
+    @Const(clamped), #::AbstractVector{SVector{3, Bool}},
     projection::SMatrix{4, 4, Float32, 16},
+    projection_raw::SMatrix{4, 4, Float32, 16},
+    view::SMatrix{4, 4, Float32, 16},
     camera_position::SVector{3, Float32},
     scale_modifier::Float32,
 )
     i = @index(Global)
-    @inbounds if radii[i] > 0
+    if @inbounds(radii[i] > 0)
         @inbounds point = means[i]
         point_h = to_homogeneous(point)
 
@@ -346,12 +416,62 @@ for the covariance computation and inversion,
             (projection[1, 3] * pw - projection[4, 3] * mult_1) * ∂L∂mean_2d[1] +
             (projection[2, 3] * pw - projection[4, 3] * mult_2) * ∂L∂mean_2d[2])
 
-        @inbounds ∂L∂means[i] += ∂L∂mean + ∇color_from_sh!(
-            # Outputs.
-            @view(∂L∂shs[:, i]),
-            # Inputs.
-            point, camera_position, @view(spherical_harmonics[:, i]), sh_degree,
-            clamped[i], ∂L∂colors[i])
+        ∂L∂mean_sh = ∇color_from_sh!(
+            @view(∂L∂shs[:, i]), # Output.
+            point, camera_position, @view(spherical_harmonics[:, i]), # Inputs.
+            sh_degree, clamped[i], ∂L∂colors[i])
+        @inbounds ∂L∂means[i] += ∂L∂mean + ∂L∂mean_sh
+
+        if !isnothing(∂L∂τ)
+            # TODO inbounds
+            α = pw
+            β = -projected_h[1] * α^2
+            γ = -projected_h[2] * α^2
+
+            a = projection_raw[1, 1]
+            b = projection_raw[2, 2]
+            c = projection_raw[3, 3]
+            d = projection_raw[3, 4] # TODO swap d & e?
+            e = projection_raw[4, 3]
+
+            pC = view * point_h
+            ∂pC_∂ρ = SMatrix{3, 3, Float32}(I)
+            ∂pC_∂θ = skew_sym_mat(-pC)
+
+            ∂proj∂pC1 = SVector{3, Float32}(α * a, 0f0, β * e)
+            ∂proj∂pC2 = SVector{3, Float32}(0f0, α * b, γ * e)
+
+            ∂proj∂pC1_∂ρ = ∂pC_∂ρ * ∂proj∂pC1
+            ∂proj∂pC2_∂ρ = ∂pC_∂ρ * ∂proj∂pC2
+            ∂proj∂pC1_∂θ = transpose(∂pC_∂θ) * ∂proj∂pC1
+            ∂proj∂pC2_∂θ = transpose(∂pC_∂θ) * ∂proj∂pC2
+
+            ∂mean_2d∂τ = MMatrix{2, 6, Float32}(undef)
+            ∂mean_2d∂τ[1, 1] = ∂proj∂pC1_∂ρ[1]
+            ∂mean_2d∂τ[1, 2] = ∂proj∂pC1_∂ρ[2]
+            ∂mean_2d∂τ[1, 3] = ∂proj∂pC1_∂ρ[3]
+            ∂mean_2d∂τ[1, 4] = ∂proj∂pC1_∂θ[1]
+            ∂mean_2d∂τ[1, 5] = ∂proj∂pC1_∂θ[2]
+            ∂mean_2d∂τ[1, 6] = ∂proj∂pC1_∂θ[3]
+
+            ∂mean_2d∂τ[2, 1] = ∂proj∂pC2_∂ρ[1]
+            ∂mean_2d∂τ[2, 2] = ∂proj∂pC2_∂ρ[2]
+            ∂mean_2d∂τ[2, 3] = ∂proj∂pC2_∂ρ[3]
+            ∂mean_2d∂τ[2, 4] = ∂proj∂pC2_∂θ[1]
+            ∂mean_2d∂τ[2, 5] = ∂proj∂pC2_∂θ[2]
+            ∂mean_2d∂τ[2, 6] = ∂proj∂pC2_∂θ[3]
+
+            # NOTE: without @inbounds we get LLVM IR error: gc_frame...
+            @inbounds for j in 1:6
+                ∂L∂τ[j, i] +=
+                    ∂L∂mean_2d[1] * ∂mean_2d∂τ[1, j] +
+                    ∂L∂mean_2d[2] * ∂mean_2d∂τ[2, j]
+            end
+
+            ∂L∂τ[1, i] -= ∂L∂mean_sh[1]
+            ∂L∂τ[2, i] -= ∂L∂mean_sh[2]
+            ∂L∂τ[3, i] -= ∂L∂mean_sh[3]
+        end
 
         @inbounds ∂L∂scale, ∂L∂q = ∇compute_cov_3d(
             @view(∂L∂cov[:, i]), scales[i], rotations[i], scale_modifier)

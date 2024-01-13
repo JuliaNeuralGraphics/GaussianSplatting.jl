@@ -2,11 +2,12 @@
 
 3D Gaussian Splatting for Real-Time Radiance Field Rendering in Julia
 
+https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77d4d8-3ecb-450b-8d0d-fab2834411a7
+
 ## Requirements
 
-- Julia 1.10: https://julialang.org/downloads/
-- AMD GPU capable machine with ROCm installation.
-- Or Nvidia GPU capable machine.
+- Julia 1.10.
+- AMD GPU (ROCm) or Nvidia (CUDA) capable machine.
 
 ## Usage
 
@@ -17,7 +18,8 @@
 3. Start the GUI from REPL:
 ```julia
 julia> using GaussianSplatting
-julia> GaussianSplatting.gui("path-to-colmap-dataset-directory")
+julia> image_scale = 1
+julia> GaussianSplatting.gui("path-to-colmap-dataset-directory", image_scale)
 ```
 
 ## GPU selection
@@ -30,8 +32,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory")
      [GaussianSplatting]
      backend="AMDGPU"
      ```
-  2. **TEMPORARY STEP:** uncomment this line and comment-out the line right below it:
-      https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/blob/43c83999bf2d12b42d022e603c9e817206b5fe1d/src/rasterization/forward.jl#L163
 
 - Nvidia GPU:
   1. In `LocalPreferences.toml` set:
@@ -41,8 +41,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory")
      [GaussianSplatting]
      backend="CUDA"
      ```
-  2. **TEMPORARY STEP:** comment-out this line and uncomment the line right below it:
-      https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/blob/43c83999bf2d12b42d022e603c9e817206b5fe1d/src/rasterization/forward.jl#L163
 
 ## Datasets
 

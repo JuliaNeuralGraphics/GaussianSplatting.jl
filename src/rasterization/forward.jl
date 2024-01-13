@@ -1,3 +1,6 @@
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
 """
 Run preprocessing of gaussians: transforming, bounding, converting SH to RGB.
 
@@ -10,113 +13,83 @@ Note:
     # Outputs.
     cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched, rgbs, clamped,
     # Inputs.
-    means, scales, rotations, spherical_harmonics, sh_degree, opacities,
+    @Const(means), @Const(scales), @Const(rotations), @Const(spherical_harmonics),
+    sh_degree, @Const(opacities),
     projection, view, camera_position, resolution,
     grid, block, focal_xy, tan_fov_xy, scale_modifier,
 )
     i = @index(Global)
-    __preprocess!(
-        cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched,
-        rgbs, clamped, means, scales, rotations, spherical_harmonics, sh_degree,
-        opacities, projection, view, camera_position, resolution,
-        grid, block, focal_xy, tan_fov_xy, scale_modifier, i)
-end
-
-# Use a separate function, so that we can use `return` statements...
-@inline function __preprocess!(
-    # Outputs.
-    cov3Ds::AbstractVector{SVector{6, Float32}},
-    depths::AbstractVector{Float32},
-    radii::AbstractVector{Int32},
-    pixels::AbstractVector{SVector{2, Float32}},
-    conic_opacities::AbstractVector{SVector{4, Float32}},
-    tiles_touched::AbstractVector{Int32},
-    rgbs::AbstractVector{SVector{3, Float32}},
-    clamped::AbstractVector{SVector{3, Bool}},
-    # Inputs.
-    means::AbstractVector{SVector{3, Float32}},
-    scales::AbstractVector{SVector{3, Float32}},
-    rotations::AbstractVector{SVector{4, Float32}},
-    spherical_harmonics::AbstractMatrix{SVector{3, Float32}},
-    sh_degree,
-    opacities::AbstractMatrix{Float32},
-    projection::SMatrix{4, 4, Float32, 16},
-    view::SMatrix{4, 4, Float32, 16},
-    camera_position::SVector{3, Float32},
-    resolution::SVector{2, Int32},
-    grid::SVector{2, Int32}, block::SVector{2, Int32},
-    focal_xy::SVector{2, Float32}, tan_fov_xy::SVector{2, Float32},
-    scale_modifier::Float32, i::Int,
-)
     @inbounds radii[i] = 0i32
     @inbounds tiles_touched[i] = 0i32
 
     @inbounds point = means[i]
     point_h = to_homogeneous(point)
     visible, depth = in_frustum(point_h, view)
-    visible || return
+    if visible
+        @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
+        @inbounds cov3Ds[i] = cov3D
 
-    @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
-    @inbounds cov3Ds[i] = cov3D
+        cov = computeCov2D(point_h, focal_xy, tan_fov_xy, cov3D, view)
+        det = cov[1] * cov[3] - cov[2]^2
+        if det ≢ 0f0
+            # Project point into camera space.
+            projected_h = projection * point_h
+            projected =
+                SVector{3, Float32}(projected_h[1], projected_h[2], projected_h[3]) .*
+                (1f0 / (projected_h[4] + eps(Float32)))
 
-    cov = computeCov2D(point_h, focal_xy, tan_fov_xy, cov3D, view)
-    det = cov[1] * cov[3] - cov[2]^2
-    det ≈ 0f0 && return
+            # Compute inverse conic.
+            det_inv = 1f0 / det
+            conic = SVector{3, Float32}(
+                cov[3] * det_inv, -cov[2] * det_inv, cov[1] * det_inv)
 
-    # Project point into camera space.
-    projected_h = projection * point_h
-    projected =
-        SVector{3, Float32}(projected_h[1], projected_h[2], projected_h[3]) .*
-        (1f0 / (projected_h[4] + eps(Float32)))
+            # Compute extent in screen space (by finding eigenvalues of 2D covariance matrix).
+            λ1, λ2 = eigvals_2D(cov, det)
+            radius = gpu_ceil(Int32, 3f0 * sqrt(max(λ1, λ2)))
+            # From `extent`, compute how many tiles does it cover in screen-space.
+            pixel = SVector{2, Float32}(
+                ndc2pix(projected[1], resolution[1]),
+                ndc2pix(projected[2], resolution[2]))
+            rmin, rmax = get_rect(pixel, radius, grid, block)
+            # Quit if does not covert anything.
+            area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
+            if area > 0i32
+                @inbounds begin
+                    depths[i] = depth
+                    radii[i] = radius
+                    pixels[i] = pixel
+                    conic_opacities[i] = SVector{4, Float32}(
+                        conic[1], conic[2], conic[3], opacities[i])
+                    tiles_touched[i] = area
 
-    # Compute inverse conic.
-    det_inv = 1f0 / det
-    conic = SVector{3, Float32}(
-        cov[3] * det_inv, -cov[2] * det_inv, cov[1] * det_inv)
-
-    # Compute extent in screen space (by finding eigenvalues of 2D covariance matrix).
-    λ1, λ2 = eigvals_2D(cov, det)
-    radius = gpu_ceil(Int32, 3f0 * sqrt(max(λ1, λ2)))
-    # From `extent`, compute how many tiles does it cover in screen-space.
-    pixel = SVector{2, Float32}(
-        ndc2pix(projected[1], resolution[1]),
-        ndc2pix(projected[2], resolution[2]))
-    rmin, rmax = get_rect(pixel, radius, grid, block)
-    # Quit if does not covert anything.
-    area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
-    area == 0i32 && return
-
-    @inbounds begin
-        depths[i] = depth
-        radii[i] = radius
-        pixels[i] = pixel
-        conic_opacities[i] = SVector{4, Float32}(
-            conic[1], conic[2], conic[3], opacities[i])
-        tiles_touched[i] = area
-
-        rgbs[i], clamped[i] = compute_colors_from_sh(
-            point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
+                    rgbs[i], clamped[i] = compute_colors_from_sh(
+                        point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
+                end
+            end
+        end
     end
-    return
 end
 
 @kernel function render!(
     # Outputs.
     out_color::AbstractArray{Float32, 3},
+    auxiliary::A,
+    covisibility::C,
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
     # Inputs.
-    gaussian_values_sorted::AbstractVector{UInt32},
-    means_2d::AbstractVector{SVector{2, Float32}},
-    conic_opacities::AbstractVector{SVector{4, Float32}},
-    rgb_features::AbstractVector{SVector{3, Float32}},
+    @Const(gaussian_values_sorted), #::AbstractVector{UInt32},
+    @Const(means_2d), #::AbstractVector{SVector{2, Float32}},
+    @Const(conic_opacities), #::AbstractVector{SVector{4, Float32}},
+    @Const(rgb_features), #::AbstractVector{SVector{3, Float32}},
+    @Const(depths), #::AbstractVector{Float32},
 
-    ranges::AbstractMatrix{UInt32},
+    @Const(ranges), #::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{3, Float32},
     block::SVector{2, Int32},
     ::Val{block_size}, ::Val{channels},
-) where {block_size, channels}
+) where {A, C, block_size, channels}
     @uniform horizontal_blocks = gpu_cld(resolution[1], block[1])
 
     gidx = @index(Group, NTuple) # ≡ group_index
@@ -150,18 +123,19 @@ end
     collected_conic_opacity = @localmem SVector{4, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_id = @localmem UInt32 block_size
+    collected_depth = (A !== Nothing) ? (@localmem Float32 block_size) : nothing
 
     T = 1f0
     contributor = 0u32
     last_contributor = 0u32
+
     color = zeros(MVector{3, Float32})
+    auxiliary_px = (A !== Nothing) ? zeros(MVector{3, Float32}) : nothing
 
     # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
         # End if entire block votes it is done rasterizing.
-        # TODO expose workgroup sync API in KA
-        AMDGPU.sync_workgroup_count(done) == block_size && break
-        # CUDA.sync_threads_count(done) == block_size && break
+        synchronize_count(done) == block_size && break
 
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
@@ -170,6 +144,9 @@ end
             @inbounds collected_id[ridx] = gaussian_id
             @inbounds collected_xy[ridx] = means_2d[gaussian_id]
             @inbounds collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
+            if A !== Nothing
+                @inbounds collected_depth[ridx] = depths[gaussian_id]
+            end
         end
         @synchronize()
 
@@ -201,10 +178,20 @@ end
                 break
             end
 
+            @inbounds gaussian_id = collected_id[j]
+            # If needed, mark current Gaussian as visible.
+            if C !== Nothing && T > 0.5f0
+                @inbounds covisibility[gaussian_id] = true
+            end
+
             # Eq. (3) from 3D Gaussian splatting paper.
             @inbounds feature = rgb_features[collected_id[j]]
             @inbounds for c in 1i32:channels
                 color[c] += feature[c] * α * T
+            end
+            @inbounds if A !== Nothing
+                auxiliary_px[1] += collected_depth[j] * α * T
+                auxiliary_px[2] += α * T
             end
 
             T = T_tmp
@@ -215,12 +202,16 @@ end
         to_do -= block_size
     end
 
-    if inside
+    @inbounds if inside
         px, py = pix .+ 1i32
-        @inbounds accum_α[px, py] = T
-        @inbounds n_contrib[px, py] = last_contributor
+        accum_α[px, py] = T
+        n_contrib[px, py] = last_contributor
         @inbounds for c in 1i32:channels
             out_color[c, px, py] = color[c] + T * bg_color[c]
+        end
+        @inbounds if A !== Nothing
+            auxiliary[1, px, py] = auxiliary_px[1]
+            auxiliary[2, px, py] = auxiliary_px[2]
         end
     end
 end
@@ -283,7 +274,7 @@ end
     if backward
         x_grad_mul = ifelse(abs(pxpz) > lim_xy[1], 0f0, 1f0)
         y_grad_mul = ifelse(abs(pypz) > lim_xy[2], 0f0, 1f0)
-        return cov_sub, T, W, Vrk, t, x_grad_mul, y_grad_mul
+        return cov_sub, J, T, W, Vrk, t, x_grad_mul, y_grad_mul
     else
         return cov_sub
     end
@@ -316,10 +307,9 @@ Convert spherical harmonics coefficients of each Gaussian to a RGB color.
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
     shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
 ) where degree
-    dir = normalize(point - camera_position)
-
     @inbounds res = SH0 * shs[1]
     if degree > 0
+        dir = normalize(point - camera_position)
         x, y, z = dir
         @inbounds res = res - SH1 * y * shs[2] + SH1 * z * shs[3] - SH1 * x * shs[4]
         if degree > 1

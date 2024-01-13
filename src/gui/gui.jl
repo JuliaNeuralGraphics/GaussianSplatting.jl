@@ -1,3 +1,6 @@
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
 include("ui_state.jl")
 include("render_state.jl")
 include("camera_path.jl")
@@ -67,7 +70,11 @@ end
     CaptureScreen
 end
 
-mutable struct GSGUI
+mutable struct GSGUI{
+    G <: GaussianModel,
+    T <: Maybe{Trainer},
+    R <: GaussianRasterizer,
+}
     context::NGL.Context
     screen::Screen
     frustum::NGL.Frustum
@@ -78,39 +85,96 @@ mutable struct GSGUI
     capture_mode::CaptureMode
 
     camera::Camera
-    trainer::Trainer
+    gaussians::G
+    rasterizer::R
+    trainer::T
 end
 
-function GSGUI(dataset_path::String)
+const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
+
+function resize_callback(_, width, height)
+    (width == 0 || height == 0) && return # Window minimized.
+
+    NGL.set_viewport(width, height)
+    isassigned(GSGUI_REF) || return
+
+    width, height = 16 * cld(width, 16), 16 * cld(height, 16)
+
+    gsgui::GSGUI = GSGUI_REF[]
+    NGL.resize!(gsgui.render_state.surface; width, height)
+
+    set_resolution!(gsgui.camera; width, height)
+    kab = get_backend(gsgui.rasterizer)
+    # TODO free the old one before creating new one.
+    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera;
+        auxiliary=has_auxiliary(gsgui.rasterizer))
+    gsgui.render_state.need_render = true
+    return
+end
+
+# Viewer-only mode.
+function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     kab = Backend
     get_module(kab).allowscalar(false)
 
     NGL.init(3, 0)
-    # TODO init with correct aspect ratio
-    context = NGL.Context("GaussianSplatting.jl";
-        # width=1920, height=1080, resizable=false,
-        fullscreen=true)
+    context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
+    NGL.set_resize_callback!(context, resize_callback)
 
     font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
     fonts = unsafe_load(CImGui.GetIO().Fonts)
     CImGui.AddFontFromFileTTF(fonts, font_file, 16)
 
-    cameras_file = joinpath(dataset_path, "sparse/0/cameras.bin")
-    images_file = joinpath(dataset_path, "sparse/0/images.bin")
-    points_file = joinpath(dataset_path, "sparse/0/points3D.bin")
-    images_dir = joinpath(dataset_path, "images")
-    dataset = ColmapDataset(kab;
-        cameras_file, images_file, points_file, images_dir,
-        scale=4)
+    # Set up renderer.
+    set_resolution!(camera; (;
+        width=16 * cld(context.width, 16),
+        height=16 * cld(context.height, 16))...)
+    rasterizer = GaussianRasterizer(kab, camera; auxiliary=true)
+
+    render_state = RenderState(; surface=NGL.RenderSurface(;
+        internal_format=GL_RGB32F, data_type=GL_FLOAT,
+        resolution(camera)...))
+    control_settings = ControlSettings()
+    ui_state = UIState()
+
+    capture_mode = CaptureMode()
+
+    trainer = nothing
+    gsgui = GSGUI(
+        context, MainScreen, NGL.Frustum(), render_state, ui_state,
+        control_settings, capture_mode, camera,
+        gaussians, rasterizer, trainer)
+    GSGUI_REF[] = gsgui
+    return gsgui
+end
+
+# Training mode.
+function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
+    kab = Backend
+    get_module(kab).allowscalar(false)
+
+    NGL.init(3, 0)
+    context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
+    NGL.set_resize_callback!(context, resize_callback)
+
+    font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
+    fonts = unsafe_load(CImGui.GetIO().Fonts)
+    CImGui.AddFontFromFileTTF(fonts, font_file, 16)
+
+    dataset = ColmapDataset(kab, dataset_path; scale)
 
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
+    # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(dataset.cameras[1])
-    # TODO show camera resolution in UI
-    @show resolution(camera)
+    set_resolution!(camera; (;
+        width=16 * cld(context.width, 16),
+        height=16 * cld(context.height, 16))...)
+    gui_rasterizer = GaussianRasterizer(kab, camera; auxiliary=true)
+
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
         resolution(camera)...))
@@ -121,10 +185,13 @@ function GSGUI(dataset_path::String)
 
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
-        control_settings, capture_mode, camera, trainer)
-
+        control_settings, capture_mode, camera,
+        gaussians, gui_rasterizer, trainer)
+    GSGUI_REF[] = gsgui
     return gsgui
 end
+
+viewer_only(gui::GSGUI) = isnothing(gui.trainer)
 
 function launch!(gui::GSGUI)
     NGL.render_loop(gui.context) do
@@ -139,17 +206,22 @@ end
 
 function loop!(gui::GSGUI)
     frame_time = update_time!(gui.render_state)
-    NGL.imgui_begin(gui.context)
+    NGL.imgui_begin()
 
     # Handle controls.
+    mouse_in_ui = is_mouse_in_ui()
 
     handle_ui!(gui; frame_time)
-    gui.render_state.need_render |= handle_keyboard!(
-        gui.control_settings, gui.camera; frame_time)
-    gui.render_state.need_render |= handle_mouse!(
-        gui.control_settings, gui.camera)
+    if !mouse_in_ui
+        controller_id = gui.ui_state.controller_mode[]
 
-    do_train = gui.ui_state.train[] && !is_mouse_in_ui()
+        gui.render_state.need_render |= handle_keyboard!(
+            gui.control_settings, gui.camera; frame_time, controller_id)
+        gui.render_state.need_render |= handle_mouse!(
+            gui.control_settings, gui.camera; controller_id)
+    end
+
+    do_train = gui.ui_state.train[] && !mouse_in_ui
     if do_train
         gui.ui_state.loss = step!(gui.trainer)
         gui.render_state.need_render = true
@@ -170,7 +242,7 @@ function loop!(gui::GSGUI)
     P = NeuralGraphicsGL.perspective(gui.camera)
     L = NeuralGraphicsGL.look_at(gui.camera)
 
-    if gui.ui_state.draw_cameras[]
+    if !viewer_only(gui) && gui.ui_state.draw_cameras[]
         dataset = gui.trainer.dataset
         for view_id in 1:length(dataset)
             camera = dataset.cameras[view_id]
@@ -181,40 +253,150 @@ function loop!(gui::GSGUI)
         end
     end
 
-    NGL.imgui_end(gui.context)
-    glfwSwapBuffers(gui.context.window)
-    glfwPollEvents()
+    NGL.imgui_end()
+    GLFW.SwapBuffers(gui.context.window)
+    GLFW.PollEvents()
     return
 end
 
 function handle_ui!(gui::GSGUI; frame_time)
-    CImGui.Begin("GaussianSplatting")
+    if CImGui.Begin("GaussianSplatting")
+        if CImGui.BeginTabBar("bar")
+            if CImGui.BeginTabItem("Controls")
+                (; width, height) = resolution(gui.camera)
+                CImGui.Text("Render Resolution: $width x $height")
+                CImGui.Text("N Gaussians: $(size(gui.gaussians.points, 2))")
 
-    CImGui.Text("Steps: $(gui.trainer.step)")
-    CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=6))")
-    if CImGui.Checkbox("Train", gui.ui_state.train)
-        GC.gc(false)
-        GC.gc(true)
+                CImGui.Checkbox("Render", gui.ui_state.render)
+
+                CImGui.PushItemWidth(-100)
+                CImGui.Combo("Controller", gui.ui_state.controller_mode,
+                    gui.ui_state.controller_modes, length(gui.ui_state.controller_modes),
+                )
+
+                CImGui.PushItemWidth(-100)
+                max_sh_degree = gui.gaussians.sh_degree
+                if CImGui.SliderInt(
+                    "SH degree", gui.ui_state.sh_degree,
+                    -1, max_sh_degree, "%d / $max_sh_degree",
+                )
+                    gui.render_state.need_render = true
+                end
+
+                CImGui.PushItemWidth(-100)
+                if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+                    gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+                )
+                    gui.render_state.need_render = true
+                end
+
+                if !viewer_only(gui)
+                    CImGui.Separator()
+
+                    CImGui.BeginTable("##checkbox-table", 2)
+
+                    # Row 1.
+                    CImGui.TableNextRow()
+                    CImGui.TableNextColumn()
+                    CImGui.Text("Steps: $(gui.trainer.step)")
+                    CImGui.TableNextColumn()
+                    CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
+
+                    # Row 2.
+                    CImGui.TableNextRow()
+                    CImGui.TableNextColumn()
+                    if CImGui.Checkbox("Train", gui.ui_state.train)
+                        GC.gc(false)
+                        GC.gc(true)
+                    end
+                    CImGui.TableNextColumn()
+                    CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+                    CImGui.EndTable()
+
+                    image_filenames = gui.trainer.dataset.image_filenames
+                    CImGui.Text("Camera view:")
+                    CImGui.PushItemWidth(-1)
+                    if CImGui.ListBox("##views", gui.ui_state.selected_view,
+                        image_filenames, length(image_filenames),
+                    )
+                        vid = gui.ui_state.selected_view[] + 1
+                        set_c2w!(gui.camera, gui.trainer.dataset.cameras[vid].c2w)
+                        gui.render_state.need_render = true
+                    end
+                end
+                CImGui.EndTabItem()
+            end
+
+            if CImGui.BeginTabItem("Save/Load")
+                CImGui.Text("Path to Save Directory:")
+
+                CImGui.PushItemWidth(-1)
+                CImGui.InputText(
+                    "##savedir-inputtext", pointer(gui.ui_state.save_directory_path),
+                    length(gui.ui_state.save_directory_path))
+
+                if CImGui.Button("Save", CImGui.ImVec2(-1, 0))
+                    save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
+                    isdir(save_dir) || mkpath(save_dir)
+
+                    tstmp = now()
+                    fmt = "timestamp-$(month(tstmp))-$(day(tstmp))-$(hour(tstmp)):$(minute(tstmp))"
+                    save_file = joinpath(save_dir, "state-(step-$(gui.trainer.step))-($fmt).bson")
+                    save_state(gui.trainer, save_file)
+                end
+                CImGui.Separator()
+
+                CImGui.Text("Path to State File (.bson):")
+                CImGui.PushItemWidth(-1)
+                CImGui.InputText(
+                    "##statefile-inputtext", pointer(gui.ui_state.state_file),
+                    length(gui.ui_state.state_file))
+
+                if CImGui.Button("Load", CImGui.ImVec2(-1, 0))
+                    state_file = unsafe_string(pointer(gui.ui_state.state_file))
+                    if isfile(state_file)
+                        if endswith(state_file, ".bson")
+                            load_state!(gui.trainer, state_file)
+                            gui.render_state.need_render = true
+                        else
+                            gui.ui_state.state_file = Vector{UInt8}(
+                                "<invalid-file-extension>" * "\0"^512)
+                        end
+                    else
+                        gui.ui_state.state_file = Vector{UInt8}(
+                            "<file-does-not-exist>" * "\0"^512)
+                    end
+                end
+                CImGui.EndTabItem()
+            end
+
+            if CImGui.BeginTabItem("Utils")
+                if CImGui.Button("Capture Video", CImGui.ImVec2(-1, 0))
+                    GC.gc(false)
+                    GC.gc(true)
+                    gui.screen = CaptureScreen
+                    NGL.set_resizable_window!(gui.context, false)
+                end
+                CImGui.EndTabItem()
+            end
+
+            if CImGui.BeginTabItem("Help")
+                CImGui.TextWrapped("FPV controller:")
+                CImGui.TextWrapped("- Left Mouse to rotate camera.")
+                CImGui.TextWrapped("- WASD to move the camera.")
+                CImGui.TextWrapped("- QE to move the camera up/down.")
+                CImGui.TextWrapped("- R + Left Mouse to control the roll.")
+                CImGui.TextWrapped(" ")
+
+                CImGui.TextWrapped("Orbiting controller:")
+                CImGui.TextWrapped("- Left Mouse to shift camera sideways and forward/backward.")
+                CImGui.TextWrapped("- F + Left Mouse to shift camera sideways and up/down.")
+                CImGui.TextWrapped("- Right Mouse to orbit camera.")
+                CImGui.EndTabItem()
+            end
+            CImGui.EndTabBar()
+        end
     end
-    CImGui.Checkbox("Render", gui.ui_state.render)
-    CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
-
-    image_filenames = gui.trainer.dataset.image_filenames
-    CImGui.PushItemWidth(-100)
-    if CImGui.Combo("View", gui.ui_state.selected_view,
-        image_filenames, length(image_filenames),
-    )
-        vid = gui.ui_state.selected_view[] + 1
-        gui.camera = deepcopy(gui.trainer.dataset.cameras[vid])
-        gui.render_state.need_render = true
-    end
-
-    if CImGui.Button("Capture Mode", CImGui.ImVec2(-1, 0))
-        GC.gc(false)
-        GC.gc(true)
-        gui.screen = CaptureScreen
-    end
-
     CImGui.End()
     return
 end
@@ -228,15 +410,29 @@ function render!(gui::GSGUI)
         gui.render_state.need_render = false
     end
 
-    gs = gui.trainer.gaussians
-    rast = gui.trainer.rast
+    gs = gui.gaussians
+    rast = gui.rasterizer
 
-    shs = hcat(gs.features_dc, gs.features_rest)
+    ui_sh_degree::Int = gui.ui_state.sh_degree[]
+    sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree
+
+    shs = isempty(gs.features_rest) ?
+        gs.features_dc :
+        hcat(gs.features_dc, gs.features_rest)
     rast(
         gs.points, gs.opacities, gs.scales,
-        gs.rotations, shs; camera=gui.camera, sh_degree=gs.sh_degree)
+        gs.rotations, shs; camera=gui.camera, sh_degree)
 
-    tex = gl_texture(rast)
+    # TODO pre-allocate
+    mode = gui.ui_state.selected_mode[]
+    tex = if mode == 0 # Render color.
+        gl_texture(rast)
+    elseif mode == 1 # Render depth.
+        to_gl_depth(rast)
+    elseif mode == 2 # Render uncertainty.
+        to_gl_uncertainty(rast)
+    end .|> RGB
+
     NGL.set_data!(gui.render_state.surface, tex)
     return
 end

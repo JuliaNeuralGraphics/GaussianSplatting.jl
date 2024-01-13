@@ -1,87 +1,6 @@
-mutable struct Camera
-    R::SMatrix{3, 3, Float32, 9}
-    t::SVector{3, Float32}
-    intrinsics::NU.CameraIntrinsics
-
-    w2c::SMatrix{4, 4, Float32, 16}
-    c2w::MMatrix{4, 4, Float32, 16}
-    projection::SMatrix{4, 4, Float32, 16}
-    full_projection::SMatrix{4, 4, Float32, 16}
-    camera_center::SVector{3, Float32}
-
-    img_name::String
-end
-
-function Camera(
-    R::SMatrix{3, 3, Float32, 9}, t::SVector{3, Float32};
-    intrinsics::NU.CameraIntrinsics, img_name::String,
-    znear::Float32 = 0.01f0, zfar::Float32 = 100f0,
-)
-    fov_xy = NU.focal2fov.(intrinsics.resolution, intrinsics.focal)
-    projection = NGL.perspective(fov_xy..., znear, zfar; zsign=1f0)
-
-    w2c, c2w = get_w2c(R, t)
-    full_projection = projection * w2c
-    camera_center = c2w[1:3, 4]
-
-    Camera(
-        R, t, intrinsics, w2c, c2w,
-        projection, full_projection,
-        camera_center, img_name)
-end
-
-resolution(c::Camera) = (;
-    width=Int(c.intrinsics.resolution[1]),
-    height=Int(c.intrinsics.resolution[2]))
-
-view_dir(c::Camera) = SVector{3, Float32}(@view(c.c2w[1:3, 3])...)
-
-view_up(c::Camera) = SVector{3, Float32}(@view(c.c2w[1:3, 2])...)
-
-view_side(c::Camera) = SVector{3, Float32}(@view(c.c2w[1:3, 1])...)
-
-view_pos(c::Camera) = SVector{3, Float32}(@view(c.c2w[1:3, 4])...)
-
-look_at(c::Camera) = view_pos(c) .+ view_dir(c)
-
-function get_w2c(R::SMatrix{3, 3, Float32, 9}, t::SVector{3, Float32})
-    P = zeros(MMatrix{4, 4, Float32, 16})
-    P[1:3, 1:3] .= R
-    P[1:3, 4] .= t
-    P[4, 4] = 1f0
-
-    w2c = P
-    c2w = inv(P)
-    return w2c, c2w
-end
-
-function set_c2w!(c::Camera, R, t)
-    c.c2w[1:3, 1:3] .= R
-    c.c2w[1:3, 4] .= t
-    _upd!(c)
-end
-
-function shift!(c::Camera, relative)
-    c.c2w[1:3, 4] .+= @view(c.c2w[1:3, 1:3]) * relative
-    _upd!(c)
-end
-
-function rotate!(c::Camera, rotation)
-    c.c2w[1:3, 1:3] .= rotation * @view(c.c2w[1:3, 1:3])
-    _upd!(c)
-end
-
-function _upd!(c::Camera)
-    w2c = inv(c.c2w)
-    c.w2c, _ = get_w2c(
-        SMatrix{3, 3, Float32}(w2c[1:3, 1:3]),
-        SVector{3, Float32}(w2c[1:3, 4]))
-
-    c.full_projection = c.projection * c.w2c
-    c.camera_center = c.c2w[1:3, 4]
-    return
-end
-
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
 struct ColmapDataset{
     P <: AbstractMatrix{Float32},
     C <: AbstractMatrix{Float32},
@@ -93,7 +12,17 @@ struct ColmapDataset{
     cameras::Vector{Camera}
     images::I
 
+    camera_extent::Float32
+
     image_filenames::Vector{String}
+end
+
+function ColmapDataset(kab, dataset_dir::String; scale::Int = 1)
+    cameras_file = joinpath(dataset_dir, "sparse/0/cameras.bin")
+    images_file = joinpath(dataset_dir, "sparse/0/images.bin")
+    points_file = joinpath(dataset_dir, "sparse/0/points3D.bin")
+    images_dir = joinpath(dataset_dir, "images")
+    ColmapDataset(kab; cameras_file, images_file, points_file, scale, images_dir)
 end
 
 function ColmapDataset(kab;
@@ -122,13 +51,19 @@ function ColmapDataset(kab;
         new_focal, principal, new_resolution)
 
     # Load cameras and images.
-    image_filenames = String[]
+    camera_centers = SVector{3, Float32}[]
     cameras = Camera[]
+
+    image_filenames = String[]
     images_list = Array{UInt8, 3}[]
     for (id, img) in images
         R = SMatrix{3, 3, Float32, 9}(QuatRotation(img.q...))
         t = SVector{3, Float32}(img.t...)
-        push!(cameras, Camera(R, t; intrinsics, img_name=img.name))
+        cam = Camera(R, t; intrinsics, img_name=img.name)
+
+        push!(camera_centers, cam.camera_center)
+        push!(cameras, cam)
+
         push!(image_filenames, img.name)
 
         image = load(joinpath(images_dir, img.name))
@@ -141,23 +76,35 @@ function ColmapDataset(kab;
     end
     images = cat(images_list...; dims=4)
 
-    # Estimate initial covariance as an isotropic Gaussian with axes equal
-    # to log of the mean of the distance to the closest 3 neighbors.
-    kdtree = KDTree(points.points_3d)
-    _, dists = knn(kdtree, points.points_3d, 3 + 1, true #= sort results =#)
+    # Compute cameras extent which is used for scaling learning rate
+    # and densification.
+    scene_center = sum(camera_centers) ./ length(camera_centers)
+    scene_diagonal = maximum(map(c -> norm(c - scene_center), camera_centers))
+    camera_extent::Float32 = scene_diagonal * 1.1f0
 
-    n_points = size(points.points_3d, 2)
-    scales = Matrix{Float32}(undef, 3, n_points)
-    for (i, d) in enumerate(dists)
-        md = mean(@view(d[2:end]).^2)
-        scales[:, i] .= log(sqrt(max(1f-7, md)))
-    end
+    scales = compute_scales(points.points_3d)
 
     ColmapDataset(
         adapt(kab, Float32.(points.points_3d)),
         adapt(kab, Float32.(points.points_colors) ./ 255f0),
         adapt(kab, scales),
-        cameras, images, image_filenames)
+        cameras, images, camera_extent, image_filenames)
+end
+
+function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)
+    # Estimate initial covariance as an isotropic Gaussian with axes equal
+    # to log of the mean of the distance to the closest 3 neighbors.
+    kdtree = KDTree(xyz)
+    _, dists = knn(kdtree, xyz, 3 + 1, true #= sort results =#)
+
+    n_points = size(xyz, 2)
+    scales = Matrix{Float32}(undef, 3, n_points)
+    for (i, d) in enumerate(dists)
+        md = mean(@view(d[2:end]).^2)
+        scales[:, i] .= log(sqrt(max(1f-7, md) * point_size))
+    end
+
+    return scales
 end
 
 Base.length(d::ColmapDataset) = length(d.cameras)

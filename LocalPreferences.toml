@@ -1,6 +1,9 @@
 [AMDGPU]
-hard_memory_limit="80 %"
+soft_memory_limit = "80 %"
+hard_memory_limit = "80 %"
+
 [Flux]
 gpu_backend = "AMDGPU"
+
 [GaussianSplatting]
-backend="AMDGPU"
+backend = "AMDGPU"

@@ -1,3 +1,6 @@
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
 function is_valid_backend(name::String)
     (name == "AMDGPU" || name == "CUDA") && return name
     error("""
@@ -25,9 +28,17 @@ const BACKEND_NAME::String = backend_name()
     const Backend::ROCBackend = ROCBackend()
 
     get_module(::ROCBackend) = AMDGPU
+
+    function synchronize_count(predicate::Cint)
+        # TODO without s_barrier we get render artifacts.
+        @synchronize()
+        AMDGPU.sync_workgroup_count(predicate)
+    end
 elseif BACKEND_NAME == "CUDA"
     using CUDA
     const Backend::CUDABackend = CUDABackend()
 
     get_module(::CUDABackend) = CUDA
+
+    synchronize_count(predicate::Cint) = CUDA.sync_threads_count(predicate)
 end

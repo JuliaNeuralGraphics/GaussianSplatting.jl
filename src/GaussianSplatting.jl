@@ -1,7 +1,13 @@
+# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# This software is free for non-commercial, research and evaluation use
+# under the terms of the LICENSE.md file.
 module GaussianSplatting
+
+using VideoIO
 
 using Adapt
 using ChainRulesCore
+using Dates
 using Distributions
 using KernelAbstractions
 using KernelAbstractions: @atomic
@@ -22,14 +28,18 @@ using Zygote
 using NeuralGraphicsGL
 using ModernGL
 using CImGui
-using CImGui.ImGuiGLFWBackend.LibGLFW
-using VideoIO
+using GLFW
 
+import CImGui.lib as iglib
+
+import BSON
 import Flux
 import ImageFiltering
 import KernelAbstractions as KA
 import NerfUtils as NU
 import NeuralGraphicsGL as NGL
+
+const Maybe{T} = Union{T, Nothing}
 
 struct Literal{T} end
 Base.:(*)(x, ::Type{Literal{T}}) where {T} = T(x)
@@ -40,6 +50,8 @@ const BLOCK::SVector{2, Int32} = SVector{2, Int32}(16i32, 16i32)
 const BLOCK_SIZE::Int32 = 256i32
 
 include("kautils.jl")
+include("utils.jl")
+include("camera.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
@@ -47,54 +59,70 @@ include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
 
-"""
-TODO
-- [GUI] toggle for densification
-- [GUI] disable resizable for capture mode
-- [GUI] change rendering resolution
-
-- compute camera extent (needed for gaussians model from PC)
-- printout stats
-"""
-
-function main(dataset_path::String)
+function main(dataset_path::String, scale::Int = 1)
     kab = Backend
     get_module(kab).allowscalar(false)
 
-    cameras_file = joinpath(dataset_path, "sparse/0/cameras.bin")
-    images_file = joinpath(dataset_path, "sparse/0/images.bin")
-    points_file = joinpath(dataset_path, "sparse/0/points3D.bin")
-    images_dir = joinpath(dataset_path, "images")
-
-    dataset = ColmapDataset(kab;
-        cameras_file, images_file, points_file, images_dir,
-        scale=8)
+    dataset = ColmapDataset(kab, dataset_path; scale)
     opt_params = OptimizationParams()
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:10
+    for i in 1:3000
         loss = step!(trainer)
         @show i, loss
 
         if trainer.step % 100 == 0
-            camera = trainer.dataset.cameras[1]
+            cam_idx = rand(1:length(trainer.dataset.cameras))
+            camera = trainer.dataset.cameras[cam_idx]
 
-            shs = hcat(gaussians.features_dc, gaussians.features_rest)
+            shs = isempty(gaussians.features_rest) ?
+                gaussians.features_dc :
+                hcat(gaussians.features_dc, gaussians.features_rest)
             rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
-                gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
-            final_img = to_image(rasterizer)
-            save("image-$(trainer.step).png", final_img)
+                gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree,
+                covisibility=nothing)
+
+            save("image-$(trainer.step).png", to_image(rasterizer))
+
+            if has_auxiliary(rasterizer)
+                depth_img = to_depth(rasterizer; normalize=true)
+                uncertainty_img = to_uncertainty(rasterizer)
+                save("depth-$(trainer.step).png", depth_img)
+                save("uncertainty-$(trainer.step).png", uncertainty_img)
+            end
         end
     end
+
+    save_state(trainer, "../state.bson")
     return
 end
 
-function gui(dataset_path::String)
-    gsgui = GSGUI(dataset_path)
-    launch!(gsgui)
+function gui(
+    dataset_path::String, scale::Int = 8; fullscreen::Bool = false,
+)
+    width, height, resizable = fullscreen ?
+        (-1, -1, false) :
+        (1024, 1024, true)
+
+    gui = GSGUI(dataset_path, scale; width, height, fullscreen, resizable)
+    gui |> launch!
+    return
+end
+
+function gui(model_path::String, camera::Camera; fullscreen::Bool = false)
+    width, height, resizable = fullscreen ?
+        (-1, -1, false) :
+        (1024, 1024, true)
+
+    gaussians = GaussianModel(Backend)
+    θ = BSON.load(model_path)
+    set_from_bson!(gaussians, θ[:gaussians])
+
+    gui = GSGUI(gaussians, camera; width, height, fullscreen, resizable)
+    gui |> launch!
     return
 end
 
