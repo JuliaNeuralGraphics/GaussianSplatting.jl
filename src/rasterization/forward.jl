@@ -15,39 +15,6 @@ Note:
     grid, block, focal_xy, tan_fov_xy, scale_modifier,
 )
     i = @index(Global)
-    __preprocess!(
-        cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched,
-        rgbs, clamped, means, scales, rotations, spherical_harmonics, sh_degree,
-        opacities, projection, view, camera_position, resolution,
-        grid, block, focal_xy, tan_fov_xy, scale_modifier, i)
-end
-
-# Use a separate function, so that we can use `return` statements...
-@inline function __preprocess!(
-    # Outputs.
-    cov3Ds::AbstractVector{SVector{6, Float32}},
-    depths::AbstractVector{Float32},
-    radii::AbstractVector{Int32},
-    pixels::AbstractVector{SVector{2, Float32}},
-    conic_opacities::AbstractVector{SVector{4, Float32}},
-    tiles_touched::AbstractVector{Int32},
-    rgbs::AbstractVector{SVector{3, Float32}},
-    clamped::AbstractVector{SVector{3, Bool}},
-    # Inputs.
-    means::AbstractVector{SVector{3, Float32}},
-    scales::AbstractVector{SVector{3, Float32}},
-    rotations::AbstractVector{SVector{4, Float32}},
-    spherical_harmonics::AbstractMatrix{SVector{3, Float32}},
-    sh_degree,
-    opacities::AbstractMatrix{Float32},
-    projection::SMatrix{4, 4, Float32, 16},
-    view::SMatrix{4, 4, Float32, 16},
-    camera_position::SVector{3, Float32},
-    resolution::SVector{2, Int32},
-    grid::SVector{2, Int32}, block::SVector{2, Int32},
-    focal_xy::SVector{2, Float32}, tan_fov_xy::SVector{2, Float32},
-    scale_modifier::Float32, i::Int,
-)
     @inbounds radii[i] = 0i32
     @inbounds tiles_touched[i] = 0i32
 
@@ -97,7 +64,6 @@ end
         rgbs[i], clamped[i] = compute_colors_from_sh(
             point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
     end
-    return
 end
 
 @kernel function render!(
