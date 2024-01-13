@@ -159,9 +159,7 @@ end
     # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
         # End if entire block votes it is done rasterizing.
-        # TODO expose workgroup sync API in KA
-        AMDGPU.sync_workgroup_count(done) == block_size && break
-        # CUDA.sync_threads_count(done) == block_size && break
+        synchronize_count(done) == block_size && break
 
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.

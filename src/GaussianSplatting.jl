@@ -57,7 +57,7 @@ TODO
 - printout stats
 """
 
-function main(dataset_path::String)
+function main(dataset_path::String, scale::Int = 8)
     kab = Backend
     get_module(kab).allowscalar(false)
 
@@ -67,8 +67,7 @@ function main(dataset_path::String)
     images_dir = joinpath(dataset_path, "images")
 
     dataset = ColmapDataset(kab;
-        cameras_file, images_file, points_file, images_dir,
-        scale=8)
+        cameras_file, images_file, points_file, images_dir, scale)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
@@ -92,8 +91,8 @@ function main(dataset_path::String)
     return
 end
 
-function gui(dataset_path::String)
-    gsgui = GSGUI(dataset_path)
+function gui(dataset_path::String, scale::Int = 8)
+    gsgui = GSGUI(dataset_path, scale)
     launch!(gsgui)
     return
 end

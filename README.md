@@ -30,8 +30,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory")
      [GaussianSplatting]
      backend="AMDGPU"
      ```
-  2. **TEMPORARY STEP:** uncomment this line and comment-out the line right below it:
-      https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/blob/43c83999bf2d12b42d022e603c9e817206b5fe1d/src/rasterization/forward.jl#L163
 
 - Nvidia GPU:
   1. In `LocalPreferences.toml` set:
@@ -41,8 +39,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory")
      [GaussianSplatting]
      backend="CUDA"
      ```
-  2. **TEMPORARY STEP:** comment-out this line and uncomment the line right below it:
-      https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/blob/43c83999bf2d12b42d022e603c9e817206b5fe1d/src/rasterization/forward.jl#L163
 
 ## Datasets
 

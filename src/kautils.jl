@@ -25,9 +25,13 @@ const BACKEND_NAME::String = backend_name()
     const Backend::ROCBackend = ROCBackend()
 
     get_module(::ROCBackend) = AMDGPU
+
+    synchronize_count(predicate::Cint) = AMDGPU.sync_workgroup_count(predicate)
 elseif BACKEND_NAME == "CUDA"
     using CUDA
     const Backend::CUDABackend = CUDABackend()
 
     get_module(::CUDABackend) = CUDA
+
+    synchronize_count(predicate::Cint) = CUDA.sync_threads_count(predicate)
 end

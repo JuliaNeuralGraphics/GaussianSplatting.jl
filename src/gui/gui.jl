@@ -81,7 +81,7 @@ mutable struct GSGUI
     trainer::Trainer
 end
 
-function GSGUI(dataset_path::String)
+function GSGUI(dataset_path::String, scale::Int)
     kab = Backend
     get_module(kab).allowscalar(false)
 
@@ -100,8 +100,7 @@ function GSGUI(dataset_path::String)
     points_file = joinpath(dataset_path, "sparse/0/points3D.bin")
     images_dir = joinpath(dataset_path, "images")
     dataset = ColmapDataset(kab;
-        cameras_file, images_file, points_file, images_dir,
-        scale=4)
+        cameras_file, images_file, points_file, images_dir, scale)
 
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
