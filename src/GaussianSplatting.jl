@@ -92,7 +92,7 @@ function main(dataset_path::String, scale::Int = 8)
     return
 end
 
-function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = true)
+function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = false)
     gsgui = if fullscreen
         GSGUI(dataset_path, scale; fullscreen=true, resizable=false)
     else
