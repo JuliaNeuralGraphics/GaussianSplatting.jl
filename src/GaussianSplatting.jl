@@ -40,6 +40,7 @@ const BLOCK::SVector{2, Int32} = SVector{2, Int32}(16i32, 16i32)
 const BLOCK_SIZE::Int32 = 256i32
 
 include("kautils.jl")
+include("camera.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
@@ -73,11 +74,11 @@ function main(dataset_path::String, scale::Int = 8)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:10
+    for i in 1:1000
         loss = step!(trainer)
         @show i, loss
 
-        if trainer.step % 100 == 0
+        if trainer.step % 1000 == 0
             camera = trainer.dataset.cameras[1]
 
             shs = hcat(gaussians.features_dc, gaussians.features_rest)
@@ -91,9 +92,13 @@ function main(dataset_path::String, scale::Int = 8)
     return
 end
 
-function gui(dataset_path::String, scale::Int = 8)
-    gsgui = GSGUI(dataset_path, scale)
-    launch!(gsgui)
+function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = true)
+    gsgui = if fullscreen
+        GSGUI(dataset_path, scale; fullscreen=true, resizable=false)
+    else
+        GSGUI(dataset_path, scale; width=1024, height=1024, resizable=true)
+    end
+    gsgui |> launch!
     return
 end
 
