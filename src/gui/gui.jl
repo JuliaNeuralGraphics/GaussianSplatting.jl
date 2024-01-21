@@ -67,7 +67,10 @@ end
     CaptureScreen
 end
 
-mutable struct GSGUI
+mutable struct GSGUI{
+    T <: Trainer,
+    R <: GaussianRasterizer,
+}
     context::NGL.Context
     screen::Screen
     frustum::NGL.Frustum
@@ -78,18 +81,38 @@ mutable struct GSGUI
     capture_mode::CaptureMode
 
     camera::Camera
-    trainer::Trainer
+    rasterizer::R
+    trainer::T
 end
 
-function GSGUI(dataset_path::String, scale::Int)
+const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
+
+function resize_callback(_, width, height)
+    (width == 0 || height == 0) && return # Window minimized.
+
+    NGL.set_viewport(width, height)
+    isassigned(GSGUI_REF) || return
+
+    width, height = 16 * cld(width, 16), 16 * cld(height, 16)
+
+    gsgui::GSGUI = GSGUI_REF[]
+    NGL.resize!(gsgui.render_state.surface; width, height)
+
+    set_resolution!(gsgui.camera; width, height)
+    kab = get_backend(gsgui.rasterizer)
+    # TODO free the old one before creating new one.
+    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera)
+    gsgui.render_state.need_render = true
+    return
+end
+
+function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     kab = Backend
     get_module(kab).allowscalar(false)
 
     NGL.init(3, 0)
-    # TODO init with correct aspect ratio
-    context = NGL.Context("GaussianSplatting.jl";
-        # width=1920, height=1080, resizable=false,
-        fullscreen=true)
+    context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
+    NeuralGraphicsGL.set_resize_callback!(context, resize_callback)
 
     font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
     fonts = unsafe_load(CImGui.GetIO().Fonts)
@@ -107,7 +130,14 @@ function GSGUI(dataset_path::String, scale::Int)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
+    # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(dataset.cameras[1])
+    render_resolution = (;
+        width=16 * cld(context.width, 16),
+        height=16 * cld(context.height, 16))
+    set_resolution!(camera; render_resolution...)
+    gui_rasterizer = GaussianRasterizer(kab, camera)
+
     # TODO show camera resolution in UI
     @show resolution(camera)
     render_state = RenderState(; surface=NGL.RenderSurface(;
@@ -120,8 +150,8 @@ function GSGUI(dataset_path::String, scale::Int)
 
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
-        control_settings, capture_mode, camera, trainer)
-
+        control_settings, capture_mode, camera, gui_rasterizer, trainer)
+    GSGUI_REF[] = gsgui
     return gsgui
 end
 
@@ -189,6 +219,9 @@ end
 function handle_ui!(gui::GSGUI; frame_time)
     CImGui.Begin("GaussianSplatting")
 
+    (; width, height) = resolution(gui.camera)
+    CImGui.Text("Render Resolution: $width x $height")
+    CImGui.Text("N Gaussians: $(size(gui.trainer.gaussians.points, 2))")
     CImGui.Text("Steps: $(gui.trainer.step)")
     CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=6))")
     if CImGui.Checkbox("Train", gui.ui_state.train)
@@ -204,7 +237,7 @@ function handle_ui!(gui::GSGUI; frame_time)
         image_filenames, length(image_filenames),
     )
         vid = gui.ui_state.selected_view[] + 1
-        gui.camera = deepcopy(gui.trainer.dataset.cameras[vid])
+        set_c2w!(gui.camera, gui.trainer.dataset.cameras[vid].c2w)
         gui.render_state.need_render = true
     end
 
@@ -212,6 +245,7 @@ function handle_ui!(gui::GSGUI; frame_time)
         GC.gc(false)
         GC.gc(true)
         gui.screen = CaptureScreen
+        NeuralGraphicsGL.set_resizable_window!(gui.context, false)
     end
 
     CImGui.End()
@@ -228,7 +262,7 @@ function render!(gui::GSGUI)
     end
 
     gs = gui.trainer.gaussians
-    rast = gui.trainer.rast
+    rast = gui.rasterizer
 
     shs = hcat(gs.features_dc, gs.features_rest)
     rast(

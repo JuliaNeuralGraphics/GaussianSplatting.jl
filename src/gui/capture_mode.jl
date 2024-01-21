@@ -166,7 +166,7 @@ function loop!(capture_mode::CaptureMode; gui)
 
     # Save rendered frame.
     if capture_mode.is_rendering
-        frame = RGB{N0f8}.(to_image(gui.trainer.rast))
+        frame = RGB{N0f8}.(to_image(gui.rasterizer))
 
         save_dir = unsafe_string(pointer(capture_mode.save_dir))
         if capture_mode.save_frames[]

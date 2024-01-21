@@ -1,6 +1,6 @@
 [AMDGPU]
 hard_memory_limit="80 %"
 [Flux]
-gpu_backend = "AMDGPU"
+gpu_backend = "CUDA"
 [GaussianSplatting]
-backend="AMDGPU"
+backend="CUDA"
