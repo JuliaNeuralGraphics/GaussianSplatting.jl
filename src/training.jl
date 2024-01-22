@@ -117,6 +117,54 @@ function Trainer(
         points_lr_scheduler, opt_params, 0, ids)
 end
 
+function bson_params(opt::NU.Adam)
+    (;
+        μ=[adapt(CPU(), i) for i in opt.μ],
+        ν=[adapt(CPU(), i) for i in opt.ν],
+        current_step=opt.current_step)
+end
+
+function set_from_bson!(opt::NU.Adam, θ)
+    kab = get_backend(opt)
+    opt.μ = [adapt(kab, i) for i in θ.μ]
+    opt.ν = [adapt(kab, i) for i in θ.ν]
+    opt.current_step = θ.current_step
+    return
+end
+
+function save_state(trainer::Trainer, filename::String)
+    optimizers = (;
+        points=bson_params(trainer.optimizers.points),
+        features_dc=bson_params(trainer.optimizers.features_dc),
+        features_rest=bson_params(trainer.optimizers.features_rest),
+        opacities=bson_params(trainer.optimizers.opacities),
+        scales=bson_params(trainer.optimizers.scales),
+        rotations=bson_params(trainer.optimizers.rotations))
+
+    BSON.bson(filename, Dict(
+        :gaussians => bson_params(trainer.gaussians),
+        :optimizers => optimizers,
+        :step => trainer.step,
+    ))
+    return
+end
+
+function load_state!(trainer::Trainer, filename::String)
+    θ = BSON.load(filename)
+    optimizers = θ[:optimizers]
+    set_from_bson!(trainer.gaussians, θ[:gaussians])
+
+    set_from_bson!(trainer.optimizers.points, optimizers.points)
+    set_from_bson!(trainer.optimizers.features_dc, optimizers.features_dc)
+    set_from_bson!(trainer.optimizers.features_rest, optimizers.features_rest)
+    set_from_bson!(trainer.optimizers.opacities, optimizers.opacities)
+    set_from_bson!(trainer.optimizers.scales, optimizers.scales)
+    set_from_bson!(trainer.optimizers.rotations, optimizers.rotations)
+
+    trainer.step = θ[:step]
+    return
+end
+
 function reset_opacity!(trainer::Trainer)
     reset_opacity!(trainer.gaussians)
     NU.reset!(trainer.optimizers.opacities)
