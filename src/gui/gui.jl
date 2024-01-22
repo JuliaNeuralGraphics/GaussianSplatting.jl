@@ -138,8 +138,6 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     set_resolution!(camera; render_resolution...)
     gui_rasterizer = GaussianRasterizer(kab, camera)
 
-    # TODO show camera resolution in UI
-    @show resolution(camera)
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
         resolution(camera)...))
