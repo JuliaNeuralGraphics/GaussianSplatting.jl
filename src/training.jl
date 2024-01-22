@@ -117,6 +117,20 @@ function Trainer(
         points_lr_scheduler, opt_params, 0, ids)
 end
 
+function save_state(trainer::Trainer, filename::String)
+    gaussians = bson_params(trainer.gaussians)
+    BSON.bson(filename, Dict(:gaussians => gaussians))
+    # TODO the rest
+    return
+end
+
+function load_state!(trainer::Trainer, filename::String)
+    θ = BSON.load(filename)
+    set_from_bson!(trainer.gaussians, θ[:gaussians])
+    # TODO the rest
+    return
+end
+
 function reset_opacity!(trainer::Trainer)
     reset_opacity!(trainer.gaussians)
     NU.reset!(trainer.optimizers.opacities)

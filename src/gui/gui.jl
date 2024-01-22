@@ -241,11 +241,36 @@ function handle_ui!(gui::GSGUI; frame_time)
         gui.render_state.need_render = true
     end
 
+    CImGui.Text("Path to save directory:")
+    CImGui.PushItemWidth(-1)
+    CImGui.InputText(
+        "##savedir-inputtext", pointer(gui.ui_state.save_directory_path),
+        length(gui.ui_state.save_directory_path))
+
+    if CImGui.Button("Save", CImGui.ImVec2(-1, 0))
+        save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
+        save_file = joinpath(save_dir, "gsp-$(gui.trainer.step).bson")
+        save_state(gui.trainer, save_file)
+    end
+
+    CImGui.Text("Path to state file:")
+    CImGui.PushItemWidth(-1)
+    CImGui.InputText(
+        "##statefile-inputtext", pointer(gui.ui_state.state_file),
+        length(gui.ui_state.state_file))
+
+    if CImGui.Button("Load", CImGui.ImVec2(-1, 0))
+        state_file = unsafe_string(pointer(gui.ui_state.state_file))
+        if isfile(state_file)
+            load_state!(gui.trainer, state_file)
+        end
+    end
+
     if CImGui.Button("Capture Mode", CImGui.ImVec2(-1, 0))
         GC.gc(false)
         GC.gc(true)
         gui.screen = CaptureScreen
-        NeuralGraphicsGL.set_resizable_window!(gui.context, false)
+        NGL.set_resizable_window!(gui.context, false)
     end
 
     CImGui.End()

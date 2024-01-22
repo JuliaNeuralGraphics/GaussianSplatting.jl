@@ -25,6 +25,7 @@ using CImGui
 using CImGui.ImGuiGLFWBackend.LibGLFW
 using VideoIO
 
+import BSON
 import Flux
 import ImageFiltering
 import KernelAbstractions as KA
@@ -51,11 +52,9 @@ include("gui/gui.jl")
 """
 TODO
 - [GUI] toggle for densification
-- [GUI] disable resizable for capture mode
-- [GUI] change rendering resolution
-
+- [GUI] slider for sh degree
+- [GUI] reset opacity toggle
 - compute camera extent (needed for gaussians model from PC)
-- printout stats
 """
 
 function main(dataset_path::String, scale::Int = 8)
@@ -74,7 +73,7 @@ function main(dataset_path::String, scale::Int = 8)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:1000
+    for i in 1:3000
         loss = step!(trainer)
         @show i, loss
 

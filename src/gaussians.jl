@@ -19,6 +19,41 @@ mutable struct GaussianModel{
     max_sh_degree::Int
 end
 
+function bson_params(m::GaussianModel)
+    return (;
+        points=adapt(CPU(), m.points),
+        features_dc=adapt(CPU(), m.features_dc),
+        features_rest=adapt(CPU(), m.features_rest),
+        scales=adapt(CPU(), m.scales),
+        rotations=adapt(CPU(), m.rotations),
+        opacities=adapt(CPU(), m.opacities),
+
+        max_radii=adapt(CPU(), m.max_radii),
+        accum_∇means_2d=adapt(CPU(), m.accum_∇means_2d),
+        denom=adapt(CPU(), m.denom),
+
+        sh_degree=m.sh_degree,
+        max_sh_degree=m.max_sh_degree)
+end
+
+function set_from_bson!(m::GaussianModel, θ)
+    kab = get_backend(m)
+    m.points = adapt(kab, θ.points)
+    m.features_dc = adapt(kab, θ.features_dc)
+    m.features_rest = adapt(kab, θ.features_rest)
+    m.scales = adapt(kab, θ.scales)
+    m.rotations = adapt(kab, θ.rotations)
+    m.opacities = adapt(kab, θ.opacities)
+
+    m.max_radii = adapt(kab, θ.max_radii)
+    m.accum_∇means_2d = adapt(kab, θ.accum_∇means_2d)
+    m.denom = adapt(kab, θ.denom)
+
+    m.sh_degree = θ.sh_degree
+    m.max_sh_degree = θ.max_sh_degree
+    return
+end
+
 function GaussianModel(
     points::AbstractMatrix{Float32}, colors::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
