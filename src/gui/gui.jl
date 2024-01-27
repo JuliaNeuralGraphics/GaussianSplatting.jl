@@ -215,62 +215,71 @@ function loop!(gui::GSGUI)
 end
 
 function handle_ui!(gui::GSGUI; frame_time)
-    CImGui.Begin("GaussianSplatting")
+    if CImGui.Begin("GaussianSplatting")
+        (; width, height) = resolution(gui.camera)
+        CImGui.Text("Render Resolution: $width x $height")
+        CImGui.Text("N Gaussians: $(size(gui.trainer.gaussians.points, 2))")
+        CImGui.Text("Steps: $(gui.trainer.step)")
+        CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=6))")
+        if CImGui.Checkbox("Train", gui.ui_state.train)
+            GC.gc(false)
+            GC.gc(true)
+        end
+        CImGui.Checkbox("Render", gui.ui_state.render)
+        CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
 
-    (; width, height) = resolution(gui.camera)
-    CImGui.Text("Render Resolution: $width x $height")
-    CImGui.Text("N Gaussians: $(size(gui.trainer.gaussians.points, 2))")
-    CImGui.Text("Steps: $(gui.trainer.step)")
-    CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=6))")
-    if CImGui.Checkbox("Train", gui.ui_state.train)
-        GC.gc(false)
-        GC.gc(true)
-    end
-    CImGui.Checkbox("Render", gui.ui_state.render)
-    CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+        CImGui.PushItemWidth(-100)
+        max_sh_degree = gui.trainer.gaussians.sh_degree
+        if CImGui.SliderInt(
+            "SH degree", gui.ui_state.sh_degree,
+            -1, max_sh_degree, "%d / $max_sh_degree",
+        )
+            gui.render_state.need_render = true
+        end
 
-    image_filenames = gui.trainer.dataset.image_filenames
-    CImGui.PushItemWidth(-100)
-    if CImGui.Combo("View", gui.ui_state.selected_view,
-        image_filenames, length(image_filenames),
-    )
-        vid = gui.ui_state.selected_view[] + 1
-        set_c2w!(gui.camera, gui.trainer.dataset.cameras[vid].c2w)
-        gui.render_state.need_render = true
-    end
+        image_filenames = gui.trainer.dataset.image_filenames
+        CImGui.PushItemWidth(-100)
+        if CImGui.Combo("View", gui.ui_state.selected_view,
+            image_filenames, length(image_filenames),
+        )
+            vid = gui.ui_state.selected_view[] + 1
+            set_c2w!(gui.camera, gui.trainer.dataset.cameras[vid].c2w)
+            gui.render_state.need_render = true
+        end
 
-    CImGui.Text("Path to save directory:")
-    CImGui.PushItemWidth(-1)
-    CImGui.InputText(
-        "##savedir-inputtext", pointer(gui.ui_state.save_directory_path),
-        length(gui.ui_state.save_directory_path))
+        CImGui.Text("Path to save directory:")
+        CImGui.PushItemWidth(-1)
+        CImGui.InputText(
+            "##savedir-inputtext", pointer(gui.ui_state.save_directory_path),
+            length(gui.ui_state.save_directory_path))
 
-    if CImGui.Button("Save", CImGui.ImVec2(-1, 0))
-        save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
-        save_file = joinpath(save_dir, "gsp-$(gui.trainer.step).bson")
-        save_state(gui.trainer, save_file)
-    end
+        if CImGui.Button("Save", CImGui.ImVec2(-1, 0))
+            save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
+            save_file = joinpath(save_dir, "gsp-$(gui.trainer.step).bson")
+            save_state(gui.trainer, save_file)
+        end
 
-    CImGui.Text("Path to state file:")
-    CImGui.PushItemWidth(-1)
-    CImGui.InputText(
-        "##statefile-inputtext", pointer(gui.ui_state.state_file),
-        length(gui.ui_state.state_file))
+        CImGui.Text("Path to state file:")
+        CImGui.PushItemWidth(-1)
+        CImGui.InputText(
+            "##statefile-inputtext", pointer(gui.ui_state.state_file),
+            length(gui.ui_state.state_file))
 
-    if CImGui.Button("Load", CImGui.ImVec2(-1, 0))
-        state_file = unsafe_string(pointer(gui.ui_state.state_file))
-        if isfile(state_file)
-            load_state!(gui.trainer, state_file)
+        if CImGui.Button("Load", CImGui.ImVec2(-1, 0))
+            state_file = unsafe_string(pointer(gui.ui_state.state_file))
+            if isfile(state_file)
+                load_state!(gui.trainer, state_file)
+                gui.render_state.need_render = true
+            end
+        end
+
+        if CImGui.Button("Capture Mode", CImGui.ImVec2(-1, 0))
+            GC.gc(false)
+            GC.gc(true)
+            gui.screen = CaptureScreen
+            NGL.set_resizable_window!(gui.context, false)
         end
     end
-
-    if CImGui.Button("Capture Mode", CImGui.ImVec2(-1, 0))
-        GC.gc(false)
-        GC.gc(true)
-        gui.screen = CaptureScreen
-        NGL.set_resizable_window!(gui.context, false)
-    end
-
     CImGui.End()
     return
 end
@@ -287,12 +296,15 @@ function render!(gui::GSGUI)
     gs = gui.trainer.gaussians
     rast = gui.rasterizer
 
+    ui_sh_degree::Int = gui.ui_state.sh_degree[]
+    sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree
+
     shs = hcat(gs.features_dc, gs.features_rest)
     rast(
         gs.points, gs.opacities, gs.scales,
-        gs.rotations, shs; camera=gui.camera, sh_degree=gs.sh_degree)
+        gs.rotations, shs; camera=gui.camera, sh_degree)
 
-    tex = gl_texture(rast)
+    tex = gl_texture(rast) # TODO pre-allocate
     NGL.set_data!(gui.render_state.surface, tex)
     return
 end

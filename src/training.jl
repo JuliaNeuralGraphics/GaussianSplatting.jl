@@ -17,7 +17,7 @@ Base.@kwdef struct OptimizationParams
     densification_interval::Int = 100
     densify_grad_threshold::Float32 = 2f-4
 
-    opacity_reset_interval::Int = 10_000 # TODO not good
+    opacity_reset_interval::Int = 3_000
 end
 
 struct SSIM{W <: Flux.Conv}

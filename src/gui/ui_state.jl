@@ -8,4 +8,6 @@ Base.@kwdef mutable struct UIState
 
     save_directory_path::Vector{UInt8} = Vector{UInt8}("\0"^512)
     state_file::Vector{UInt8} = Vector{UInt8}("\0"^512)
+
+    sh_degree::Ref{Int32} = Ref{Int32}(-1) # -1 means use value from the model
 end

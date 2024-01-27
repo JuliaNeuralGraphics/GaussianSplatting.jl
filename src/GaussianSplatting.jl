@@ -52,12 +52,10 @@ include("gui/gui.jl")
 """
 TODO
 - [GUI] toggle for densification
-- [GUI] slider for sh degree
 - [GUI] reset opacity toggle
 
-- raw visualization mode
-- compute depth
-- compute silhouette
+- raw visualization mode (export to PLY)
+- compute depth (differentiable) & silhouette
 - allow isotropic gaussians
 """
 

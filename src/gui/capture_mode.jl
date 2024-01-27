@@ -35,88 +35,89 @@ function reset!(v::CaptureMode)
 end
 
 function handle_ui!(capture_mode::CaptureMode; gui)
-    CImGui.Begin("Capture Mode")
-    CImGui.TextWrapped("Capturing with the same render settings as in the main screen.")
-    CImGui.TextWrapped("Window is not resizable during this stage.")
-    CImGui.TextWrapped("Press V to add camera position (at least 2 are required).")
-    CImGui.Text("N Keyframes: $(length(capture_mode.camera_path))")
+    if CImGui.Begin("Capture Mode")
+        CImGui.TextWrapped("Capturing with the same render settings as in the main screen.")
+        CImGui.TextWrapped("Window is not resizable during this stage.")
+        CImGui.TextWrapped("Press V to add camera position (at least 2 are required).")
+        CImGui.Text("N Keyframes: $(length(capture_mode.camera_path))")
 
-    if capture_mode.is_rendering
-        CImGui.TextWrapped("Capturing. Please wait...")
+        if capture_mode.is_rendering
+            CImGui.TextWrapped("Capturing. Please wait...")
 
-        n_steps = capture_mode.steps_ref[] * (length(capture_mode.camera_path) - 1)
-        current_step = capture_mode.camera_path.current_step
+            n_steps = capture_mode.steps_ref[] * (length(capture_mode.camera_path) - 1)
+            current_step = capture_mode.camera_path.current_step
 
-        CImGui.PushStyleColor(CImGui.ImGuiCol_PlotHistogram, CImGui.HSV(0.61f0, 1.0f0, 1f0))
-        CImGui.ProgressBar(current_step / (n_steps + 1), CImGui.ImVec2(-1f0, 0f0),
-            "$current_step / $(n_steps + 1)")
-        CImGui.PopStyleColor()
+            CImGui.PushStyleColor(CImGui.ImGuiCol_PlotHistogram, CImGui.HSV(0.61f0, 1.0f0, 1f0))
+            CImGui.ProgressBar(current_step / (n_steps + 1), CImGui.ImVec2(-1f0, 0f0),
+                "$current_step / $(n_steps + 1)")
+            CImGui.PopStyleColor()
 
-        if CImGui.Button("Cancel", CImGui.ImVec2(-1, 0))
-            capture_mode.is_rendering = false
-            close_video!(capture_mode)
-        end
-    else
-        if CImGui.CollapsingHeader("Video Settings", CIM_HEADER)
-            CImGui.PushItemWidth(-100)
-            CImGui.SliderInt("Lerp Steps", capture_mode.steps_ref, 1, 60, "%d / 60")
-            CImGui.PushItemWidth(-100)
-            CImGui.SliderInt("Frame rate", capture_mode.framerate_ref, 1, 60, "%d")
+            if CImGui.Button("Cancel", CImGui.ImVec2(-1, 0))
+                capture_mode.is_rendering = false
+                close_video!(capture_mode)
+            end
+        else
+            if CImGui.CollapsingHeader("Video Settings", CIM_HEADER)
+                CImGui.PushItemWidth(-100)
+                CImGui.SliderInt("Lerp Steps", capture_mode.steps_ref, 1, 60, "%d / 60")
+                CImGui.PushItemWidth(-100)
+                CImGui.SliderInt("Frame rate", capture_mode.framerate_ref, 1, 60, "%d")
 
-            CImGui.PushItemWidth(-100)
-            CImGui.InputText("Save Directory", pointer(capture_mode.save_dir),
-                length(capture_mode.save_dir))
+                CImGui.PushItemWidth(-100)
+                CImGui.InputText("Save Directory", pointer(capture_mode.save_dir),
+                    length(capture_mode.save_dir))
 
-            CImGui.PushItemWidth(-100)
-            CImGui.Checkbox("Save frames", capture_mode.save_frames)
-        end
-
-        CImGui.BeginTable("##capture-buttons-table", 3)
-        CImGui.TableNextRow()
-        CImGui.TableNextColumn()
-
-        can_capture = length(capture_mode.camera_path) ≥ 2
-        can_capture || disabled_begin()
-        if CImGui.Button("Capture", CImGui.ImVec2(-1, 0))
-            reset_time!(capture_mode.camera_path)
-            close_video!(capture_mode)
-
-            # Create directories for video & images.
-            save_dir = unsafe_string(pointer(capture_mode.save_dir))
-            isdir(save_dir) || mkdir(save_dir)
-            if capture_mode.save_frames[]
-                images_dir = joinpath(save_dir, "images")
-                isdir(images_dir) || mkdir(images_dir)
+                CImGui.PushItemWidth(-100)
+                CImGui.Checkbox("Save frames", capture_mode.save_frames)
             end
 
-            # Open video writer stream.
-            video_file = joinpath(save_dir, "out.mp4")
-            res = resolution(gui.camera)
-            capture_mode.writer = open_video_out(
-                video_file, zeros(RGB{N0f8}, res[2], res[1]);
-                framerate=capture_mode.framerate_ref[],
-                target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
+            CImGui.BeginTable("##capture-buttons-table", 3)
+            CImGui.TableNextRow()
+            CImGui.TableNextColumn()
 
-            capture_mode.is_rendering = true
-        end
-        can_capture || disabled_end()
+            can_capture = length(capture_mode.camera_path) ≥ 2
+            can_capture || disabled_begin()
+            if CImGui.Button("Capture", CImGui.ImVec2(-1, 0))
+                reset_time!(capture_mode.camera_path)
+                close_video!(capture_mode)
 
-        CImGui.TableNextColumn()
-        if CImGui.Button("Go Back", CImGui.ImVec2(-1, 0))
-            gui.screen = MainScreen
-            capture_mode.is_rendering = false
-            close_video!(capture_mode)
-            NGL.set_resizable_window!(gui.context, true)
-        end
+                # Create directories for video & images.
+                save_dir = unsafe_string(pointer(capture_mode.save_dir))
+                isdir(save_dir) || mkdir(save_dir)
+                if capture_mode.save_frames[]
+                    images_dir = joinpath(save_dir, "images")
+                    isdir(images_dir) || mkdir(images_dir)
+                end
 
-        CImGui.TableNextColumn()
-        red_button_begin()
-        if CImGui.Button("Clear Path", CImGui.ImVec2(-1, 0))
-            empty!(capture_mode.camera_path)
-            gui.render_state.need_render = true
+                # Open video writer stream.
+                video_file = joinpath(save_dir, "out.mp4")
+                res = resolution(gui.camera)
+                capture_mode.writer = open_video_out(
+                    video_file, zeros(RGB{N0f8}, res[2], res[1]);
+                    framerate=capture_mode.framerate_ref[],
+                    target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
+
+                capture_mode.is_rendering = true
+            end
+            can_capture || disabled_end()
+
+            CImGui.TableNextColumn()
+            if CImGui.Button("Go Back", CImGui.ImVec2(-1, 0))
+                gui.screen = MainScreen
+                capture_mode.is_rendering = false
+                close_video!(capture_mode)
+                NGL.set_resizable_window!(gui.context, true)
+            end
+
+            CImGui.TableNextColumn()
+            red_button_begin()
+            if CImGui.Button("Clear Path", CImGui.ImVec2(-1, 0))
+                empty!(capture_mode.camera_path)
+                gui.render_state.need_render = true
+            end
+            red_button_end()
+            CImGui.EndTable()
         end
-        red_button_end()
-        CImGui.EndTable()
     end
     CImGui.End()
 end
