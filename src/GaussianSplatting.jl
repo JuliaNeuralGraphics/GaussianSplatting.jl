@@ -54,7 +54,11 @@ TODO
 - [GUI] toggle for densification
 - [GUI] slider for sh degree
 - [GUI] reset opacity toggle
-- compute camera extent (needed for gaussians model from PC)
+
+- raw visualization mode
+- compute depth
+- compute silhouette
+- allow isotropic gaussians
 """
 
 function main(dataset_path::String, scale::Int = 8)

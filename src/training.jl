@@ -91,14 +91,13 @@ end
 function Trainer(
     rast::GaussianRasterizer, gs::GaussianModel,
     dataset::ColmapDataset, opt_params::OptimizationParams;
-    spatial_lr_scale::Float32 = 1f0, # TODO ≡ camera_extent
 )
-    kab = get_backend(gs)
     ϵ = 1f-15
-    # ϵ = eps(Float32)
+    kab = get_backend(gs)
+    camera_extent = dataset.camera_extent
 
     optimizers = (;
-        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * spatial_lr_scale, ϵ),
+        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * camera_extent, ϵ),
         features_dc=NU.Adam(kab, gs.features_dc; lr=opt_params.lr_feature, ϵ),
         features_rest=NU.Adam(kab, gs.features_rest; lr=opt_params.lr_feature / 20f0, ϵ),
         opacities=NU.Adam(kab, gs.opacities; lr=opt_params.lr_opacities, ϵ),
@@ -107,8 +106,8 @@ function Trainer(
     ssim = SSIM(kab)
 
     points_lr_scheduler = lr_exp_scheduler(
-        opt_params.lr_points_start * spatial_lr_scale,
-        opt_params.lr_points_end * spatial_lr_scale,
+        opt_params.lr_points_start * camera_extent,
+        opt_params.lr_points_end * camera_extent,
         opt_params.lr_points_steps)
 
     ids = collect(1:length(dataset))
@@ -235,8 +234,7 @@ function step!(trainer::Trainer)
                 trainer.step > params.opacity_reset_interval ? 20 : 0
             densify_and_prune!(
                 trainer; grad_threshold=params.densify_grad_threshold,
-                min_opacity=0.05f0, extent=1f0, max_screen_size, # TODO camera extent
-                params.dense_percent)
+                min_opacity=0.05f0, max_screen_size, params.dense_percent)
         end
 
         if trainer.step % params.opacity_reset_interval == 0 # TODO or if white background
@@ -254,13 +252,13 @@ end
 
 function densify_and_prune!(
     trainer::Trainer; grad_threshold::Float32, min_opacity::Float32,
-    extent::Float32, max_screen_size::Int32,
-    dense_percent::Float32,
+    max_screen_size::Int32, dense_percent::Float32,
 )
     gs = trainer.gaussians
     ∇means_2d = gs.accum_∇means_2d ./ gs.denom
     ∇means_2d[isnan.(∇means_2d)] .= 0f0
 
+    extent = trainer.dataset.camera_extent
     densify_and_clone!(trainer, ∇means_2d; grad_threshold, extent, dense_percent)
     densify_and_split!(trainer, ∇means_2d; grad_threshold, extent, dense_percent)
 
