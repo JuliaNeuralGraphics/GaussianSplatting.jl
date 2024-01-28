@@ -69,6 +69,7 @@ end
 @kernel function render!(
     # Outputs.
     out_color::AbstractArray{Float32, 3},
+    auxiliary::A,
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
     # Inputs.
@@ -76,13 +77,14 @@ end
     means_2d::AbstractVector{SVector{2, Float32}},
     conic_opacities::AbstractVector{SVector{4, Float32}},
     rgb_features::AbstractVector{SVector{3, Float32}},
+    depths::AbstractVector{Float32},
 
     ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{3, Float32},
     block::SVector{2, Int32},
     ::Val{block_size}, ::Val{channels},
-) where {block_size, channels}
+) where {A, block_size, channels}
     @uniform horizontal_blocks = gpu_cld(resolution[1], block[1])
 
     gidx = @index(Group, NTuple) # ≡ group_index
@@ -116,11 +118,22 @@ end
     collected_conic_opacity = @localmem SVector{4, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_id = @localmem UInt32 block_size
+    collected_depth = if A !== Nothing
+        @localmem Float32 block_size
+    else
+        nothing
+    end
 
     T = 1f0
     contributor = 0u32
     last_contributor = 0u32
+
     color = zeros(MVector{3, Float32})
+    auxiliary_px = if A !== Nothing
+        zeros(MVector{3, Float32})
+    else
+        nothing
+    end
 
     # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
@@ -134,6 +147,9 @@ end
             @inbounds collected_id[ridx] = gaussian_id
             @inbounds collected_xy[ridx] = means_2d[gaussian_id]
             @inbounds collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
+            if A !== Nothing
+                collected_depth[ridx] = depths[gaussian_id]
+            end
         end
         @synchronize()
 
@@ -170,6 +186,10 @@ end
             @inbounds for c in 1i32:channels
                 color[c] += feature[c] * α * T
             end
+            @inbounds if A !== Nothing
+                auxiliary_px[1] += collected_depth[j] * α * T
+                auxiliary_px[2] += α * T
+            end
 
             T = T_tmp
             # Keep track of last range entry to update this pixel.
@@ -179,12 +199,16 @@ end
         to_do -= block_size
     end
 
-    if inside
+    @inbounds if inside
         px, py = pix .+ 1i32
-        @inbounds accum_α[px, py] = T
-        @inbounds n_contrib[px, py] = last_contributor
+        accum_α[px, py] = T
+        n_contrib[px, py] = last_contributor
         @inbounds for c in 1i32:channels
             out_color[c, px, py] = color[c] + T * bg_color[c]
+        end
+        @inbounds if A !== Nothing
+            auxiliary[1, px, py] = auxiliary_px[1]
+            auxiliary[2, px, py] = auxiliary_px[2]
         end
     end
 end

@@ -17,7 +17,7 @@ struct ControlSettings
     up_vec::SVector{3, Float32}
 
     function ControlSettings(;
-        camera_velocity::Float32 = 4f0,
+        camera_velocity::Float32 = 8f0,
         rotation_sensitivity::Float32 = 0.005f0,
     )
         up_vec = SVector{3, Float32}(0f0, -1f0, 0f0)

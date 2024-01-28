@@ -8,6 +8,7 @@ mutable struct GaussianRasterizer{
     G <: GeometryState,
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
+    A,
 }
     istate::I
     gstate::G
@@ -15,10 +16,17 @@ mutable struct GaussianRasterizer{
 
     image::K
 
+    # If not nothing, then it is a buffer of the same resolution as `image`.
+    # 1st channel - depth
+    # 2nd channel - silhouette:
+    #   0 - if nothing is rendered in the pixel
+    #   1 - if pixel if fully opaque
+    auxiliary::A
+
     grid::SVector{2, Int32}
 end
 
-function GaussianRasterizer(kab, camera::Camera)
+function GaussianRasterizer(kab, camera::Camera; auxiliary::Bool = false)
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
@@ -28,19 +36,71 @@ function GaussianRasterizer(kab, camera::Camera)
     bstate = BinningState(kab, 0)
 
     image = KA.allocate(kab, Float32, (3, width, height))
-    GaussianRasterizer(istate, gstate, bstate, image, grid)
+    aux = auxiliary ? KA.allocate(kab, Float32, (2, width, height)) : nothing
+    GaussianRasterizer(istate, gstate, bstate, image, aux, grid)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
+
+has_auxiliary(r::GaussianRasterizer) = r.auxiliary ≢ nothing
+
+function to_raw_depth(r::GaussianRasterizer; normalize::Bool = false)
+    isnothing(r.auxiliary) && error("""
+    GaussianRasterizer does not have auxiliary information.
+    To compute it, re-create rasterizer with `auxiliary=true` keyword argument.
+    """)
+
+    raw_aux = Array(r.auxiliary)
+    depth = raw_aux[1, :, :]
+    normalize || return depth
+
+    # Normalize by max depth to be in [0, 1] range.
+    max_depth = 0f0
+    for d in depth
+        isinf(d) && continue
+        max_depth = max(max_depth, d)
+    end
+    depth .*= 1f0 / (max_depth + 1f-6)
+
+    return depth
+end
+
+# OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
     raw_img = clamp01!(Array(r.image)[:, :, end:-1:1])
     return colorview(RGB, raw_img)
 end
 
+function to_gl_depth(r::GaussianRasterizer)
+    depth = to_raw_depth(r; normalize=true)
+    depth = reshape(depth[:, end:-1:1], 1, size(depth)...)
+    return colorview(Gray, depth)
+end
+
+function to_gl_uncertainty(r::GaussianRasterizer)
+    raw_aux = Array(r.auxiliary)
+    uncertainty = reshape(raw_aux[2, :, end:-1:1], 1, size(raw_aux)[2:3]...)
+    return colorview(Gray, uncertainty)
+end
+
+# Image conversions.
+
 function to_image(r::GaussianRasterizer)
     raw_img = clamp01!(permutedims(Array(r.image), (1, 3, 2)))
     return colorview(RGB, raw_img)
+end
+
+function to_depth(r::GaussianRasterizer; normalize::Bool = false)
+    depth = to_raw_depth(r; normalize)
+    depth = transpose(depth)
+    return colorview(Gray, depth)
+end
+
+function to_uncertainty(r::GaussianRasterizer)
+    raw_aux = Array(r.auxiliary)
+    uncertainty = transpose(raw_aux[2, :, :])
+    return colorview(Gray, uncertainty)
 end
 
 function (rast::GaussianRasterizer)(
@@ -80,9 +140,9 @@ function rasterize(
     focal_xy = K.resolution ./ (2f0 .* tan_fov_xy)
 
     fill!(rast.image, 0f0)
+    has_auxiliary(rast) && fill!(rast.auxiliary, 0f0)
 
     _as_T(T, x) = reinterpret(T, reshape(x, :))
-
     scale_modifier = 1f0 # TODO compute correctly
 
     # Preprocess per-Gaussian: transformation, bounding, sh-to-rgb.
@@ -148,6 +208,7 @@ function rasterize(
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
         rast.image,
+        rast.auxiliary,
         rast.istate.n_contrib,
         rast.istate.accum_α,
         # Inputs.
@@ -155,6 +216,7 @@ function rasterize(
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
         rast.gstate.rgbs,
+        rast.gstate.depths,
 
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
@@ -183,7 +245,7 @@ function ∇rasterize(
     ∂L∂conic_opacities = KA.zeros(kab, Float32, (2, 2, n))
     ∂L∂cov = KA.zeros(kab, Float32, (6, n))
 
-    # TODO avoid allocs, store in struct
+    # TODO pre-allocate
     ∂L∂means = KA.zeros(kab, Float32, (3, n))
     ∂L∂shs = KA.zeros(kab, Float32, size(shs))
     ∂L∂opacities = KA.zeros(kab, Float32, (1, n))

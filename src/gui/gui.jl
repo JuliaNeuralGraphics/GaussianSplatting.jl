@@ -101,7 +101,8 @@ function resize_callback(_, width, height)
     set_resolution!(gsgui.camera; width, height)
     kab = get_backend(gsgui.rasterizer)
     # TODO free the old one before creating new one.
-    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera)
+    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera;
+        auxiliary=has_auxiliary(gsgui.rasterizer))
     gsgui.render_state.need_render = true
     return
 end
@@ -136,7 +137,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))
     set_resolution!(camera; render_resolution...)
-    gui_rasterizer = GaussianRasterizer(kab, camera)
+    gui_rasterizer = GaussianRasterizer(kab, camera; auxiliary=true)
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -237,6 +238,13 @@ function handle_ui!(gui::GSGUI; frame_time)
             gui.render_state.need_render = true
         end
 
+        CImGui.PushItemWidth(-100)
+        if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+            gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+        )
+            gui.render_state.need_render = true
+        end
+
         image_filenames = gui.trainer.dataset.image_filenames
         CImGui.PushItemWidth(-100)
         if CImGui.Combo("View", gui.ui_state.selected_view,
@@ -304,7 +312,16 @@ function render!(gui::GSGUI)
         gs.points, gs.opacities, gs.scales,
         gs.rotations, shs; camera=gui.camera, sh_degree)
 
-    tex = gl_texture(rast) # TODO pre-allocate
+    # TODO pre-allocate
+    mode = gui.ui_state.selected_mode[]
+    tex = if mode == 0 # Render color.
+        gl_texture(rast)
+    elseif mode == 1 # Render depth.
+        to_gl_depth(rast)
+    elseif mode == 2 # Render uncertainty.
+        to_gl_uncertainty(rast)
+    end .|> RGB
+
     NGL.set_data!(gui.render_state.surface, tex)
     return
 end

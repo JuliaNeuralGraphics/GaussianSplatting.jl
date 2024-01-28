@@ -167,7 +167,15 @@ function loop!(capture_mode::CaptureMode; gui)
 
     # Save rendered frame.
     if capture_mode.is_rendering
-        frame = RGB{N0f8}.(to_image(gui.rasterizer))
+        mode = gui.ui_state.selected_mode[]
+
+        frame = if mode == 0 # Render color.
+            gl_texture(gui.rasterizer)
+        elseif mode == 1 # Render depth.
+            to_depth(gui.rasterizer; normalize=true)
+        elseif mode == 2 # Render uncertainty.
+            to_uncertainty(gui.rasterizer)
+        end .|> RGB{N0f8}
 
         save_dir = unsafe_string(pointer(capture_mode.save_dir))
         if capture_mode.save_frames[]

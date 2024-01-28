@@ -32,6 +32,8 @@ import KernelAbstractions as KA
 import NerfUtils as NU
 import NeuralGraphicsGL as NGL
 
+const Maybe{T} = Union{T, Nothing}
+
 struct Literal{T} end
 Base.:(*)(x, ::Type{Literal{T}}) where {T} = T(x)
 const u32 = Literal{UInt32}
@@ -72,7 +74,7 @@ function main(dataset_path::String, scale::Int = 8)
         cameras_file, images_file, points_file, images_dir, scale)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     for i in 1:3000
@@ -88,6 +90,13 @@ function main(dataset_path::String, scale::Int = 8)
                 gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
             final_img = to_image(rasterizer)
             save("image-$(trainer.step).png", final_img)
+
+            if has_auxiliary(rasterizer)
+                depth_img = to_depth(rasterizer; normalize=true)
+                uncertainty_img = to_uncertainty(rasterizer)
+                save("depth-$(trainer.step).png", depth_img)
+                save("uncertainty-$(trainer.step).png", uncertainty_img)
+            end
         end
     end
     return
