@@ -100,6 +100,8 @@ end
     @inbounds opacities[i] = inverse_sigmoid(new_opacity)
 end
 
+Base.length(g::GaussianModel) = size(g.points, 2)
+
 function update_stats!(
     gs::GaussianModel, radii::AbstractVector{Int32},
     ∇means_2d::AbstractVector{SVector{2, Float32}},

@@ -70,6 +70,7 @@ end
     # Outputs.
     out_color::AbstractArray{Float32, 3},
     auxiliary::A,
+    covisibility::C,
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
     # Inputs.
@@ -84,7 +85,7 @@ end
     bg_color::SVector{3, Float32},
     block::SVector{2, Int32},
     ::Val{block_size}, ::Val{channels},
-) where {A, block_size, channels}
+) where {A, C, block_size, channels}
     @uniform horizontal_blocks = gpu_cld(resolution[1], block[1])
 
     gidx = @index(Group, NTuple) # ≡ group_index
@@ -179,6 +180,12 @@ end
             if T_tmp < 1f-4
                 done = Cint(1)
                 break
+            end
+
+            @inbounds gaussian_id = collected_id[j]
+            # If needed, mark current Gaussian as visible.
+            if C !== Nothing && T > 0.5f0
+                covisibility[gaussian_id] = true
             end
 
             # Eq. (3) from 3D Gaussian splatting paper.

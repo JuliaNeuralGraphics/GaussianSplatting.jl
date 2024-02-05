@@ -107,6 +107,7 @@ function (rast::GaussianRasterizer)(
     means_3d, opacities, scales, rotations, shs;
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
+    covisibility::Maybe{AbstractVector{Bool}} = nothing,
 )
     # Apply activation functions and rasterize.
     rasterize(
@@ -115,7 +116,7 @@ function (rast::GaussianRasterizer)(
         NU.sigmoid.(opacities),
         exp.(scales),
         rotations ./ sqrt.(sum(abs2, rotations; dims=1));
-        rast, sh_degree, camera, background)
+        rast, sh_degree, camera, background, covisibility)
 end
 
 """
@@ -125,6 +126,7 @@ function rasterize(
     means_3d, shs, opacities, scales, rotations;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
+    covisibility::Maybe{AbstractVector{Bool}},
 )
     kab = get_backend(rast)
     n = size(means_3d, 2)
@@ -209,6 +211,7 @@ function rasterize(
         # Outputs.
         rast.image,
         rast.auxiliary,
+        covisibility,
         rast.istate.n_contrib,
         rast.istate.accum_α,
         # Inputs.
@@ -319,10 +322,11 @@ function ChainRulesCore.rrule(
     ::typeof(rasterize), means_3d, shs, opacities, scales, rotations;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
+    covisibility::Maybe{AbstractVector{Bool}},
 )
     image = rasterize(
         means_3d, shs, opacities, scales, rotations;
-        rast, camera, sh_degree, background)
+        rast, camera, sh_degree, background, covisibility)
 
     function _rasterize_pullback(∂L∂pixels)
         ∇ = ∇rasterize(
