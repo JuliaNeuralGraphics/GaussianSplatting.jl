@@ -73,15 +73,15 @@ function main(dataset_path::String, scale::Int = 8)
     dataset = ColmapDataset(kab;
         cameras_file, images_file, points_file, images_dir, scale)
     opt_params = OptimizationParams()
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:3000
+    for i in 1:10
         loss = step!(trainer)
         @show i, loss
 
-        if trainer.step % 1000 == 0
+        if trainer.step % 10 == 0
             camera = trainer.dataset.cameras[1]
 
             shs = hcat(gaussians.features_dc, gaussians.features_rest)

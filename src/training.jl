@@ -205,7 +205,8 @@ function step!(trainer::Trainer)
     loss, ∇ = Zygote.withgradient(
         θ...,
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
-        shs = hcat(features_dc, features_rest)
+        shs = isempty(features_rest) ?
+            features_dc : hcat(features_dc, features_rest)
         img = rast(
             means_3d, opacities, scales, rotations, shs;
             camera, sh_degree=gs.sh_degree, background)
@@ -221,7 +222,10 @@ function step!(trainer::Trainer)
 
     # Apply gradients.
     for i in 1:length(θ)
-        @inbounds NU.step!(trainer.optimizers[i], θ[i], ∇[i]; dispose=true)
+        @inbounds θᵢ = θ[i]
+        isempty(θᵢ) && continue
+
+        @inbounds NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=true)
     end
 
     if trainer.step ≤ params.densify_until_iter

@@ -21,11 +21,12 @@ end
 
 function GaussianModel(
     points::AbstractMatrix{Float32}, colors::AbstractMatrix{Float32},
-    scales::AbstractMatrix{Float32},
+    scales::AbstractMatrix{Float32};
+    max_sh_degree::Int = 3,
 )
     kab = get_backend(points)
     n = size(points, 2)
-    sh_degree, max_sh_degree = 0, 3
+    sh_degree = 0
 
     colors = rgb_2_sh.(colors)
     n_features = (max_sh_degree + 1)^2

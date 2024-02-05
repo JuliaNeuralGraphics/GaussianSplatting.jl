@@ -304,10 +304,9 @@ Convert spherical harmonics coefficients of each Gaussian to a RGB color.
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
     shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
 ) where degree
-    dir = normalize(point - camera_position)
-
     @inbounds res = SH0 * shs[1]
     if degree > 0
+        dir = normalize(point - camera_position)
         x, y, z = dir
         @inbounds res = res - SH1 * y * shs[2] + SH1 * z * shs[3] - SH1 * x * shs[4]
         if degree > 1
