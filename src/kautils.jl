@@ -26,7 +26,11 @@ const BACKEND_NAME::String = backend_name()
 
     get_module(::ROCBackend) = AMDGPU
 
-    synchronize_count(predicate::Cint) = AMDGPU.sync_workgroup_count(predicate)
+    function synchronize_count(predicate::Cint)
+        # TODO without s_barrier we get render artifacts.
+        @synchronize()
+        AMDGPU.sync_workgroup_count(predicate)
+    end
 elseif BACKEND_NAME == "CUDA"
     using CUDA
     const Backend::CUDABackend = CUDABackend()

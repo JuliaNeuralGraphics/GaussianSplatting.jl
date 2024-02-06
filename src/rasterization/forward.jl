@@ -119,22 +119,14 @@ end
     collected_conic_opacity = @localmem SVector{4, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_id = @localmem UInt32 block_size
-    collected_depth = if A !== Nothing
-        @localmem Float32 block_size
-    else
-        nothing
-    end
+    collected_depth = (A !== Nothing) ? (@localmem Float32 block_size) : nothing
 
     T = 1f0
     contributor = 0u32
     last_contributor = 0u32
 
     color = zeros(MVector{3, Float32})
-    auxiliary_px = if A !== Nothing
-        zeros(MVector{3, Float32})
-    else
-        nothing
-    end
+    auxiliary_px = (A !== Nothing) ? zeros(MVector{3, Float32}) : nothing
 
     # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
@@ -149,7 +141,7 @@ end
             @inbounds collected_xy[ridx] = means_2d[gaussian_id]
             @inbounds collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
             if A !== Nothing
-                collected_depth[ridx] = depths[gaussian_id]
+                @inbounds collected_depth[ridx] = depths[gaussian_id]
             end
         end
         @synchronize()
@@ -205,6 +197,14 @@ end
 
         to_do -= block_size
     end
+
+    # color[1] =
+    #     (pix[1] + 1) * (pix[2] + 1) /
+    #     (size(out_color, 2) * size(out_color, 3))
+    # color[2] = 0f0
+    # color[3] =
+    #     (pix[1] + 1) * (pix[2] + 1) /
+    #     (size(out_color, 2) * size(out_color, 3))
 
     @inbounds if inside
         px, py = pix .+ 1i32

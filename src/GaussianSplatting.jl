@@ -77,15 +77,16 @@ function main(dataset_path::String, scale::Int = 8)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:10
+    for i in 1:3000
         loss = step!(trainer)
         @show i, loss
 
-        if trainer.step % 10 == 0
-            camera = trainer.dataset.cameras[1]
+        if trainer.step % 100 == 0
+            cam_idx = rand(1:length(trainer.dataset.cameras))
+            camera = trainer.dataset.cameras[cam_idx]
 
-            covisibility = KA.allocate(kab, Bool, length(gaussians))
-            fill!(covisibility, false)
+            # covisibility = KA.allocate(kab, Bool, length(gaussians))
+            # fill!(covisibility, false)
 
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
@@ -93,7 +94,7 @@ function main(dataset_path::String, scale::Int = 8)
             rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree,
-                covisibility)
+                covisibility=nothing)
 
             # intr = covisibility .& covisibility
             # unio = covisibility .| covisibility

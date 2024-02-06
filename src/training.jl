@@ -287,7 +287,8 @@ function densify_and_clone!(
 
     new_points = gs.points[:, mask]
     new_features_dc = gs.features_dc[:, :, mask]
-    new_features_rest = gs.features_rest[:, :, mask]
+    new_features_rest = isempty(gs.features_rest) ?
+        gs.features_rest : gs.features_rest[:, :, mask]
     new_scales = gs.scales[:, mask]
     new_rotations = gs.rotations[:, mask]
     new_opacities = gs.opacities[:, mask]
@@ -313,7 +314,8 @@ function densify_and_split!(
     mask .&= reshape(maximum(scales_activation.(gs.scales); dims=1) .> extent * dense_percent, :)
     stds = Array(repeat(scales_activation.(gs.scales)[:, mask], 1, n_split))
 
-    new_features_rest = repeat(gs.features_rest[:, :, mask], 1, 1, n_split)
+    new_features_rest = isempty(gs.features_rest) ?
+        gs.features_rest : repeat(gs.features_rest[:, :, mask], 1, 1, n_split)
     new_features_dc = repeat(gs.features_dc[:, :, mask], 1, 1, n_split)
     new_scales = scales_inv_activation.(stds ./ (0.8f0 * n_split))
     new_rotations = repeat(gs.rotations[:, mask], 1, n_split)
@@ -354,8 +356,10 @@ function prune_points!(trainer::Trainer, prune_mask)
     _prune_optimizer!(opts.features_dc, valid_mask, gs.features_dc)
     gs.features_dc = gs.features_dc[:, :, valid_mask]
 
-    _prune_optimizer!(opts.features_rest, valid_mask, gs.features_rest)
-    gs.features_rest = gs.features_rest[:, :, valid_mask]
+    if !isempty(gs.features_rest)
+        _prune_optimizer!(opts.features_rest, valid_mask, gs.features_rest)
+        gs.features_rest = gs.features_rest[:, :, valid_mask]
+    end
 
     _prune_optimizer!(opts.scales, valid_mask, gs.scales)
     gs.scales = gs.scales[:, valid_mask]
@@ -386,8 +390,10 @@ function densification_postfix!(
     gs.features_dc = cat(gs.features_dc, new_features_dc; dims=ndims(new_features_dc))
     _append_optimizer!(trainer.optimizers.features_dc, new_features_dc)
 
-    gs.features_rest = cat(gs.features_rest, new_features_rest; dims=ndims(new_features_rest))
-    _append_optimizer!(trainer.optimizers.features_rest, new_features_rest)
+    if !isempty(gs.features_rest)
+        gs.features_rest = cat(gs.features_rest, new_features_rest; dims=ndims(new_features_rest))
+        _append_optimizer!(trainer.optimizers.features_rest, new_features_rest)
+    end
 
     gs.scales = cat(gs.scales, new_scales; dims=ndims(new_scales))
     _append_optimizer!(trainer.optimizers.scales, new_scales)
