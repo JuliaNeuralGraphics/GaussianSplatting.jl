@@ -184,112 +184,112 @@ end
     focal_xy::SVector{2, Float32}, tan_fov_xy::SVector{2, Float32},
 )
     i = @index(Global)
-    @inbounds radii[i] > 0 || return
+    if @inbounds(radii[i]) > 0
+        @inbounds ∂L∂conic = SVector{3, Float32}( # Symmetric 2x2 matrix.
+            ∂L∂conic_opacities[1, 1, i],
+            ∂L∂conic_opacities[2, 1, i],
+            ∂L∂conic_opacities[2, 2, i])
 
-    @inbounds ∂L∂conic = SVector{3, Float32}( # Symmetric 2x2 matrix.
-        ∂L∂conic_opacities[1, 1, i],
-        ∂L∂conic_opacities[2, 1, i],
-        ∂L∂conic_opacities[2, 2, i])
+        @inbounds cov, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
+            to_homogeneous(means[i]), focal_xy, tan_fov_xy,
+            cov3Ds[i], view, Val{true}())
 
-    @inbounds cov, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
-        to_homogeneous(means[i]), focal_xy, tan_fov_xy,
-        cov3Ds[i], view, Val{true}())
+        T = transpose(T) # TODO perform transposed indexing below
+        W = transpose(W)
 
-    T = transpose(T) # TODO perform transposed indexing below
-    W = transpose(W)
+        a, b, c = cov
+        denom = a * c - b^2
+        denom_inv = 1f0 / (denom^2 + eps(Float32))
 
-    a, b, c = cov
-    denom = a * c - b^2
-    denom_inv = 1f0 / (denom^2 + eps(Float32))
+        ∂L∂a, ∂L∂b, ∂L∂c = 0f0, 0f0, 0f0
+        if denom_inv ≉ 0f0
+            # Gradients of loss w.r.t. entries of a 2D covariance matrix
+            # given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
+            ∂L∂a = denom_inv * (
+                -c^2 * ∂L∂conic[1] + 2f0 * b * c * ∂L∂conic[2] +
+                (denom - a * c) * ∂L∂conic[3])
+            ∂L∂b = denom_inv * 2f0 * (
+                b * c * ∂L∂conic[1] - (denom + 2f0 * b^2) * ∂L∂conic[2] +
+                a * b * ∂L∂conic[3])
+            ∂L∂c = denom_inv * (
+                -a^2 * ∂L∂conic[3] + 2f0 * a * b * ∂L∂conic[2] +
+                (denom - a * c) * ∂L∂conic[1])
 
-    ∂L∂a, ∂L∂b, ∂L∂c = 0f0, 0f0, 0f0
-    if denom_inv ≉ 0f0
-        # Gradients of loss w.r.t. entries of a 2D covariance matrix
-        # given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
-        ∂L∂a = denom_inv * (
-            -c^2 * ∂L∂conic[1] + 2f0 * b * c * ∂L∂conic[2] +
-            (denom - a * c) * ∂L∂conic[3])
-        ∂L∂b = denom_inv * 2f0 * (
-            b * c * ∂L∂conic[1] - (denom + 2f0 * b^2) * ∂L∂conic[2] +
-            a * b * ∂L∂conic[3])
-        ∂L∂c = denom_inv * (
-            -a^2 * ∂L∂conic[3] + 2f0 * a * b * ∂L∂conic[2] +
-            (denom - a * c) * ∂L∂conic[1])
+            # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
+            # given gradients w.r.t. 2D covariance matrix (diagonal).
+            @inbounds begin
+                ∂L∂cov[1, i] = (T[1,1]^2 * ∂L∂a + T[1,1] * T[2,1] * ∂L∂b + T[2,1]^2 * ∂L∂c)
+                ∂L∂cov[4, i] = (T[1,2]^2 * ∂L∂a + T[1,2] * T[2,2] * ∂L∂b + T[2,2]^2 * ∂L∂c)
+                ∂L∂cov[6, i] = (T[1,3]^2 * ∂L∂a + T[1,3] * T[2,3] * ∂L∂b + T[2,3]^2 * ∂L∂c)
+            end
 
-        # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
-        # given gradients w.r.t. 2D covariance matrix (diagonal).
-        @inbounds begin
-            ∂L∂cov[1, i] = (T[1,1]^2 * ∂L∂a + T[1,1] * T[2,1] * ∂L∂b + T[2,1]^2 * ∂L∂c)
-            ∂L∂cov[4, i] = (T[1,2]^2 * ∂L∂a + T[1,2] * T[2,2] * ∂L∂b + T[2,2]^2 * ∂L∂c)
-            ∂L∂cov[6, i] = (T[1,3]^2 * ∂L∂a + T[1,3] * T[2,3] * ∂L∂b + T[2,3]^2 * ∂L∂c)
+            # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
+            # given gradients w.r.t. 2D covariance matrix (off-diagonal).
+            # Off-diagonal elements appear twice, so double the gradient.
+            @inbounds ∂L∂cov[2, i] =
+                2f0 * T[1, 1] * T[1, 2] * ∂L∂a +
+                (T[1, 1] * T[2, 2] + T[1, 2] * T[2, 1]) * ∂L∂b +
+                2f0 * T[2, 1] * T[2, 2] * ∂L∂c
+            @inbounds ∂L∂cov[3, i] =
+                2f0 * T[1, 1] * T[1, 3] * ∂L∂a +
+                (T[1, 1] * T[2, 3] + T[1, 3] * T[2, 1]) * ∂L∂b +
+                2f0 * T[2, 1] * T[2, 3] * ∂L∂c
+            @inbounds ∂L∂cov[5, i] =
+                2f0 * T[1, 3] * T[1, 2] * ∂L∂a +
+                (T[1, 2] * T[2, 3] + T[1, 3] * T[2, 2]) * ∂L∂b +
+                2f0 * T[2, 2] * T[2, 3] * ∂L∂c
+        else
+            @inbounds for j in 1:6
+                ∂L∂cov[j, i] = 0f0
+            end
         end
 
-        # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
-        # given gradients w.r.t. 2D covariance matrix (off-diagonal).
-        # Off-diagonal elements appear twice, so double the gradient.
-        @inbounds ∂L∂cov[2, i] =
-            2f0 * T[1, 1] * T[1, 2] * ∂L∂a +
-            (T[1, 1] * T[2, 2] + T[1, 2] * T[2, 1]) * ∂L∂b +
-            2f0 * T[2, 1] * T[2, 2] * ∂L∂c
-        @inbounds ∂L∂cov[3, i] =
-            2f0 * T[1, 1] * T[1, 3] * ∂L∂a +
-            (T[1, 1] * T[2, 3] + T[1, 3] * T[2, 1]) * ∂L∂b +
-            2f0 * T[2, 1] * T[2, 3] * ∂L∂c
-        @inbounds ∂L∂cov[5, i] =
-            2f0 * T[1, 3] * T[1, 2] * ∂L∂a +
-            (T[1, 2] * T[2, 3] + T[1, 3] * T[2, 2]) * ∂L∂b +
-            2f0 * T[2, 2] * T[2, 3] * ∂L∂c
-    else
-        @inbounds for j in 1:6
-            ∂L∂cov[j, i] = 0f0
-        end
+        # Gradients of loss w.r.t. upper 2x3 portion of intermediate matrix T.
+        ∂L∂T₁₁ = 2f0 *
+            ∂L∂a * (T[1,1]*Vrk[1,1] + T[1,2]*Vrk[1,2] + T[1,3]*Vrk[1,3]) +
+            ∂L∂b * (T[2,1]*Vrk[1,1] + T[2,2]*Vrk[1,2] + T[2,3]*Vrk[1,3])
+        ∂L∂T₁₂ = 2f0 *
+            ∂L∂a * (T[1,1]*Vrk[2,1] + T[1,2]*Vrk[2,2] + T[1,3]*Vrk[2,3]) +
+            ∂L∂b * (T[2,1]*Vrk[2,1] + T[2,2]*Vrk[2,2] + T[2,3]*Vrk[2,3])
+        ∂L∂T₁₃ = 2f0 *
+            ∂L∂a * (T[1,1]*Vrk[3,1] + T[1,2]*Vrk[3,2] + T[1,3]*Vrk[3,3]) +
+            ∂L∂b * (T[2,1]*Vrk[3,1] + T[2,2]*Vrk[3,2] + T[2,3]*Vrk[3,3])
+        ∂L∂T₂₁ = 2f0 *
+            ∂L∂c * (T[2,1]*Vrk[1,1] + T[2,2]*Vrk[1,2] + T[2,3]*Vrk[1,3]) +
+            ∂L∂b * (T[1,1]*Vrk[1,1] + T[1,2]*Vrk[1,2] + T[1,3]*Vrk[1,3])
+        ∂L∂T₂₂ = 2f0 *
+            ∂L∂c * (T[2,1]*Vrk[2,1] + T[2,2]*Vrk[2,2] + T[2,3]*Vrk[2,3]) +
+            ∂L∂b * (T[1,1]*Vrk[2,1] + T[1,2]*Vrk[2,2] + T[1,3]*Vrk[2,3])
+        ∂L∂T₂₃ = 2f0 *
+            ∂L∂c * (T[2,1]*Vrk[3,1] + T[2,2]*Vrk[3,2] + T[2,3]*Vrk[3,3]) +
+            ∂L∂b * (T[1,1]*Vrk[3,1] + T[1,2]*Vrk[3,2] + T[1,3]*Vrk[3,3])
+
+        # Gradients of loss w.r.t. upper 3x2 non-zero entries of Jacobian matrix.
+        ∂L∂J₁₁ = W[1, 1] * ∂L∂T₁₁ + W[1, 2] * ∂L∂T₁₂ + W[1, 3] * ∂L∂T₁₃
+        ∂L∂J₁₃ = W[3, 1] * ∂L∂T₁₁ + W[3, 2] * ∂L∂T₁₂ + W[3, 3] * ∂L∂T₁₃
+        ∂L∂J₂₂ = W[2, 1] * ∂L∂T₂₁ + W[2, 2] * ∂L∂T₂₂ + W[2, 3] * ∂L∂T₂₃
+        ∂L∂J₂₃ = W[3, 1] * ∂L∂T₂₁ + W[3, 2] * ∂L∂T₂₂ + W[3, 3] * ∂L∂T₂₃
+
+        tz = 1f0 / t[3]
+        tz² = tz^2
+        tz³ = tz² * tz
+
+        # Gradients of loss w.r.t. transformed Gaussian mean t.
+        ∂L∂t = SVector{3, Float32}(
+            x_grad_mul * -focal_xy[1] * tz² * ∂L∂J₁₃, # x
+            y_grad_mul * -focal_xy[2] * tz² * ∂L∂J₂₃, # y
+            -focal_xy[1] * tz² * ∂L∂J₁₁ +             # z
+                -focal_xy[2] * tz² * ∂L∂J₂₂ +
+                (2f0 * focal_xy[1] * t[1]) * tz³ * ∂L∂J₁₃ +
+                (2f0 * focal_xy[2] * t[2]) * tz³ * ∂L∂J₂₃)
+
+        # Account for transformation of mean to t (apply only inv rotation).
+        rot_inv = SMatrix{3, 3, Float32, 9}(
+            view[1, 1], view[1, 2], view[1, 3],
+            view[2, 1], view[2, 2], view[2, 3],
+            view[3, 1], view[3, 2], view[3, 3])
+        @inbounds ∂L∂means[i] = rot_inv * ∂L∂t
     end
-
-    # Gradients of loss w.r.t. upper 2x3 portion of intermediate matrix T.
-    ∂L∂T₁₁ = 2f0 *
-        ∂L∂a * (T[1,1]*Vrk[1,1] + T[1,2]*Vrk[1,2] + T[1,3]*Vrk[1,3]) +
-        ∂L∂b * (T[2,1]*Vrk[1,1] + T[2,2]*Vrk[1,2] + T[2,3]*Vrk[1,3])
-    ∂L∂T₁₂ = 2f0 *
-        ∂L∂a * (T[1,1]*Vrk[2,1] + T[1,2]*Vrk[2,2] + T[1,3]*Vrk[2,3]) +
-        ∂L∂b * (T[2,1]*Vrk[2,1] + T[2,2]*Vrk[2,2] + T[2,3]*Vrk[2,3])
-    ∂L∂T₁₃ = 2f0 *
-        ∂L∂a * (T[1,1]*Vrk[3,1] + T[1,2]*Vrk[3,2] + T[1,3]*Vrk[3,3]) +
-        ∂L∂b * (T[2,1]*Vrk[3,1] + T[2,2]*Vrk[3,2] + T[2,3]*Vrk[3,3])
-    ∂L∂T₂₁ = 2f0 *
-        ∂L∂c * (T[2,1]*Vrk[1,1] + T[2,2]*Vrk[1,2] + T[2,3]*Vrk[1,3]) +
-        ∂L∂b * (T[1,1]*Vrk[1,1] + T[1,2]*Vrk[1,2] + T[1,3]*Vrk[1,3])
-    ∂L∂T₂₂ = 2f0 *
-        ∂L∂c * (T[2,1]*Vrk[2,1] + T[2,2]*Vrk[2,2] + T[2,3]*Vrk[2,3]) +
-        ∂L∂b * (T[1,1]*Vrk[2,1] + T[1,2]*Vrk[2,2] + T[1,3]*Vrk[2,3])
-    ∂L∂T₂₃ = 2f0 *
-        ∂L∂c * (T[2,1]*Vrk[3,1] + T[2,2]*Vrk[3,2] + T[2,3]*Vrk[3,3]) +
-        ∂L∂b * (T[1,1]*Vrk[3,1] + T[1,2]*Vrk[3,2] + T[1,3]*Vrk[3,3])
-
-    # Gradients of loss w.r.t. upper 3x2 non-zero entries of Jacobian matrix.
-    ∂L∂J₁₁ = W[1, 1] * ∂L∂T₁₁ + W[1, 2] * ∂L∂T₁₂ + W[1, 3] * ∂L∂T₁₃
-    ∂L∂J₁₃ = W[3, 1] * ∂L∂T₁₁ + W[3, 2] * ∂L∂T₁₂ + W[3, 3] * ∂L∂T₁₃
-    ∂L∂J₂₂ = W[2, 1] * ∂L∂T₂₁ + W[2, 2] * ∂L∂T₂₂ + W[2, 3] * ∂L∂T₂₃
-    ∂L∂J₂₃ = W[3, 1] * ∂L∂T₂₁ + W[3, 2] * ∂L∂T₂₂ + W[3, 3] * ∂L∂T₂₃
-
-    tz = 1f0 / t[3]
-    tz² = tz^2
-    tz³ = tz² * tz
-
-    # Gradients of loss w.r.t. transformed Gaussian mean t.
-    ∂L∂t = SVector{3, Float32}(
-        x_grad_mul * -focal_xy[1] * tz² * ∂L∂J₁₃, # x
-        y_grad_mul * -focal_xy[2] * tz² * ∂L∂J₂₃, # y
-        -focal_xy[1] * tz² * ∂L∂J₁₁ +             # z
-            -focal_xy[2] * tz² * ∂L∂J₂₂ +
-            (2f0 * focal_xy[1] * t[1]) * tz³ * ∂L∂J₁₃ +
-            (2f0 * focal_xy[2] * t[2]) * tz³ * ∂L∂J₂₃)
-
-    # Account for transformation of mean to t (apply only inv rotation).
-    rot_inv = SMatrix{3, 3, Float32, 9}(
-        view[1, 1], view[1, 2], view[1, 3],
-        view[2, 1], view[2, 2], view[2, 3],
-        view[3, 1], view[3, 2], view[3, 3])
-    @inbounds ∂L∂means[i] = rot_inv * ∂L∂t
 end
 
 """
@@ -317,47 +317,47 @@ for the covariance computation and inversion,
     scale_modifier::Float32,
 )
     i = @index(Global)
-    @inbounds radii[i] > 0 || return
+    if @inbounds(radii[i] > 0)
+        @inbounds point = means[i]
+        point_h = to_homogeneous(point)
 
-    @inbounds point = means[i]
-    point_h = to_homogeneous(point)
+        # Project point into camera space.
+        projected_h = projection * point_h
+        pw = 1f0 / (projected_h[4] + eps(Float32))
 
-    # Project point into camera space.
-    projected_h = projection * point_h
-    pw = 1f0 / (projected_h[4] + eps(Float32))
+        # Loss gradient w.r.t. 3D means due to gradients of 2D means
+        # from forward pass.
+        mult_1 = pw^2 * (
+            projection[1, 1] * point[1] + projection[1, 2] * point[2] +
+            projection[1, 3] * point[3] + projection[1, 4])
+        mult_2 = pw^2 *(
+            projection[2, 1] * point[1] + projection[2, 2] * point[2] +
+            projection[2, 3] * point[3] + projection[2, 4])
 
-    # Loss gradient w.r.t. 3D means due to gradients of 2D means
-    # from forward pass.
-    mult_1 = pw^2 * (
-        projection[1, 1] * point[1] + projection[1, 2] * point[2] +
-        projection[1, 3] * point[3] + projection[1, 4])
-    mult_2 = pw^2 *(
-        projection[2, 1] * point[1] + projection[2, 2] * point[2] +
-        projection[2, 3] * point[3] + projection[2, 4])
+        @inbounds ∂L∂mean_2d = ∂L∂means_2d[i]
+        ∂L∂mean = SVector{3, Float32}(
+            # x
+            (projection[1, 1] * pw - projection[4, 1] * mult_1) * ∂L∂mean_2d[1] +
+            (projection[2, 1] * pw - projection[4, 1] * mult_2) * ∂L∂mean_2d[2],
+            # y
+            (projection[1, 2] * pw - projection[4, 2] * mult_1) * ∂L∂mean_2d[1] +
+            (projection[2, 2] * pw - projection[4, 2] * mult_2) * ∂L∂mean_2d[2],
+            # z
+            (projection[1, 3] * pw - projection[4, 3] * mult_1) * ∂L∂mean_2d[1] +
+            (projection[2, 3] * pw - projection[4, 3] * mult_2) * ∂L∂mean_2d[2])
 
-    @inbounds ∂L∂mean_2d = ∂L∂means_2d[i]
-    ∂L∂mean = SVector{3, Float32}(
-        # x
-        (projection[1, 1] * pw - projection[4, 1] * mult_1) * ∂L∂mean_2d[1] +
-        (projection[2, 1] * pw - projection[4, 1] * mult_2) * ∂L∂mean_2d[2],
-        # y
-        (projection[1, 2] * pw - projection[4, 2] * mult_1) * ∂L∂mean_2d[1] +
-        (projection[2, 2] * pw - projection[4, 2] * mult_2) * ∂L∂mean_2d[2],
-        # z
-        (projection[1, 3] * pw - projection[4, 3] * mult_1) * ∂L∂mean_2d[1] +
-        (projection[2, 3] * pw - projection[4, 3] * mult_2) * ∂L∂mean_2d[2])
+        @inbounds ∂L∂means[i] += ∂L∂mean + ∇color_from_sh!(
+            # Outputs.
+            @view(∂L∂shs[:, i]),
+            # Inputs.
+            point, camera_position, @view(spherical_harmonics[:, i]), sh_degree,
+            clamped[i], ∂L∂colors[i])
 
-    @inbounds ∂L∂means[i] += ∂L∂mean + ∇color_from_sh!(
-        # Outputs.
-        @view(∂L∂shs[:, i]),
-        # Inputs.
-        point, camera_position, @view(spherical_harmonics[:, i]), sh_degree,
-        clamped[i], ∂L∂colors[i])
-
-    @inbounds ∂L∂scale, ∂L∂q = ∇compute_cov_3d(
-        @view(∂L∂cov[:, i]), scales[i], rotations[i], scale_modifier)
-    @inbounds ∂L∂scales[i] = ∂L∂scale
-    @inbounds ∂L∂rot[i] = ∂L∂q
+        @inbounds ∂L∂scale, ∂L∂q = ∇compute_cov_3d(
+            @view(∂L∂cov[:, i]), scales[i], rotations[i], scale_modifier)
+        @inbounds ∂L∂scales[i] = ∂L∂scale
+        @inbounds ∂L∂rot[i] = ∂L∂q
+    end
 end
 
 function ∇color_from_sh!(

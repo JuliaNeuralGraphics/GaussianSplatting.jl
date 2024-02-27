@@ -21,48 +21,48 @@ Note:
     @inbounds point = means[i]
     point_h = to_homogeneous(point)
     visible, depth = in_frustum(point_h, view)
-    visible || return
+    if visible
+        @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
+        @inbounds cov3Ds[i] = cov3D
 
-    @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
-    @inbounds cov3Ds[i] = cov3D
+        cov = computeCov2D(point_h, focal_xy, tan_fov_xy, cov3D, view)
+        det = cov[1] * cov[3] - cov[2]^2
+        if det ≢ 0f0
+            # Project point into camera space.
+            projected_h = projection * point_h
+            projected =
+                SVector{3, Float32}(projected_h[1], projected_h[2], projected_h[3]) .*
+                (1f0 / (projected_h[4] + eps(Float32)))
 
-    cov = computeCov2D(point_h, focal_xy, tan_fov_xy, cov3D, view)
-    det = cov[1] * cov[3] - cov[2]^2
-    det ≈ 0f0 && return
+            # Compute inverse conic.
+            det_inv = 1f0 / det
+            conic = SVector{3, Float32}(
+                cov[3] * det_inv, -cov[2] * det_inv, cov[1] * det_inv)
 
-    # Project point into camera space.
-    projected_h = projection * point_h
-    projected =
-        SVector{3, Float32}(projected_h[1], projected_h[2], projected_h[3]) .*
-        (1f0 / (projected_h[4] + eps(Float32)))
+            # Compute extent in screen space (by finding eigenvalues of 2D covariance matrix).
+            λ1, λ2 = eigvals_2D(cov, det)
+            radius = gpu_ceil(Int32, 3f0 * sqrt(max(λ1, λ2)))
+            # From `extent`, compute how many tiles does it cover in screen-space.
+            pixel = SVector{2, Float32}(
+                ndc2pix(projected[1], resolution[1]),
+                ndc2pix(projected[2], resolution[2]))
+            rmin, rmax = get_rect(pixel, radius, grid, block)
+            # Quit if does not covert anything.
+            area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
+            if area > 0i32
+                @inbounds begin
+                    depths[i] = depth
+                    radii[i] = radius
+                    pixels[i] = pixel
+                    conic_opacities[i] = SVector{4, Float32}(
+                        conic[1], conic[2], conic[3], opacities[i])
+                    tiles_touched[i] = area
 
-    # Compute inverse conic.
-    det_inv = 1f0 / det
-    conic = SVector{3, Float32}(
-        cov[3] * det_inv, -cov[2] * det_inv, cov[1] * det_inv)
-
-    # Compute extent in screen space (by finding eigenvalues of 2D covariance matrix).
-    λ1, λ2 = eigvals_2D(cov, det)
-    radius = gpu_ceil(Int32, 3f0 * sqrt(max(λ1, λ2)))
-    # From `extent`, compute how many tiles does it cover in screen-space.
-    pixel = SVector{2, Float32}(
-        ndc2pix(projected[1], resolution[1]),
-        ndc2pix(projected[2], resolution[2]))
-    rmin, rmax = get_rect(pixel, radius, grid, block)
-    # Quit if does not covert anything.
-    area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
-    area == 0i32 && return
-
-    @inbounds begin
-        depths[i] = depth
-        radii[i] = radius
-        pixels[i] = pixel
-        conic_opacities[i] = SVector{4, Float32}(
-            conic[1], conic[2], conic[3], opacities[i])
-        tiles_touched[i] = area
-
-        rgbs[i], clamped[i] = compute_colors_from_sh(
-            point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
+                    rgbs[i], clamped[i] = compute_colors_from_sh(
+                        point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
+                end
+            end
+        end
     end
 end
 
