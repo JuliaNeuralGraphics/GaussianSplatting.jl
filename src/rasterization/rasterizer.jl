@@ -128,18 +128,21 @@ function (rast::GaussianRasterizer)(
     covisibility::Maybe{AbstractVector{Bool}} = nothing,
 )
     @assert sh_degree == 0
+    @assert size(q) == (4,)
+    @assert size(t) == (3,)
 
     # Normalize quaterion, convert to 3x3 matrix and apply to gaussians.
     nq = q ./ sqrt.(sum(abs2, q))
     r2c = quat2mat(nq)
-    local_means_3d = r2c * means_3d + t
+    local_means_3d = r2c * means_3d .+ t
 
     normalized_rotations = rotations ./ sqrt.(sum(abs2, rotations; dims=1))
     local_rotations = quat_mul(nq, normalized_rotations)
 
     # Construct camera with identity w2c.
-    id_camera = Camera(SMatrix{3, 3, Float32}(I), zeros(SVector{3, Float32};
-        camera.intrinsics, camera.img_name)
+    id_camera = @ignore_derivatives(Camera(
+        SMatrix{3, 3, Float32}(I), zeros(SVector{3, Float32});
+        camera.intrinsics, camera.img_name))
 
     rasterize(
         local_means_3d,

@@ -75,10 +75,10 @@ function main(dataset_path::String, scale::Int = 8)
         cameras_file, images_file, points_file, images_dir, scale)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=true)
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    for i in 1:3000
+    for i in 1:1000
         loss = step!(trainer)
         @show i, loss
 
@@ -103,8 +103,7 @@ function main(dataset_path::String, scale::Int = 8)
             # @show sum(unio)
             # @show sum(intr) / sum(unio)
 
-            final_img = to_image(rasterizer)
-            save("image-$(trainer.step).png", final_img)
+            save("image-$(trainer.step).png", to_image(rasterizer))
 
             if has_auxiliary(rasterizer)
                 depth_img = to_depth(rasterizer; normalize=true)
@@ -114,7 +113,87 @@ function main(dataset_path::String, scale::Int = 8)
             end
         end
     end
+
+    save_state(trainer, "state.bson")
+
     return
+end
+
+function track(dataset_path::String, scale::Int = 8)
+    kab = Backend
+    get_module(kab).allowscalar(false)
+
+    cameras_file = joinpath(dataset_path, "sparse/0/cameras.bin")
+    images_file = joinpath(dataset_path, "sparse/0/images.bin")
+    points_file = joinpath(dataset_path, "sparse/0/points3D.bin")
+    images_dir = joinpath(dataset_path, "images")
+
+    dataset = ColmapDataset(kab;
+        cameras_file, images_file, points_file, images_dir, scale)
+    opt_params = OptimizationParams()
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+
+    load_state!(trainer, "state.bson")
+
+    cam_idx = rand(1:length(trainer.dataset.cameras))
+    camera = trainer.dataset.cameras[cam_idx]
+    target_image = get_image(trainer, cam_idx)
+
+    w2c = camera.w2c
+    qh = QuatRotation(RotXYZ(w2c[1:3, 1:3]))
+    q = adapt(kab, Float32[qh.q.s, qh.q.v1, qh.q.v2, qh.q.v3])
+    t = adapt(kab, w2c[1:3, 4])
+
+    shs = isempty(gaussians.features_rest) ?
+        gaussians.features_dc :
+        hcat(gaussians.features_dc, gaussians.features_rest)
+    rasterizer(
+        gaussians.points, gaussians.opacities, gaussians.scales,
+        gaussians.rotations, shs,
+        q, t; camera, sh_degree=gaussians.sh_degree,
+        covisibility=nothing)
+
+    save("target-image.png", to_image(rasterizer))
+
+    # Modify pose and start recon.
+    t = adapt(kab, w2c[1:3, 4] .+ Float32[0f0, 0.5f0, 0f0])
+
+    q_opt = NU.Adam(kab, q; lr=1f-5)
+    t_opt = NU.Adam(kab, t; lr=1f-3)
+
+    for i in 1:500
+        shs = isempty(gaussians.features_rest) ?
+            gaussians.features_dc :
+            hcat(gaussians.features_dc, gaussians.features_rest)
+        rasterizer(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            gaussians.rotations, shs,
+            q, t; camera, sh_degree=gaussians.sh_degree)
+        save("recon-image-$i.png", to_image(rasterizer))
+
+        loss, ∇ = Zygote.withgradient(q, t) do q, t
+            shs = isempty(gaussians.features_rest) ?
+                gaussians.features_dc :
+                hcat(gaussians.features_dc, gaussians.features_rest)
+            img = rasterizer(
+                gaussians.points, gaussians.opacities, gaussians.scales,
+                gaussians.rotations, shs,
+                q, t; camera, sh_degree=gaussians.sh_degree)
+
+            # From (c, w, h) to (w, h, c, 1) for SSIM.
+            img_tmp = permutedims(img, (2, 3, 1))
+            img_eval = reshape(img_tmp, size(img_tmp)..., 1)
+
+            # Only L1 for tracking.
+            mean(abs.(img_eval .- target_image))
+        end
+        @show i, loss
+
+        NU.step!(q_opt, q, ∇[1]; dispose=true)
+        NU.step!(t_opt, t, ∇[2]; dispose=true)
+    end
 end
 
 function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = false)
