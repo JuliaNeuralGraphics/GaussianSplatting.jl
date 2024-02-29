@@ -3,6 +3,7 @@ module GaussianSplatting
 using Adapt
 using ChainRulesCore
 using Distributions
+using Enzyme
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using LinearAlgebra
@@ -123,6 +124,37 @@ function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = false)
         GSGUI(dataset_path, scale; width=1024, height=1024, resizable=true)
     end
     gsgui |> launch!
+    return
+end
+
+function ttt()
+    x = AMDGPU.rand(Float32, 4, 1)
+    opt = NU.Adam(Backend, x; lr=1f-1)
+
+    ty = ROCArray(reshape(Float32[0f0, 1f0, 0f0, 0f0], 4, 1))
+    my = quat2mat(ty)
+
+    p = AMDGPU.rand(Float32, 3, 16)
+    my * p
+
+    q1 = AMDGPU.rand(Float32, 4)
+    q2 = AMDGPU.rand(Float32, 4, 13)
+    rr = quat_mul(q1, q2)
+    @show size(rr)
+
+    # for i in 1:100
+    #     if i == 1 || i % 20 == 0
+    #         nn = sqrt.(sum(abs2, x; dims=1))
+    #         xn = x ./ nn
+    #         @show i, xn, nn
+    #     end
+
+    #     ∇ = Zygote.gradient(x) do q
+    #         qn = q ./ sqrt.(sum(abs2, q; dims=1))
+    #         sum(abs2, quat2mat(qn) .- my)
+    #     end
+    #     NU.step!(opt, x, ∇[1]; dispose=false)
+    # end
     return
 end
 

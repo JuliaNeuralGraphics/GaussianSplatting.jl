@@ -14,6 +14,34 @@ function quat2mat(q::SVector{4, Float32})
         2f0 * (x * z + r * y), 2f0 * (y * z - r * x), 1f0 - 2f0 * (x^2 + y^2))
 end
 
+function quat2mat(q)
+    r, x, y, z = q[[1]], q[[2]], q[[3]], q[[4]]
+    reshape(vcat(
+        @.(1f0 - 2f0 * (y^2 + z^2)),
+        @.(2f0 * (x * y + r * z)),
+        @.(2f0 * (x * z - r * y)),
+        @.(2f0 * (x * y - r * z)),
+        @.(1f0 - 2f0 * (x^2 + z^2)),
+        @.(2f0 * (y * z + r * x)),
+        @.(2f0 * (x * z + r * y)),
+        @.(2f0 * (y * z - r * x)),
+        @.(1f0 - 2f0 * (x^2 + y^2))), 3, 3)
+end
+
+function quat_mul(q1, q2)
+    @assert ndims(q1) == 1
+    @assert ndims(q2) == 2
+
+    r1, x1, y1, z1 = q1[[1]], q1[[2]], q1[[3]], q1[[4]]
+    r2, x2, y2, z2 = q2[[1], :], q2[[2], :], q2[[3], :], q2[[4], :]
+
+    r = @. r1 * r2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = @. r1 * x2 + x1 * r2 + y1 * z2 - z1 * y2
+    y = @. r1 * y2 - x1 * z2 + y1 * r2 + z1 * x2
+    z = @. r1 * z2 + x1 * y2 - y1 * x2 + z1 * r2
+    return vcat(r, x, y, z)
+end
+
 sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
     x, 0f0, 0f0,
     0f0, y, 0f0,

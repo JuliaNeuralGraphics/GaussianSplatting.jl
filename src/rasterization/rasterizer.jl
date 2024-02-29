@@ -119,6 +119,37 @@ function (rast::GaussianRasterizer)(
         rast, sh_degree, camera, background, covisibility)
 end
 
+# Supports `q`, `t` gradient.
+function (rast::GaussianRasterizer)(
+    means_3d, opacities, scales, rotations, shs,
+    q, t;
+    camera::Camera, sh_degree::Int,
+    background::SVector{3, Float32} = zeros(SVector{3, Float32}),
+    covisibility::Maybe{AbstractVector{Bool}} = nothing,
+)
+    @assert sh_degree == 0
+
+    # Normalize quaterion, convert to 3x3 matrix and apply to gaussians.
+    nq = q ./ sqrt.(sum(abs2, q))
+    r2c = quat2mat(nq)
+    local_means_3d = r2c * means_3d + t
+
+    normalized_rotations = rotations ./ sqrt.(sum(abs2, rotations; dims=1))
+    local_rotations = quat_mul(nq, normalized_rotations)
+
+    # Construct camera with identity w2c.
+    id_camera = Camera(SMatrix{3, 3, Float32}(I), zeros(SVector{3, Float32};
+        camera.intrinsics, camera.img_name)
+
+    rasterize(
+        local_means_3d,
+        shs,
+        NU.sigmoid.(opacities),
+        exp.(scales),
+        local_rotations ./ sqrt.(sum(abs2, local_rotations; dims=1));
+        rast, sh_degree, camera=id_camera, background, covisibility)
+end
+
 """
 Computing gradients w.r.t. means_3d, shs, opacities, scales, rotations?
 """

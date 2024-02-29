@@ -1,5 +1,7 @@
 using Adapt
 using Test
+using Zygote
+using LinearAlgebra
 using GaussianSplatting
 using StaticArrays
 using Quaternions
