@@ -144,7 +144,7 @@ function track(dataset_path::String, scale::Int = 8)
     # Frame for video.
     target_frame = reshape(Array(target_image), size(target_image)[1:3])
     target_frame = permutedims(target_frame, (3, 1, 2))
-    target_frame = colorview(RGB, target_frame) .|> RGB{N0f8}
+    target_frame = transpose(colorview(RGB, target_frame) .|> RGB{N0f8})
 
     w2c = camera.w2c
     qh = QuatRotation(RotXYZ(w2c[1:3, 1:3]))
@@ -160,36 +160,19 @@ function track(dataset_path::String, scale::Int = 8)
         q, t; camera, sh_degree=gaussians.sh_degree,
         covisibility=nothing)
 
-    save("target-image.png", target_frame)
-
     # Modify pose and start recon.
-    t = adapt(kab, w2c[1:3, 4] .+ Float32[0f0, 0.5f0, 0f0])
+    t = adapt(kab, w2c[1:3, 4] .+ rand(Float32, 3))
 
     q_opt = NU.Adam(kab, q; lr=1f-5)
-    t_opt = NU.Adam(kab, t; lr=1f-3)
-
-    @show size(target_frame)
-    video_height, video_width = size(target_frame)
-    # video_width *= 2
+    t_opt = NU.Adam(kab, t; lr=1f-2)
 
     res = resolution(camera)
-    @show res
-    test_frame = zeros(RGB{N0f8}, res[2], res[1])
-    @show size(test_frame)
+    test_frame = zeros(RGB{N0f8}, res.height, res.width * 2)
     writer = open_video_out(
-        "./track.mp4", test_frame; framerate=24,
+        "./track.mp4", test_frame; framerate=60,
         target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
 
-    for i in 1:100
-        # shs = isempty(gaussians.features_rest) ?
-        #     gaussians.features_dc :
-        #     hcat(gaussians.features_dc, gaussians.features_rest)
-        # rasterizer(
-        #     gaussians.points, gaussians.opacities, gaussians.scales,
-        #     gaussians.rotations, shs,
-        #     q, t; camera, sh_degree=gaussians.sh_degree)
-        # save("recon-image-$i.png", to_image(rasterizer))
-
+    for i in 1:1000
         loss, ∇ = Zygote.withgradient(q, t) do q, t
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
@@ -211,12 +194,10 @@ function track(dataset_path::String, scale::Int = 8)
         NU.step!(q_opt, q, ∇[1]; dispose=true)
         NU.step!(t_opt, t, ∇[2]; dispose=true)
 
-        current_frame = transpose(RGB{N0f8}.(gl_texture(rasterizer)))
-        @show size(current_frame)
-        @assert size(test_frame) == size(current_frame)
-        # frame = hcat(current_frame, target_frame)
-        # @show size(frame)
-        write(writer, current_frame)
+        current_frame = RGB{N0f8}.(to_image(rasterizer))
+        frame = hcat(current_frame, target_frame)
+        @assert size(test_frame) == size(frame)
+        write(writer, frame)
     end
 
     close_video_out!(writer)

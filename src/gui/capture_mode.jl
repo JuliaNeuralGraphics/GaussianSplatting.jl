@@ -93,7 +93,7 @@ function handle_ui!(capture_mode::CaptureMode; gui)
                 video_file = joinpath(save_dir, "out.mp4")
                 res = resolution(gui.camera)
                 capture_mode.writer = open_video_out(
-                    video_file, zeros(RGB{N0f8}, res[2], res[1]);
+                    video_file, zeros(RGB{N0f8}, res.height, res.width);
                     framerate=capture_mode.framerate_ref[],
                     target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
 
@@ -170,7 +170,7 @@ function loop!(capture_mode::CaptureMode; gui)
         mode = gui.ui_state.selected_mode[]
 
         frame = if mode == 0 # Render color.
-            gl_texture(gui.rasterizer)
+            to_image(gui.rasterizer)
         elseif mode == 1 # Render depth.
             to_depth(gui.rasterizer; normalize=true)
         elseif mode == 2 # Render uncertainty.
