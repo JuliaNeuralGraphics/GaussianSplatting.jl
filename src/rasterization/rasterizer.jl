@@ -68,6 +68,7 @@ end
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
+    @show size(r.image)
     raw_img = clamp01!(Array(r.image)[:, :, end:-1:1])
     return colorview(RGB, raw_img)
 end

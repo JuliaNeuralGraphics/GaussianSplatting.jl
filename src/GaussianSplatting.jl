@@ -141,6 +141,11 @@ function track(dataset_path::String, scale::Int = 8)
     camera = trainer.dataset.cameras[cam_idx]
     target_image = get_image(trainer, cam_idx)
 
+    # Frame for video.
+    target_frame = reshape(Array(target_image), size(target_image)[1:3])
+    target_frame = permutedims(target_frame, (3, 1, 2))
+    target_frame = colorview(RGB, target_frame) .|> RGB{N0f8}
+
     w2c = camera.w2c
     qh = QuatRotation(RotXYZ(w2c[1:3, 1:3]))
     q = adapt(kab, Float32[qh.q.s, qh.q.v1, qh.q.v2, qh.q.v3])
@@ -155,7 +160,7 @@ function track(dataset_path::String, scale::Int = 8)
         q, t; camera, sh_degree=gaussians.sh_degree,
         covisibility=nothing)
 
-    save("target-image.png", to_image(rasterizer))
+    save("target-image.png", target_frame)
 
     # Modify pose and start recon.
     t = adapt(kab, w2c[1:3, 4] .+ Float32[0f0, 0.5f0, 0f0])
@@ -163,15 +168,27 @@ function track(dataset_path::String, scale::Int = 8)
     q_opt = NU.Adam(kab, q; lr=1f-5)
     t_opt = NU.Adam(kab, t; lr=1f-3)
 
-    for i in 1:500
-        shs = isempty(gaussians.features_rest) ?
-            gaussians.features_dc :
-            hcat(gaussians.features_dc, gaussians.features_rest)
-        rasterizer(
-            gaussians.points, gaussians.opacities, gaussians.scales,
-            gaussians.rotations, shs,
-            q, t; camera, sh_degree=gaussians.sh_degree)
-        save("recon-image-$i.png", to_image(rasterizer))
+    @show size(target_frame)
+    video_height, video_width = size(target_frame)
+    # video_width *= 2
+
+    res = resolution(camera)
+    @show res
+    test_frame = zeros(RGB{N0f8}, res[2], res[1])
+    @show size(test_frame)
+    writer = open_video_out(
+        "./track.mp4", test_frame; framerate=24,
+        target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
+
+    for i in 1:100
+        # shs = isempty(gaussians.features_rest) ?
+        #     gaussians.features_dc :
+        #     hcat(gaussians.features_dc, gaussians.features_rest)
+        # rasterizer(
+        #     gaussians.points, gaussians.opacities, gaussians.scales,
+        #     gaussians.rotations, shs,
+        #     q, t; camera, sh_degree=gaussians.sh_degree)
+        # save("recon-image-$i.png", to_image(rasterizer))
 
         loss, ∇ = Zygote.withgradient(q, t) do q, t
             shs = isempty(gaussians.features_rest) ?
@@ -193,7 +210,16 @@ function track(dataset_path::String, scale::Int = 8)
 
         NU.step!(q_opt, q, ∇[1]; dispose=true)
         NU.step!(t_opt, t, ∇[2]; dispose=true)
+
+        current_frame = transpose(RGB{N0f8}.(gl_texture(rasterizer)))
+        @show size(current_frame)
+        @assert size(test_frame) == size(current_frame)
+        # frame = hcat(current_frame, target_frame)
+        # @show size(frame)
+        write(writer, current_frame)
     end
+
+    close_video_out!(writer)
 end
 
 function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = false)
@@ -203,37 +229,6 @@ function gui(dataset_path::String, scale::Int = 8; fullscreen::Bool = false)
         GSGUI(dataset_path, scale; width=1024, height=1024, resizable=true)
     end
     gsgui |> launch!
-    return
-end
-
-function ttt()
-    x = AMDGPU.rand(Float32, 4, 1)
-    opt = NU.Adam(Backend, x; lr=1f-1)
-
-    ty = ROCArray(reshape(Float32[0f0, 1f0, 0f0, 0f0], 4, 1))
-    my = quat2mat(ty)
-
-    p = AMDGPU.rand(Float32, 3, 16)
-    my * p
-
-    q1 = AMDGPU.rand(Float32, 4)
-    q2 = AMDGPU.rand(Float32, 4, 13)
-    rr = quat_mul(q1, q2)
-    @show size(rr)
-
-    # for i in 1:100
-    #     if i == 1 || i % 20 == 0
-    #         nn = sqrt.(sum(abs2, x; dims=1))
-    #         xn = x ./ nn
-    #         @show i, xn, nn
-    #     end
-
-    #     ∇ = Zygote.gradient(x) do q
-    #         qn = q ./ sqrt.(sum(abs2, q; dims=1))
-    #         sum(abs2, quat2mat(qn) .- my)
-    #     end
-    #     NU.step!(opt, x, ∇[1]; dispose=false)
-    # end
     return
 end
 
