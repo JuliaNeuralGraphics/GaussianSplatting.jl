@@ -11,6 +11,12 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 
 ## Usage
 
+0. Install GaussianSplatting.jl package:
+
+```julia
+] add https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl.git
+```
+
 - AMD GPU:
 
 1. Add necessary packages: `] add AMDGPU`
