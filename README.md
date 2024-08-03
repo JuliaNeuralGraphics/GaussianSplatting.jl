@@ -23,7 +23,7 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 
 2. Run:
 ```julia
-julia> using AMDGPU, Flux, GaussianSplatting
+julia> using AMDGPU, GaussianSplatting
 
 julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 ```
@@ -34,7 +34,7 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 
 2. Run:
 ```julia
-julia> using CUDA, cuDNN, Flux, GaussianSplatting
+julia> using CUDA, cuDNN, GaussianSplatting
 
 julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 ```
