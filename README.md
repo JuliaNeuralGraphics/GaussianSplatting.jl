@@ -29,8 +29,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory", image_scale)
      ```toml
      [Flux]
      gpu_backend = "AMDGPU"
-     [GaussianSplatting]
-     backend="AMDGPU"
      ```
 
 - Nvidia GPU:
@@ -38,8 +36,6 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory", image_scale)
      ```toml
      [Flux]
      gpu_backend = "CUDA"
-     [GaussianSplatting]
-     backend="CUDA"
      ```
 
 ## Datasets

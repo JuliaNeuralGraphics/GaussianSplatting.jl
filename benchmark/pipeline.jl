@@ -1,8 +1,7 @@
 using GaussianSplatting
 
 function main(dataset_path::String, scale::Int = 1)
-    kab = GaussianSplatting.Backend
-    GaussianSplatting.get_module(kab).allowscalar(false)
+    kab = GaussianSplatting.gpu_backend()
 
     dataset = GaussianSplatting.ColmapDataset(kab, dataset_path; scale)
     opt_params = GaussianSplatting.OptimizationParams()

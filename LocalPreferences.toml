@@ -6,4 +6,4 @@ hard_memory_limit = "80 %"
 gpu_backend = "AMDGPU"
 
 [GaussianSplatting]
-backend = "AMDGPU"
+gpu_backend = "AMDGPU"
