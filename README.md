@@ -11,36 +11,49 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 
 ## Usage
 
-1. Clone/download the repo.
-2. Instantiate the project from its directory:
-   1. Start Julia REPL: `julia --project=. --threads=auto`.
-   2. Install dependencies: `]up`.
-3. Start the GUI from REPL:
+0. Install GaussianSplatting.jl package:
+
 ```julia
-julia> using GaussianSplatting
-julia> image_scale = 1
-julia> GaussianSplatting.gui("path-to-colmap-dataset-directory", image_scale)
+] add https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl.git
+```
+
+- AMD GPU:
+
+1. Add necessary packages: `] add AMDGPU`
+
+2. Run:
+```julia
+julia> using AMDGPU, Flux, GaussianSplatting
+
+julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
+```
+
+- Nvidia GPU:
+
+1. Add necessary packages: `] add CUDA, cuDNN`
+
+2. Run:
+```julia
+julia> using CUDA, cuDNN, Flux, GaussianSplatting
+
+julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 ```
 
 ## GPU selection
 
 - AMD GPU:
-  1. In `LocalPreferences.toml` set:
-     ```toml
-     [Flux]
-     gpu_backend = "AMDGPU"
-     [GaussianSplatting]
-     backend="AMDGPU"
-     ```
+  ```julia
+  julia> using Flux
+
+  julia> Flux.gpu_backend!("AMDGPU")
+  ```
 
 - Nvidia GPU:
-  1. In `LocalPreferences.toml` set:
-     ```toml
-     [Flux]
-     gpu_backend = "CUDA"
-     [GaussianSplatting]
-     backend="CUDA"
-     ```
+  ```julia
+  julia> using Flux
+
+  julia> Flux.gpu_backend!("CUDA")
+  ```
 
 ## Datasets
 

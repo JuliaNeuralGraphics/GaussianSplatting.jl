@@ -49,7 +49,6 @@ const i32 = Literal{Int32}
 const BLOCK::SVector{2, Int32} = SVector{2, Int32}(16i32, 16i32)
 const BLOCK_SIZE::Int32 = 256i32
 
-include("kautils.jl")
 include("utils.jl")
 include("camera.jl")
 include("dataset.jl")
@@ -59,9 +58,12 @@ include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
 
-function main(dataset_path::String, scale::Int = 1)
-    kab = Backend
-    get_module(kab).allowscalar(false)
+# Hacky way to get KA.Backend.
+gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
+
+function main(dataset_path::String; scale::Int)
+    kab = gpu_backend()
+    @info "Using `$kab` GPU backend."
 
     dataset = ColmapDataset(kab, dataset_path; scale)
     opt_params = OptimizationParams()
@@ -101,7 +103,7 @@ function main(dataset_path::String, scale::Int = 1)
 end
 
 function gui(
-    dataset_path::String, scale::Int = 8; fullscreen::Bool = false,
+    dataset_path::String; scale::Int, fullscreen::Bool = false,
 )
     width, height, resizable = fullscreen ?
         (-1, -1, false) :
@@ -117,7 +119,7 @@ function gui(model_path::String, camera::Camera; fullscreen::Bool = false)
         (-1, -1, false) :
         (1024, 1024, true)
 
-    gaussians = GaussianModel(Backend)
+    gaussians = GaussianModel(gpu_backend())
     θ = BSON.load(model_path)
     set_from_bson!(gaussians, θ[:gaussians])
 
@@ -125,5 +127,31 @@ function gui(model_path::String, camera::Camera; fullscreen::Bool = false)
     gui |> launch!
     return
 end
+
+function benchmark(dataset_path::String; scale::Int)
+    kab = gpu_backend()
+
+    dataset = ColmapDataset(kab, dataset_path; scale)
+    opt_params = OptimizationParams()
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+
+    println("Benchmarking `$dataset_path` dataset at `$scale` scale.")
+    warmup_steps = 500
+    n_steps = 1000
+
+    println("Timing `$warmup_steps` warmup steps:")
+    @time for i in 1:warmup_steps
+        GaussianSplatting.step!(trainer)
+    end
+
+    println("Timing `$n_steps` post-warmup steps:")
+    @time for i in 1:n_steps
+        GaussianSplatting.step!(trainer)
+    end
+    return
+end
+
 
 end

@@ -114,8 +114,7 @@ end
 
 # Viewer-only mode.
 function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
-    kab = Backend
-    get_module(kab).allowscalar(false)
+    kab = gpu_backend()
 
     NGL.init(3, 0)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
@@ -150,8 +149,7 @@ end
 
 # Training mode.
 function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
-    kab = Backend
-    get_module(kab).allowscalar(false)
+    kab = gpu_backend()
 
     NGL.init(3, 0)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)

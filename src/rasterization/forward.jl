@@ -134,11 +134,10 @@ end
 
     # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
-        # End if entire block votes it is done rasterizing.
-        synchronize_count(done) == block_size && break
-
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
+
+        @synchronize()
         if progress ≤ range[2]
             @inbounds gaussian_id = gaussian_values_sorted[progress]
             @inbounds collected_id[ridx] = gaussian_id
