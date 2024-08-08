@@ -261,12 +261,6 @@ end
         min(lim_xy[2], max(-lim_xy_neg[2], pypz)) * pv[3],
         pv[3])
 
-    # lim_xy = 1.3f0 .* tan_fov_xy
-    # t = SVector{3, Float32}(
-    #     min(lim_xy[1], max(-lim_xy[1], pxpz)) * pv[3],
-    #     min(lim_xy[2], max(-lim_xy[2], pypz)) * pv[3],
-    #     pv[3])
-
     # W & J are already transposed, because T = W' * J'.
     J = SMatrix{3, 3, Float32, 9}(
         focal_xy[1] / t[3], 0f0, -(focal_xy[1] * t[1]) / t[3]^2,
