@@ -421,7 +421,6 @@ function render!(gui::GSGUI)
         gs.points, gs.opacities, gs.scales,
         gs.rotations, shs; camera=gui.camera, sh_degree)
 
-    # TODO pre-allocate
     mode = gui.ui_state.selected_mode[]
     tex = if mode == 0 # Render color.
         gl_texture(rast)
@@ -429,7 +428,7 @@ function render!(gui::GSGUI)
         to_gl_depth(rast)
     elseif mode == 2 # Render uncertainty.
         to_gl_uncertainty(rast)
-    end .|> RGB
+    end
 
     NGL.set_data!(gui.render_state.surface, tex)
     return

@@ -12,12 +12,14 @@ mutable struct GaussianRasterizer{
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
     A,
+    H <: Maybe{Array{Float32, 3}},
 }
     istate::I
     gstate::G
     bstate::B
 
     image::K
+    host_image::Array{Float32, 3}
 
     # If not nothing, then it is a buffer of the same resolution as `image`.
     # 1st channel - depth
@@ -25,6 +27,7 @@ mutable struct GaussianRasterizer{
     #   0 - if nothing is rendered in the pixel
     #   1 - if pixel if fully opaque
     auxiliary::A
+    host_auxiliary::H
 
     grid::SVector{2, Int32}
 end
@@ -43,8 +46,11 @@ function GaussianRasterizer(kab; width::Int, height::Int, auxiliary::Bool = fals
     bstate = BinningState(kab, 0)
 
     image = KA.allocate(kab, Float32, (3, width, height))
+    host_image = Array{Float32, 3}(undef, (3, width, height))
     aux = auxiliary ? KA.allocate(kab, Float32, (2, width, height)) : nothing
-    GaussianRasterizer(istate, gstate, bstate, image, aux, grid)
+    host_aux = auxiliary ? Array{Float32, 3}(undef, (2, width, height)) : nothing
+    GaussianRasterizer(istate, gstate, bstate,
+        image, host_image, aux, host_aux, grid)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -75,20 +81,33 @@ end
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
-    raw_img = clamp01!(Array(r.image)[:, :, end:-1:1])
-    return colorview(RGB, raw_img)
+    copyto!(r.host_image, @view(r.image[:, :, end:-1:1]))
+    clamp01!(r.host_image)
+    return colorview(RGB, r.host_image)
 end
 
 function to_gl_depth(r::GaussianRasterizer)
-    depth = to_raw_depth(r; normalize=true)
-    depth = reshape(depth[:, end:-1:1], 1, size(depth)...)
-    return colorview(Gray, depth)
+    copyto!(r.host_auxiliary, @view(r.auxiliary[:, :, end:-1:1]))
+
+    # Normalize by max depth to be in [0, 1] range.
+    max_depth = 0f0
+    for w in 1:size(r.host_auxiliary, 2), h in 1:size(r.host_auxiliary, 3)
+        @inbounds d = r.host_auxiliary[1, w, h]
+        isinf(d) && continue
+        max_depth = max(max_depth, d)
+    end
+    r.host_auxiliary[1, :, :] .*= 1f0 / (max_depth + 1f-6)
+
+    # Copy depth values to RGB image.
+    r.host_image .= r.host_auxiliary[1:1, :, :]
+    return colorview(RGB, r.host_image)
 end
 
 function to_gl_uncertainty(r::GaussianRasterizer)
-    raw_aux = Array(r.auxiliary)
-    uncertainty = reshape(raw_aux[2, :, end:-1:1], 1, size(raw_aux)[2:3]...)
-    return colorview(Gray, uncertainty)
+    copyto!(r.host_auxiliary, @view(r.auxiliary[:, :, end:-1:1]))
+    # Copy uncertainty to RGB image.
+    r.host_image .= r.host_auxiliary[2:2, :, :]
+    return colorview(RGB, r.host_image)
 end
 
 # Image conversions.
