@@ -186,7 +186,10 @@ end
     @Const(radii), #::AbstractVector{Int32},
     @Const(means), #::AbstractVector{SVector{3, Float32}},
     view::SMatrix{4, 4, Float32, 16},
-    focal_xy::SVector{2, Float32}, tan_fov_xy::SVector{2, Float32},
+    focal_xy::SVector{2, Float32},
+    tan_fov_xy::SVector{2, Float32},
+    resolution::SVector{2, Int32},
+    principal::SVector{2, Float32},
 )
     i = @index(Global)
     if @inbounds(radii[i]) > 0
@@ -196,7 +199,7 @@ end
             ∂L∂conic_opacities[2, 2, i])
 
         @inbounds cov, J, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
-            to_homogeneous(means[i]), focal_xy, tan_fov_xy,
+            to_homogeneous(means[i]), focal_xy, tan_fov_xy, resolution, principal,
             cov3Ds[i], view, Val{true}())
 
         T = transpose(T) # TODO perform transposed indexing below
