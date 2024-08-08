@@ -15,8 +15,13 @@ Note:
     # Inputs.
     @Const(means), @Const(scales), @Const(rotations), @Const(spherical_harmonics),
     sh_degree, @Const(opacities),
-    projection, view, camera_position, resolution,
-    grid, block, focal_xy, tan_fov_xy, scale_modifier,
+    projection, view, camera_position,
+    resolution::SVector{2, Int32},
+    grid, block,
+    focal_xy::SVector{2, Float32},
+    tan_fov_xy::SVector{2, Float32},
+    principal::SVector{2, Float32},
+    scale_modifier::Float32,
 )
     i = @index(Global)
     @inbounds radii[i] = 0i32
@@ -29,7 +34,8 @@ Note:
         @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
         @inbounds cov3Ds[i] = cov3D
 
-        cov = computeCov2D(point_h, focal_xy, tan_fov_xy, cov3D, view)
+        cov = computeCov2D(point_h, focal_xy, tan_fov_xy,
+            resolution, principal, cov3D, view)
         det = cov[1] * cov[3] - cov[2]^2
         if det ≢ 0f0
             # Project point into camera space.
@@ -236,6 +242,8 @@ end
     point::SVector{4, Float32},
     focal_xy::SVector{2, Float32},
     tan_fov_xy::SVector{2, Float32},
+    resolution::SVector{2, Int32},
+    principal::SVector{2, Float32},
     Σ::SVector{6, Float32},
     view::SMatrix{4, 4, Float32, 16},
     ::Val{backward} = Val{false}(),
@@ -243,11 +251,21 @@ end
     pv = view * point
     pxpz, pypz = (pv[1] / pv[3]), (pv[2] / pv[3])
 
-    lim_xy = 1.3f0 .* tan_fov_xy
+    scaled_tan_fov_xy = 0.3f0 .* tan_fov_xy
+    scaled_principal = principal .* resolution
+    lim_xy = (resolution .- scaled_principal) ./ focal_xy .+ scaled_tan_fov_xy
+    lim_xy_neg = scaled_principal ./ focal_xy .+ scaled_tan_fov_xy
+
     t = SVector{3, Float32}(
-        min(lim_xy[1], max(-lim_xy[1], pxpz)) * pv[3],
-        min(lim_xy[2], max(-lim_xy[2], pypz)) * pv[3],
+        min(lim_xy[1], max(-lim_xy_neg[1], pxpz)) * pv[3],
+        min(lim_xy[2], max(-lim_xy_neg[2], pypz)) * pv[3],
         pv[3])
+
+    # lim_xy = 1.3f0 .* tan_fov_xy
+    # t = SVector{3, Float32}(
+    #     min(lim_xy[1], max(-lim_xy[1], pxpz)) * pv[3],
+    #     min(lim_xy[2], max(-lim_xy[2], pypz)) * pv[3],
+    #     pv[3])
 
     # W & J are already transposed, because T = W' * J'.
     J = SMatrix{3, 3, Float32, 9}(

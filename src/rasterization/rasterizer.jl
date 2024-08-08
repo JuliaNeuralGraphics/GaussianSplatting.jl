@@ -184,7 +184,7 @@ function rasterize(
         camera.w2c,
         camera.camera_center,
         SVector{2, Int32}(width, height),
-        rast.grid, BLOCK, focal_xy, tan_fov_xy, scale_modifier; ndrange=n)
+        rast.grid, BLOCK, focal_xy, tan_fov_xy, K.principal, scale_modifier; ndrange=n)
 
     cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
     # Get total number of tiles touched.
@@ -279,6 +279,7 @@ function ∇rasterize(
     K = camera.intrinsics
     tan_fov_xy = tan.(deg2rad.(0.5f0 .* NU.focal2fov.(K.resolution, K.focal)))
     focal_xy = K.resolution ./ (2f0 .* tan_fov_xy)
+    (; width, height) = resolution(camera)
 
     ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
@@ -313,7 +314,8 @@ function ∇rasterize(
         radii,
         _as_T(SVector{3, Float32}, means_3d),
         camera.w2c,
-        focal_xy, tan_fov_xy; ndrange=n)
+        focal_xy, tan_fov_xy,
+        SVector{2, Int32}(width, height), K.principal; ndrange=n)
 
     scale_modifier = 1f0
     ∇_preprocess!(kab, Int(BLOCK_SIZE))(
