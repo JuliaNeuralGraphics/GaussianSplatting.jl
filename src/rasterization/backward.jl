@@ -13,17 +13,17 @@ and 2D mean positions from per-pixel loss gradients.
     ∂L∂conic_opacities::AbstractArray{Float32, 3},
     ∂L∂means_2d::AbstractMatrix{Float32},
     # Inputs.
-    @Const(∂L∂pixels), # ::AbstractMatrix{SVector{3, Float32}},
+    ∂L∂pixels::AbstractMatrix{SVector{3, Float32}},
     # (output from the forward `render!` pass)
-    @Const(n_contrib), #::AbstractMatrix{UInt32},
-    @Const(accum_α), #::AbstractMatrix{Float32},
+    n_contrib::AbstractMatrix{UInt32},
+    accum_α::AbstractMatrix{Float32},
 
-    @Const(gaussian_values_sorted), #::AbstractVector{UInt32},
-    @Const(means_2d), #::AbstractVector{SVector{2, Float32}},
-    @Const(conic_opacities), #::AbstractVector{SVector{4, Float32}},
-    @Const(rgb_features), #::AbstractVector{SVector{3, Float32}},
+    gaussian_values_sorted::AbstractVector{UInt32},
+    means_2d::AbstractVector{SVector{2, Float32}},
+    conic_opacities::AbstractVector{SVector{4, Float32}},
+    rgb_features::AbstractVector{SVector{3, Float32}},
 
-    @Const(ranges), #::AbstractMatrix{UInt32},
+    ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{3, Float32},
     grid::SVector{2, Int32}, block::SVector{2, Int32},
@@ -181,10 +181,10 @@ end
     ∂L∂cov::AbstractMatrix{Float32},
     ∂L∂τ::Maybe{AbstractMatrix{Float32}}, # (6, N)
     # Inputs.
-    @Const(∂L∂conic_opacities), #::AbstractArray{Float32, 3},
-    @Const(cov3Ds), #::AbstractVector{SVector{6, Float32}},
-    @Const(radii), #::AbstractVector{Int32},
-    @Const(means), #::AbstractVector{SVector{3, Float32}},
+    ∂L∂conic_opacities::AbstractArray{Float32, 3},
+    cov3Ds::AbstractVector{SVector{6, Float32}},
+    radii::AbstractVector{Int32},
+    means::AbstractVector{SVector{3, Float32}},
     view::SMatrix{4, 4, Float32, 16},
     focal_xy::SVector{2, Float32},
     tan_fov_xy::SVector{2, Float32},
@@ -373,16 +373,16 @@ for the covariance computation and inversion,
     ∂L∂rot::AbstractVector{SVector{4, Float32}},
     ∂L∂τ::Maybe{AbstractMatrix{Float32}}, # (6, N), [ρ, θ]
     # Inputs.
-    @Const(∂L∂cov), #::AbstractMatrix{Float32},
-    @Const(∂L∂colors), #::AbstractVector{SVector{3, Float32}},
-    @Const(∂L∂means_2d), #::AbstractVector{SVector{2, Float32}},
-    @Const(radii), #::AbstractVector{Int32},
-    @Const(means), #::AbstractVector{SVector{3, Float32}},
-    @Const(scales), #::AbstractVector{SVector{3, Float32}}, # For cov 3D
-    @Const(rotations), #::AbstractVector{SVector{4, Float32}}, # For cov 3D
-    @Const(spherical_harmonics), #::AbstractMatrix{SVector{3, Float32}},
+    ∂L∂cov::AbstractMatrix{Float32},
+    ∂L∂colors::AbstractVector{SVector{3, Float32}},
+    ∂L∂means_2d::AbstractVector{SVector{2, Float32}},
+    radii::AbstractVector{Int32},
+    means::AbstractVector{SVector{3, Float32}},
+    scales::AbstractVector{SVector{3, Float32}}, # For cov 3D
+    rotations::AbstractVector{SVector{4, Float32}}, # For cov 3D
+    spherical_harmonics::AbstractMatrix{SVector{3, Float32}},
     sh_degree,
-    @Const(clamped), #::AbstractVector{SVector{3, Bool}},
+    clamped::AbstractVector{SVector{3, Bool}},
     projection::SMatrix{4, 4, Float32, 16},
     projection_raw::SMatrix{4, 4, Float32, 16},
     view::SMatrix{4, 4, Float32, 16},

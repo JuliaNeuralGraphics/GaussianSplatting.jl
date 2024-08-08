@@ -13,8 +13,11 @@ Note:
     # Outputs.
     cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched, rgbs, clamped,
     # Inputs.
-    @Const(means), @Const(scales), @Const(rotations), @Const(spherical_harmonics),
-    sh_degree, @Const(opacities),
+    means,
+    scales,
+    rotations,
+    spherical_harmonics,
+    sh_degree, opacities,
     projection, view, camera_position,
     resolution::SVector{2, Int32},
     grid, block,
@@ -84,13 +87,13 @@ end
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
     # Inputs.
-    @Const(gaussian_values_sorted), #::AbstractVector{UInt32},
-    @Const(means_2d), #::AbstractVector{SVector{2, Float32}},
-    @Const(conic_opacities), #::AbstractVector{SVector{4, Float32}},
-    @Const(rgb_features), #::AbstractVector{SVector{3, Float32}},
-    @Const(depths), #::AbstractVector{Float32},
+    gaussian_values_sorted::AbstractVector{UInt32},
+    means_2d::AbstractVector{SVector{2, Float32}},
+    conic_opacities::AbstractVector{SVector{4, Float32}},
+    rgb_features::AbstractVector{SVector{3, Float32}},
+    depths::AbstractVector{Float32},
 
-    @Const(ranges), #::AbstractMatrix{UInt32},
+    ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{3, Float32},
     block::SVector{2, Int32},
