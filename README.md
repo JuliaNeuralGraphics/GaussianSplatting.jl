@@ -48,6 +48,13 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
   julia> Flux.gpu_backend!("AMDGPU")
   ```
 
+  Additionally, set soft & hard memory limit to help Julia GC:
+  ```julia
+  julia> AMDGPU.soft_memory_limit!("80 %")
+
+  julia> AMDGPU.hard_memory_limit!("80 %")
+  ```
+
 - Nvidia GPU:
   ```julia
   julia> using Flux
