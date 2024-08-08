@@ -283,8 +283,8 @@ end
     cov_sub = SVector{3, Float32}(cov[1, 1] + 0.3f0, cov[1, 2], cov[2, 2] + 0.3f0)
 
     if backward
-        x_grad_mul = ifelse(abs(pxpz) > lim_xy[1], 0f0, 1f0)
-        y_grad_mul = ifelse(abs(pypz) > lim_xy[2], 0f0, 1f0)
+        x_grad_mul = ifelse(-lim_xy_neg[1] ≤ pxpz ≤ lim_xy[1], 1f0, 0f0)
+        y_grad_mul = ifelse(-lim_xy_neg[2] ≤ pypz ≤ lim_xy[2], 1f0, 0f0)
         return cov_sub, J, T, W, Vrk, t, x_grad_mul, y_grad_mul
     else
         return cov_sub
