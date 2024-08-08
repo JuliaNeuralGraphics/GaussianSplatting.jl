@@ -83,7 +83,7 @@ end
 function gl_texture(r::GaussianRasterizer)
     copyto!(r.host_image, @view(r.image[:, :, end:-1:1]))
     clamp01!(r.host_image)
-    return colorview(RGB, r.host_image)
+    return r.host_image
 end
 
 function to_gl_depth(r::GaussianRasterizer)
@@ -100,14 +100,14 @@ function to_gl_depth(r::GaussianRasterizer)
 
     # Copy depth values to RGB image.
     r.host_image .= r.host_auxiliary[1:1, :, :]
-    return colorview(RGB, r.host_image)
+    return r.host_image
 end
 
 function to_gl_uncertainty(r::GaussianRasterizer)
     copyto!(r.host_auxiliary, @view(r.auxiliary[:, :, end:-1:1]))
     # Copy uncertainty to RGB image.
     r.host_image .= r.host_auxiliary[2:2, :, :]
-    return colorview(RGB, r.host_image)
+    return r.host_image
 end
 
 # Image conversions.
