@@ -273,6 +273,10 @@ end
         view[1, 1], view[1, 2], view[1, 3],
         view[2, 1], view[2, 2], view[2, 3],
         view[3, 1], view[3, 2], view[3, 3])
+    # TODO
+    # W is the rotation of [R|t] w2c transform
+    # apply it to Vrk cov
+    # https://github.com/nerfstudio-project/gsplat/blob/fc1a3ca8b901279461a8dca2676eb9d600c18b7c/gsplat/cuda/csrc/utils.cuh#L261
     T = W * J
 
     Vrk = SMatrix{3, 3, Float32, 9}(
