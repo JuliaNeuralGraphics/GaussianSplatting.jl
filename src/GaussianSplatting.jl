@@ -32,6 +32,7 @@ using GLFW
 
 import CImGui.lib as iglib
 
+import AcceleratedKernels as AK
 import BSON
 import Flux
 import ImageFiltering

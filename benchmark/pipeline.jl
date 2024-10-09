@@ -2,6 +2,7 @@ using GaussianSplatting
 
 function main(dataset_path::String, scale::Int = 1)
     kab = GaussianSplatting.gpu_backend()
+    println("Backend: $kab")
 
     dataset = GaussianSplatting.ColmapDataset(kab, dataset_path; scale)
     opt_params = GaussianSplatting.OptimizationParams()
@@ -30,4 +31,4 @@ function main(dataset_path::String, scale::Int = 1)
     println("Benchmark `$n_steps` steps took $(t2 - t1) seconds.")
     return
 end
-main("/home/pxlth/Downloads/360_v2/bicycle", 4)
+main("/home/pxl-th/Downloads/360_v2/bicycle", 4)
