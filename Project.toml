@@ -47,7 +47,7 @@ GaussianSplattingAMDGPUExt = "AMDGPU"
 GaussianSplattingCUDAExt = ["CUDA", "cuDNN"]
 
 [compat]
-AMDGPU = "0.9.6"
+AMDGPU = "1.0.3"
 AcceleratedKernels = "0.1.0"
 Adapt = "4.0"
 BSON = "0.3"
@@ -66,7 +66,7 @@ KernelAbstractions = "0.9.22"
 ModernGL = "1.1"
 NNlib = "0.9"
 NearestNeighbors = "0.4"
-NerfUtils = "0.1.6"
+NerfUtils = "0.2"
 NeuralGraphicsGL = "0.3.1"
 Preferences = "1.4"
 Quaternions = "0.7"
