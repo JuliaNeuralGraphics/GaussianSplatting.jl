@@ -226,8 +226,8 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    AK.sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
-    # sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
+    # AK.sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
+    sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)
