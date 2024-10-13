@@ -287,18 +287,18 @@ function densify_split!(gs::GaussianModel, optimizers;
     return
 end
 
-@kernel function _add_split_noise!(points, @Const(rots), @Const(stds))
+@kernel cpu=false inbounds=true function _add_split_noise!(points, @Const(rots), @Const(stds))
     i = @index(Global)
-    @inbounds σ = stds[i]
+    σ = stds[i]
     ξ = SVector{3, Float32}(
         randn(Float32) * σ[1],
         randn(Float32) * σ[2],
         randn(Float32) * σ[3])
 
-    @inbounds q = rots[i]
+    q = rots[i]
     R = quat2mat(normalize(q))
-    @inbounds p = points[i]
-    @inbounds points[i] = p .+ R * ξ
+    p = points[i]
+    points[i] = p .+ R * ξ
 end
 
 function prune_points!(gs::GaussianModel, optimizers, valid_mask)

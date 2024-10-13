@@ -396,36 +396,36 @@ find start/end index ranges.
 I.e. tile 0 spans gaussian keys from `1` to `k₁` index,
 tile 1 from `k₁` to `k₂`, etc.
 """
-@kernel function identify_tile_range!(
+@kernel cpu=false inbounds=true function identify_tile_range!(
     ranges::AbstractMatrix{UInt32},
     gaussian_keys::AbstractVector{UInt64},
 )
     @uniform n = @ndrange()[1]
     i = @index(Global)
 
-    @inbounds tile = (gaussian_keys[i] >> 32) + 1u32
+    tile = (gaussian_keys[i] >> 32) + 1u32
 
     if i == 1
-        @inbounds ranges[1, tile] = 0u32
+        ranges[1, tile] = 0u32
     else
-        @inbounds prev_tile = (gaussian_keys[i - 1] >> 32) + 1u32
+        prev_tile = (gaussian_keys[i - 1] >> 32) + 1u32
         if tile != prev_tile
-            @inbounds ranges[2, prev_tile] = i - 1u32
-            @inbounds ranges[1, tile] = i - 1u32
+            ranges[2, prev_tile] = i - 1u32
+            ranges[1, tile] = i - 1u32
         end
     end
 
     if i == n
-        @inbounds ranges[2, tile] = n
+        ranges[2, tile] = n
     end
 end
 
-@kernel function _permute!(y, @Const(x), @Const(ix))
+@kernel cpu=false inbounds=true function _permute!(y, @Const(x), @Const(ix))
     i = @index(Global)
-    @inbounds y[i] = x[ix[i]]
+    y[i] = x[ix[i]]
 end
 
-@kernel function duplicate_with_keys!(
+@kernel cpu=false inbounds=true function duplicate_with_keys!(
     # Outputs.
     gaussian_keys::AbstractVector{UInt64},
     gaussian_values::AbstractVector{UInt32},
@@ -441,22 +441,22 @@ end
     # No key/value for invisible Gaussians.
     # No need for the default key/value, since `gaussian_offset` covers
     # only valid gaussians.
-    @inbounds radius = radii[i]
+    radius = radii[i]
     if radius > 0
-        @inbounds rmin, rmax = get_rect(means_2d[i], radius, grid, block)
+        rmin, rmax = get_rect(means_2d[i], radius, grid, block)
         # For each tile that the bounding rect overlaps, emit a key/value pair.
         # Key: [tile_id | depth], value: id of the Gaussian.
         # Sorting the values with this key yields Gaussian ids in a list,
         # such that they are first sorted by the tile and then depth.
-        @inbounds depth::UInt64 = reinterpret(UInt32, depths[i])
+        depth::UInt64 = reinterpret(UInt32, depths[i])
 
-        @inbounds offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
+        offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
         for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
             key::UInt64 = UInt64(y) * grid[1] + x
             key <<= 32
             key |= depth
-            @inbounds gaussian_keys[offset] = key
-            @inbounds gaussian_values[offset] = i
+            gaussian_keys[offset] = key
+            gaussian_values[offset] = i
             offset += 1
         end
     end

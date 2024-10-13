@@ -123,10 +123,10 @@ function reset_opacity!(gs::GaussianModel)
     _reset_opacity!(get_backend(gs), 256)(gs.opacities; ndrange=length(gs.opacities))
 end
 
-@kernel function _reset_opacity!(opacities::AbstractMatrix{Float32})
+@kernel cpu=false inbounds=true function _reset_opacity!(opacities::AbstractMatrix{Float32})
     i = @index(Global)
-    @inbounds new_opacity = min(0.1f0, NU.sigmoid(opacities[i]))
-    @inbounds opacities[i] = inverse_sigmoid(new_opacity)
+    new_opacity = min(0.1f0, NU.sigmoid(opacities[i]))
+    opacities[i] = inverse_sigmoid(new_opacity)
 end
 
 Base.length(g::GaussianModel) = size(g.points, 2)
@@ -141,7 +141,7 @@ function update_stats!(
     return
 end
 
-@kernel function _update_stats!(
+@kernel cpu=false inbounds=true function _update_stats!(
     # Outputs.
     max_radii::AbstractVector{Int32},
     accum_∇means_2d::AbstractVector{Float32},
@@ -151,11 +151,11 @@ end
     ∇means_2d::AbstractVector{SVector{2, Float32}},
 )
     i = @index(Global)
-    @inbounds r = radii[i]
+    r = radii[i]
     if r > 0
-        @inbounds max_radii[i] = max(max_radii[i], r)
-        @inbounds accum_∇means_2d[i] += norm(∇means_2d[i])
-        @inbounds denom[i] += 1f0
+        max_radii[i] = max(max_radii[i], r)
+        accum_∇means_2d[i] += norm(∇means_2d[i])
+        denom[i] += 1f0
     end
 end
 
