@@ -6,7 +6,7 @@
 Compute loss gradients w.r.t. RGB of Gaussians, opacity, conic matrix
 and 2D mean positions from per-pixel loss gradients.
 """
-@kernel function ∇render!(
+@kernel cpu=false inbounds=true function ∇render!(
     # Outputs.
     ∂L∂colors::AbstractMatrix{Float32},
     ∂L∂opacities::AbstractMatrix{Float32},
@@ -66,14 +66,14 @@ and 2D mean positions from per-pixel loss gradients.
     collected_id = @localmem UInt32 block_size
 
     # Start rasterization from the back.
-    @inbounds T_final = inside ? accum_α[px, py] : 0f0
+    T_final = inside ? accum_α[px, py] : 0f0
     T = T_final
 
     contributor = to_do
-    @inbounds last_contributor = inside ? n_contrib[px, py] : 0i32
+    last_contributor = inside ? n_contrib[px, py] : 0i32
 
     accum_rec = zeros(MVector{3, Float32})
-    @inbounds ∂L∂pixel = inside ? ∂L∂pixels[px, py] : zeros(SVector{3, Float32})
+    ∂L∂pixel = inside ? ∂L∂pixels[px, py] : zeros(SVector{3, Float32})
 
     last_α = 0f0
     last_color = zeros(MVector{3, Float32})
@@ -89,11 +89,11 @@ and 2D mean positions from per-pixel loss gradients.
         progress = block_size * round + ridx # 1-based.
         if range[1] + progress ≤ range[2]
             # gaussian_id = gaussian_values_sorted[progress]
-            @inbounds gaussian_id = gaussian_values_sorted[range[2] - progress + 1i32]
-            @inbounds collected_id[ridx] = gaussian_id
-            @inbounds collected_xy[ridx] = means_2d[gaussian_id]
-            @inbounds collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
-            @inbounds collected_colors[ridx] = rgb_features[gaussian_id]
+            gaussian_id = gaussian_values_sorted[range[2] - progress + 1i32]
+            collected_id[ridx] = gaussian_id
+            collected_xy[ridx] = means_2d[gaussian_id]
+            collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
+            collected_colors[ridx] = rgb_features[gaussian_id]
         end
         @synchronize()
 
@@ -108,9 +108,9 @@ and 2D mean positions from per-pixel loss gradients.
 
             # Resample using conic matrix:
             # ("Surface Splatting" by Zwicker et al., 2001).
-            @inbounds xy = collected_xy[j]
+            xy = collected_xy[j]
             δxy = xy .- pix
-            @inbounds con_o = collected_conic_opacity[j]
+            con_o = collected_conic_opacity[j]
             power = gaussian_power(con_o, δxy)
             power > 0f0 && continue
 
@@ -125,8 +125,8 @@ and 2D mean positions from per-pixel loss gradients.
             # Propagate gradients to per-Gaussian colors and keep
             # gradients w.r.t. α (blending factor).
             ∂L∂α = 0f0
-            @inbounds gaussian_id = collected_id[j]
-            @inbounds color = collected_colors[j]
+            gaussian_id = collected_id[j]
+            color = collected_colors[j]
             for c in 1i32:channels
                 # Update last color (to be used in the next iteration).
                 accum_rec[c] = last_α * last_color[c] + (1f0 - last_α) * accum_rec[c]
@@ -138,7 +138,7 @@ and 2D mean positions from per-pixel loss gradients.
                 # Update the gradients w.r.t. color of the Gaussian.
                 # Atomically, since this pixel may be one of many, affected
                 # by this Gaussian.
-                @inbounds begin
+                begin
                     @atomic ∂L∂colors[c, gaussian_id] += ∂channel∂color * ∂L∂channel
                 end
             end
@@ -156,7 +156,7 @@ and 2D mean positions from per-pixel loss gradients.
             ∂G∂delx = -gdx * con_o[1] - gdy * con_o[2]
             ∂G∂dely = -gdy * con_o[3] - gdx * con_o[2]
 
-            @inbounds begin
+            begin
                 # Update gradients w.r.t. 2D mean position of the Gaussian.
                 @atomic ∂L∂means_2d[1, gaussian_id] += ∂L∂G * ∂G∂delx * ∂delx∂x
                 @atomic ∂L∂means_2d[2, gaussian_id] += ∂L∂G * ∂G∂dely * ∂dely∂y
@@ -175,7 +175,7 @@ and 2D mean positions from per-pixel loss gradients.
     end
 end
 
-@kernel function ∇compute_cov_2d!(
+@kernel cpu=false inbounds=true function ∇compute_cov_2d!(
     # Outputs.
     ∂L∂means::AbstractVector{SVector{3, Float32}},
     ∂L∂cov::AbstractMatrix{Float32},
@@ -192,13 +192,13 @@ end
     principal::SVector{2, Float32},
 )
     i = @index(Global)
-    if @inbounds(radii[i]) > 0
-        @inbounds ∂L∂conic = SVector{3, Float32}( # Symmetric 2x2 matrix.
+    if radii[i] > 0
+        ∂L∂conic = SVector{3, Float32}( # Symmetric 2x2 matrix.
             ∂L∂conic_opacities[1, 1, i],
             ∂L∂conic_opacities[2, 1, i],
             ∂L∂conic_opacities[2, 2, i])
 
-        @inbounds cov, J, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
+        cov, J, T, W, Vrk, t, x_grad_mul, y_grad_mul = computeCov2D(
             to_homogeneous(means[i]), focal_xy, tan_fov_xy, resolution, principal,
             cov3Ds[i], view, Val{true}())
 
@@ -225,7 +225,7 @@ end
 
             # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
             # given gradients w.r.t. 2D covariance matrix (diagonal).
-            @inbounds begin
+            begin
                 ∂L∂cov[1, i] = (T[1,1]^2 * ∂L∂a + T[1,1] * T[2,1] * ∂L∂b + T[2,1]^2 * ∂L∂c)
                 ∂L∂cov[4, i] = (T[1,2]^2 * ∂L∂a + T[1,2] * T[2,2] * ∂L∂b + T[2,2]^2 * ∂L∂c)
                 ∂L∂cov[6, i] = (T[1,3]^2 * ∂L∂a + T[1,3] * T[2,3] * ∂L∂b + T[2,3]^2 * ∂L∂c)
@@ -234,20 +234,20 @@ end
             # Gradients of loss w.r.t. each 3D covariance matrix (Vrk) entry,
             # given gradients w.r.t. 2D covariance matrix (off-diagonal).
             # Off-diagonal elements appear twice, so double the gradient.
-            @inbounds ∂L∂cov[2, i] =
+            ∂L∂cov[2, i] =
                 2f0 * T[1, 1] * T[1, 2] * ∂L∂a +
                 (T[1, 1] * T[2, 2] + T[1, 2] * T[2, 1]) * ∂L∂b +
                 2f0 * T[2, 1] * T[2, 2] * ∂L∂c
-            @inbounds ∂L∂cov[3, i] =
+            ∂L∂cov[3, i] =
                 2f0 * T[1, 1] * T[1, 3] * ∂L∂a +
                 (T[1, 1] * T[2, 3] + T[1, 3] * T[2, 1]) * ∂L∂b +
                 2f0 * T[2, 1] * T[2, 3] * ∂L∂c
-            @inbounds ∂L∂cov[5, i] =
+            ∂L∂cov[5, i] =
                 2f0 * T[1, 3] * T[1, 2] * ∂L∂a +
                 (T[1, 2] * T[2, 3] + T[1, 3] * T[2, 2]) * ∂L∂b +
                 2f0 * T[2, 2] * T[2, 3] * ∂L∂c
         else
-            @inbounds for j in 1:6
+            for j in 1:6
                 ∂L∂cov[j, i] = 0f0
             end
         end
@@ -296,10 +296,9 @@ end
             view[1, 1], view[1, 2], view[1, 3],
             view[2, 1], view[2, 2], view[2, 3],
             view[3, 1], view[3, 2], view[3, 3])
-        @inbounds ∂L∂means[i] = rot_inv * ∂L∂t
+        ∂L∂means[i] = rot_inv * ∂L∂t
 
         # Compute camera gradients.
-        # TODO inbounds
         if !isnothing(∂L∂τ)
             ∂pC_∂ρ = SMatrix{3, 3, Float32}(I)
             ∂pC_∂θ = skew_sym_mat(-t)
@@ -316,8 +315,8 @@ end
                     ∂L∂t[3] * ∂pC_∂θ[3, j]
             end
             for j in 1:6
-                # NOTE: without @inbounds we get LLVM IR error: gc_frame...
-                @inbounds ∂L∂τ[j, i] += ∂τ[j]
+                # NOTE: without we get LLVM IR error: gc_frame...
+                ∂L∂τ[j, i] += ∂τ[j]
             end
 
             ∂L∂W₁₁ = J[1, 1] * ∂L∂T₁₁
@@ -365,7 +364,7 @@ end
 Backward pass of the preprocessing steps, except
 for the covariance computation and inversion,
 """
-@kernel function ∇_preprocess!(
+@kernel cpu=false inbounds=true function ∇_preprocess!(
     # Outputs.
     ∂L∂means::AbstractVector{SVector{3, Float32}},
     ∂L∂shs::AbstractMatrix{SVector{3, Float32}},
@@ -390,8 +389,8 @@ for the covariance computation and inversion,
     scale_modifier::Float32,
 )
     i = @index(Global)
-    if @inbounds(radii[i] > 0)
-        @inbounds point = means[i]
+    if radii[i] > 0
+        point = means[i]
         point_h = to_homogeneous(point)
 
         # Project point into camera space.
@@ -407,7 +406,7 @@ for the covariance computation and inversion,
             projection[2, 1] * point[1] + projection[2, 2] * point[2] +
             projection[2, 3] * point[3] + projection[2, 4])
 
-        @inbounds ∂L∂mean_2d = ∂L∂means_2d[i]
+        ∂L∂mean_2d = ∂L∂means_2d[i]
         ∂L∂mean = SVector{3, Float32}(
             # x
             (projection[1, 1] * pw - projection[4, 1] * mult_1) * ∂L∂mean_2d[1] +
@@ -423,10 +422,9 @@ for the covariance computation and inversion,
             @view(∂L∂shs[:, i]), # Output.
             point, camera_position, @view(spherical_harmonics[:, i]), # Inputs.
             sh_degree, clamped[i], ∂L∂colors[i])
-        @inbounds ∂L∂means[i] += ∂L∂mean + ∂L∂mean_sh
+        ∂L∂means[i] += ∂L∂mean + ∂L∂mean_sh
 
         if !isnothing(∂L∂τ)
-            # TODO inbounds
             α = pw
             β = -projected_h[1] * α^2
             γ = -projected_h[2] * α^2
@@ -464,8 +462,7 @@ for the covariance computation and inversion,
             ∂mean_2d∂τ[2, 5] = ∂proj∂pC2_∂θ[2]
             ∂mean_2d∂τ[2, 6] = ∂proj∂pC2_∂θ[3]
 
-            # NOTE: without @inbounds we get LLVM IR error: gc_frame...
-            @inbounds for j in 1:6
+            for j in 1:6
                 ∂L∂τ[j, i] +=
                     ∂L∂mean_2d[1] * ∂mean_2d∂τ[1, j] +
                     ∂L∂mean_2d[2] * ∂mean_2d∂τ[2, j]
@@ -476,14 +473,14 @@ for the covariance computation and inversion,
             ∂L∂τ[3, i] -= ∂L∂mean_sh[3]
         end
 
-        @inbounds ∂L∂scale, ∂L∂q = ∇compute_cov_3d(
+        ∂L∂scale, ∂L∂q = ∇compute_cov_3d(
             @view(∂L∂cov[:, i]), scales[i], rotations[i], scale_modifier)
-        @inbounds ∂L∂scales[i] = ∂L∂scale
-        @inbounds ∂L∂rot[i] = ∂L∂q
+        ∂L∂scales[i] = ∂L∂scale
+        ∂L∂rot[i] = ∂L∂q
     end
 end
 
-function ∇color_from_sh!(
+@inbounds function ∇color_from_sh!(
     # Outputs.
     ∂L∂shs::AbstractVector{SVector{3, Float32}},
     # Inputs.
@@ -502,8 +499,8 @@ function ∇color_from_sh!(
     ∂color∂y = zeros(SVector{3, Float32})
     ∂color∂z = zeros(SVector{3, Float32})
 
-    @inbounds ∂L∂shs[1] = SH0 * ∂L∂color
-    @inbounds if degree > 0
+    ∂L∂shs[1] = SH0 * ∂L∂color
+    if degree > 0
         x, y, z = dir
         ∂L∂shs[2] = -SH1 * y * ∂L∂color
         ∂L∂shs[3] =  SH1 * z * ∂L∂color
@@ -512,7 +509,7 @@ function ∇color_from_sh!(
         ∂color∂x = -SH1 * shs[4]
         ∂color∂y = -SH1 * shs[2]
         ∂color∂z =  SH1 * shs[3]
-        @inbounds if degree > 1
+        if degree > 1
             x², y², z² = x^2, y^2, z^2
             xy, xz, yz = x * y, x * z, y * z
 
@@ -536,7 +533,7 @@ function ∇color_from_sh!(
                 SH2C2 * y * shs[6] +
                 SH2C3 * 4f0 * z * shs[7] +
                 SH2C4 * x * shs[8]
-            @inbounds if degree > 2
+            if degree > 2
                 ∂L∂shs[10] = SH3C1 * y * (3f0 * x² - y²) * ∂L∂color
                 ∂L∂shs[11] = SH3C2 * xy * z * ∂L∂color
                 ∂L∂shs[12] = SH3C3 * y * (4f0 * z² - x² - y²) * ∂L∂color
@@ -581,7 +578,7 @@ function ∇color_from_sh!(
     return ∇normalize(dir_orig, ∂L∂dir)
 end
 
-function ∇normalize(dir::SVector{3, Float32}, ∂L∂dir::SVector{3, Float32})
+@inbounds function ∇normalize(dir::SVector{3, Float32}, ∂L∂dir::SVector{3, Float32})
     s² = sum(abs2, dir)
     inv_s = 1f0 / √(s²^3)
     SVector{3, Float32}(
@@ -590,7 +587,7 @@ function ∇normalize(dir::SVector{3, Float32}, ∂L∂dir::SVector{3, Float32})
         (-dir[1] * dir[3] * ∂L∂dir[1] - dir[2] * dir[3] * ∂L∂dir[2] + (s² - dir[3]^2) * ∂L∂dir[3]) * inv_s)
 end
 
-function ∇compute_cov_3d(
+@inbounds function ∇compute_cov_3d(
     ∂L∂cov::AbstractVector{Float32},
     scale::SVector{3, Float32}, rotation::SVector{4, Float32},
     scale_modifier::Float32,
@@ -600,7 +597,7 @@ function ∇compute_cov_3d(
     R = transpose(quat2mat(rotation))
     M = S * R # M = S' * R'
 
-    @inbounds begin
+    begin
         dunc = SVector{3, Float32}(∂L∂cov[1], ∂L∂cov[4], ∂L∂cov[6])
         ounc = SVector{3, Float32}(∂L∂cov[2], ∂L∂cov[3], ∂L∂cov[5]) .* 0.5f0
         ∂L∂Σ = SMatrix{3, 3, Float32, 9}(

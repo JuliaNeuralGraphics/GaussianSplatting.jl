@@ -9,7 +9,7 @@ Note:
 - M: number of spherical harmonics (in PyTorch size of the 1th dim) output size
 - D: degree of spherical harmonics
 """
-@kernel function _preprocess!(
+@kernel cpu=false inbounds=true function _preprocess!(
     # Outputs.
     cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched, rgbs, clamped,
     # Inputs.
@@ -27,15 +27,15 @@ Note:
     scale_modifier::Float32,
 )
     i = @index(Global)
-    @inbounds radii[i] = 0i32
-    @inbounds tiles_touched[i] = 0i32
+    radii[i] = 0i32
+    tiles_touched[i] = 0i32
 
-    @inbounds point = means[i]
+    point = means[i]
     point_h = to_homogeneous(point)
     visible, depth = in_frustum(point_h, view)
     if visible
-        @inbounds cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
-        @inbounds cov3Ds[i] = cov3D
+        cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
+        cov3Ds[i] = cov3D
 
         cov = computeCov2D(point_h, focal_xy, tan_fov_xy,
             resolution, principal, cov3D, view)
@@ -63,7 +63,7 @@ Note:
             # Quit if does not covert anything.
             area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
             if area > 0i32
-                @inbounds begin
+                begin
                     depths[i] = depth
                     radii[i] = radius
                     pixels[i] = pixel
@@ -79,7 +79,7 @@ Note:
     end
 end
 
-@kernel function render!(
+@kernel cpu=false inbounds=true function render!(
     # Outputs.
     out_color::AbstractArray{Float32, 3},
     auxiliary::A,
@@ -148,12 +148,12 @@ end
 
         @synchronize()
         if progress ≤ range[2]
-            @inbounds gaussian_id = gaussian_values_sorted[progress]
-            @inbounds collected_id[ridx] = gaussian_id
-            @inbounds collected_xy[ridx] = means_2d[gaussian_id]
-            @inbounds collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
+            gaussian_id = gaussian_values_sorted[progress]
+            collected_id[ridx] = gaussian_id
+            collected_xy[ridx] = means_2d[gaussian_id]
+            collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
             if A !== Nothing
-                @inbounds collected_depth[ridx] = depths[gaussian_id]
+                collected_depth[ridx] = depths[gaussian_id]
             end
         end
         @synchronize()
@@ -168,8 +168,8 @@ end
 
             # Resample using conic matrix:
             # ("Surface Splatting" by Zwicker et al., 2001).
-            @inbounds xy = collected_xy[j]
-            @inbounds con_o = collected_conic_opacity[j]
+            xy = collected_xy[j]
+            con_o = collected_conic_opacity[j]
             power = gaussian_power(con_o, xy .- pix)
             power > 0f0 && continue
 
@@ -186,18 +186,18 @@ end
                 break
             end
 
-            @inbounds gaussian_id = collected_id[j]
+            gaussian_id = collected_id[j]
             # If needed, mark current Gaussian as visible.
             if C !== Nothing && T > 0.5f0
-                @inbounds covisibility[gaussian_id] = true
+                covisibility[gaussian_id] = true
             end
 
             # Eq. (3) from 3D Gaussian splatting paper.
-            @inbounds feature = rgb_features[collected_id[j]]
-            @inbounds for c in 1i32:channels
+            feature = rgb_features[collected_id[j]]
+            for c in 1i32:channels
                 color[c] += feature[c] * α * T
             end
-            @inbounds if A !== Nothing
+            if A !== Nothing
                 auxiliary_px[1] += collected_depth[j] * α * T
                 auxiliary_px[2] += α * T
             end
@@ -210,30 +210,30 @@ end
         to_do -= block_size
     end
 
-    @inbounds if inside
+    if inside
         px, py = pix .+ 1i32
         accum_α[px, py] = T
         n_contrib[px, py] = last_contributor
-        @inbounds for c in 1i32:channels
+        for c in 1i32:channels
             out_color[c, px, py] = color[c] + T * bg_color[c]
         end
-        @inbounds if A !== Nothing
+        if A !== Nothing
             auxiliary[1, px, py] = auxiliary_px[1]
             auxiliary[2, px, py] = auxiliary_px[2]
         end
     end
 end
 
-@inline function gaussian_power(
+@inbounds @inline function gaussian_power(
     con_o::SVector{4, Float32}, δxy::SVector{2, Float32},
 )
     -0.5f0 * (con_o[1] * δxy[1]^2 + con_o[3] * δxy[2]^2) -
         con_o[2] * δxy[1] * δxy[2]
 end
 
-@inline to_homogeneous(x) = SVector{4, Float32}(x[1], x[2], x[3], 1f0)
+@inbounds @inline to_homogeneous(x) = SVector{4, Float32}(x[1], x[2], x[3], 1f0)
 
-@inline function eigvals_2D(cov::SVector{3, Float32}, det::Float32)
+@inbounds @inline function eigvals_2D(cov::SVector{3, Float32}, det::Float32)
     mid = 0.5f0 * (cov[1] + cov[3])
     tmp = √(max(0.1f0, mid^2 - det))
     λ1 = mid + tmp
@@ -241,7 +241,7 @@ end
     return λ1, λ2
 end
 
-@inline function computeCov2D(
+@inbounds @inline function computeCov2D(
     point::SVector{4, Float32},
     focal_xy::SVector{2, Float32},
     tan_fov_xy::SVector{2, Float32},
@@ -298,11 +298,9 @@ end
     end
 end
 
-"""
-Convert scale and rotation properties of each Gaussian to a 3D covariance
-matrix in world space.
-"""
-@inline function computeCov3D(
+# Convert scale and rotation properties of each Gaussian to a 3D covariance
+# matrix in world space.
+@inbounds @inline function computeCov3D(
     scale::SVector{3, Float32}, rotation::SVector{4, Float32},
     scale_modifier::Float32,
 )
@@ -318,22 +316,20 @@ matrix in world space.
         Σ[2, 2], Σ[2, 3], Σ[3, 3])
 end
 
-"""
-Convert spherical harmonics coefficients of each Gaussian to a RGB color.
-"""
-@inline function compute_colors_from_sh(
+# Convert spherical harmonics coefficients of each Gaussian to a RGB color.
+@inbounds @inline function compute_colors_from_sh(
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
     shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
 ) where degree
-    @inbounds res = SH0 * shs[1]
+    res = SH0 * shs[1]
     if degree > 0
         dir = normalize(point - camera_position)
         x, y, z = dir
-        @inbounds res = res - SH1 * y * shs[2] + SH1 * z * shs[3] - SH1 * x * shs[4]
+        res = res - SH1 * y * shs[2] + SH1 * z * shs[3] - SH1 * x * shs[4]
         if degree > 1
             x², y², z² = x^2, y^2, z^2
             xy, xz, yz = x * y, x * z, y * z
-            @inbounds res = res +
+            res = res +
                 SH2C1 * xy * shs[5] +
                 SH2C2 * yz * shs[6] +
                 SH2C3 * (2f0 * z² - x² - y²) * shs[7] +
@@ -341,7 +337,7 @@ Convert spherical harmonics coefficients of each Gaussian to a RGB color.
                 SH2C5 * (x² - y²) * shs[9]
 
             if degree > 2
-                @inbounds res = res +
+                res = res +
                     SH3C1 * y * (3f0 * x² - y²) * shs[10] +
                     SH3C2 * xy * z * shs[11] +
                     SH3C3 * y * (4f0 * z² - x² - y²) * shs[12] +
