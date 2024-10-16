@@ -2,6 +2,7 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 include("states.jl")
+include("projection.jl")
 include("utils.jl")
 include("forward.jl")
 include("backward.jl")
