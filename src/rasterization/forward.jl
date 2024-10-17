@@ -241,6 +241,11 @@ end
     return λ1, λ2
 end
 
+function max_eigval_2D(Σ_2D::SMatrix{2, 2, Float32, 4}, det::Float32)
+    mid = 0.5f0 * (Σ_2D[1, 1] + Σ_2D[2, 2])
+    return mid + sqrt(max(0.1f0, mid * mid - det))
+end
+
 @inbounds @inline function computeCov2D(
     point::SVector{4, Float32},
     focal_xy::SVector{2, Float32},

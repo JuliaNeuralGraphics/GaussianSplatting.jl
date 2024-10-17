@@ -5,6 +5,7 @@ include("states.jl")
 include("projection.jl")
 include("utils.jl")
 include("forward.jl")
+include("forward_v2.jl")
 include("backward.jl")
 
 mutable struct GaussianRasterizer{
@@ -182,6 +183,28 @@ function rasterize(
 
     _as_T(T, x) = reinterpret(T, reshape(x, :))
     scale_modifier = 1f0 # TODO compute correctly
+
+    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    near_plane, far_plane = 0.2f0, 1000f0
+    radius_clip = 3f0 # In pixels.
+    project!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.depths,
+        rast.gstate.radii,
+        rast.gstate.means_2d,
+        rast.gstate.conic_opacities,
+
+        # Input Gaussians.
+        _as_T(SVector{3, Float32}, means_3d),
+        _as_T(SVector{3, Float32}, scales),
+        _as_T(SVector{4, Float32}, rotations),
+
+        # Input camera properties.
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        # Config.
+        near_plane, far_plane, radius_clip; ndrange=n)
+    return rast.image
 
     # Preprocess per-Gaussian: transformation, bounding, sh-to-rgb.
     _preprocess!(kab, Int(BLOCK_SIZE))(

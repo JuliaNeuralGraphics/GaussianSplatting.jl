@@ -85,7 +85,18 @@ const Backend = GaussianSplatting.Backend
     resolution = SVector{2, Int32}(1024, 1024)
     principal = SVector{2, Float32}(0.5f0, 0.5f0)
 
-    Σ_2D, point_2D = GSP.perspective_projection(point, Σ, focal, resolution, principal)
+    @show Σ
+    @show point
+
+    Σ_2D, point_2D = GSP.perspective_projection(
+        point, Σ, focal, resolution, principal)
     @show Σ_2D
     @show point_2D
+
+    vΣ_2D = ones(SMatrix{2, 2, Float32})
+    vpoint_2D = ones(SVector{2, Float32})
+    vΣ, vpoint = GSP.∇perspective_projection(
+        point, Σ, focal, resolution, principal, vΣ_2D, vpoint_2D)
+    @show vΣ
+    @show vpoint
 end
