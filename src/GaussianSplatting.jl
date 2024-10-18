@@ -9,8 +9,10 @@ using Adapt
 using ChainRulesCore
 using Dates
 using Distributions
+using GPUArraysCore: @allowscalar
 using KernelAbstractions
 using KernelAbstractions: @atomic
+using KernelAbstractions.Extras: @unroll
 using LinearAlgebra
 using NearestNeighbors
 using Quaternions

@@ -139,15 +139,138 @@ function (rast::GaussianRasterizer)(
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
     covisibility::Maybe{AbstractVector{Bool}} = nothing,
 )
-    # Apply activation functions and rasterize.
-    rasterize(
-        means_3d,
-        shs,
+    rasterize_v2(
+        means_3d, shs,
         NU.sigmoid.(opacities),
         exp.(scales),
-        rotations ./ sqrt.(sum(abs2, rotations; dims=1)),
-        ρ, θ;
-        rast, sh_degree, camera, background, covisibility)
+        rotations;
+        rast, sh_degree, camera, background)
+
+    # # Apply activation functions and rasterize.
+    # rasterize(
+    #     means_3d,
+    #     shs,
+    #     NU.sigmoid.(opacities),
+    #     exp.(scales),
+    #     rotations ./ sqrt.(sum(abs2, rotations; dims=1)),
+    #     ρ, θ;
+    #     rast, sh_degree, camera, background, covisibility)
+end
+
+function rasterize_v2(
+    means_3d, shs, opacities, scales, rotations;
+    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+    background::SVector{3, Float32},
+)
+    kab = get_backend(rast)
+    n = size(means_3d, 2)
+    length(rast.gstate) == n || (rast.gstate = GeometryState(kab, n))
+
+    (; width, height) = resolution(camera)
+    @assert width % 16 == 0 && height % 16 == 0
+
+    fill!(rast.image, 0f0)
+    has_auxiliary(rast) && fill!(rast.auxiliary, 0f0)
+
+    _as_T(T, x) = reinterpret(T, reshape(x, :))
+
+    K = camera.intrinsics
+    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+
+    # TODO make configurable.
+    near_plane, far_plane = 0.2f0, 1000f0
+    radius_clip = 3f0 # In pixels.
+    blur_ϵ = 0.3f0
+
+    project!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.depths,
+        rast.gstate.radii,
+        rast.gstate.means_2d,
+        rast.gstate.conic_opacities,
+        # Input Gaussians.
+        _as_T(SVector{3, Float32}, means_3d),
+        _as_T(SVector{3, Float32}, scales),
+        _as_T(SVector{4, Float32}, rotations),
+        # Input camera properties.
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        # Config.
+        near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
+
+    spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.rgbs,
+        rast.gstate.clamped,
+        # Input.
+        rast.gstate.radii,
+        _as_T(SVector{3, Float32}, means_3d),
+        camera.camera_center,
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        Val(sh_degree); ndrange=n)
+
+    count_tiles_per_gaussian!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.tiles_touched,
+        # Input.
+        rast.gstate.means_2d,
+        rast.gstate.radii,
+        rast.grid, BLOCK; ndrange=n)
+
+    cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
+    # Get total number of tiles touched.
+    n_rendered = Int(@allowscalar rast.gstate.points_offset[end])
+
+    length(rast.bstate) == n_rendered ||
+        (rast.bstate = BinningState(kab, n_rendered))
+
+    # For each instance to be rendered, produce [tile | depth] key
+    # and corresponding duplicated Gaussian indices to be sorted.
+    duplicate_with_keys!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.bstate.gaussian_keys_unsorted,
+        rast.bstate.gaussian_values_unsorted,
+        # Input.
+        rast.gstate.means_2d,
+        rast.gstate.depths,
+        rast.gstate.points_offset,
+        rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
+
+    sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
+    _permute!(kab)(
+        rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
+        rast.bstate.permutation; ndrange=n_rendered)
+    _permute!(kab)(
+        rast.bstate.gaussian_values_sorted, rast.bstate.gaussian_values_unsorted,
+        rast.bstate.permutation; ndrange=n_rendered)
+
+    # Identify start-end of per-tile workloads in sorted keys.
+    fill!(rast.istate.ranges, 0u32)
+    if n_rendered > 0
+        identify_tile_range!(kab, Int(BLOCK_SIZE))(
+            rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
+            ndrange=n_rendered)
+    end
+
+    render_v2!(kab, (Int.(BLOCK)...,), (width, height))(
+        # Outputs.
+        rast.image,
+        rast.istate.n_contrib,
+        rast.istate.accum_α,
+        # Inputs.
+        rast.bstate.gaussian_values_sorted,
+        rast.gstate.means_2d,
+        opacities,
+        rast.gstate.conic_opacities,
+        rast.gstate.rgbs,
+        rast.gstate.depths,
+
+        rast.istate.ranges,
+        SVector{2, Int32}(width, height),
+        background,
+        BLOCK, Val(BLOCK_SIZE), Val(3i32))
+
+    return rast.image
 end
 
 """
@@ -184,28 +307,6 @@ function rasterize(
     _as_T(T, x) = reinterpret(T, reshape(x, :))
     scale_modifier = 1f0 # TODO compute correctly
 
-    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
-    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
-    near_plane, far_plane = 0.2f0, 1000f0
-    radius_clip = 3f0 # In pixels.
-    project!(kab, Int(BLOCK_SIZE))(
-        # Output.
-        rast.gstate.depths,
-        rast.gstate.radii,
-        rast.gstate.means_2d,
-        rast.gstate.conic_opacities,
-
-        # Input Gaussians.
-        _as_T(SVector{3, Float32}, means_3d),
-        _as_T(SVector{3, Float32}, scales),
-        _as_T(SVector{4, Float32}, rotations),
-
-        # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
-        # Config.
-        near_plane, far_plane, radius_clip; ndrange=n)
-    return rast.image
-
     # Preprocess per-Gaussian: transformation, bounding, sh-to-rgb.
     _preprocess!(kab, Int(BLOCK_SIZE))(
         # Output.
@@ -231,7 +332,7 @@ function rasterize(
 
     cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
     # Get total number of tiles touched.
-    n_rendered::Int = Array(@view(rast.gstate.points_offset[end]))[1]
+    n_rendered = Int(Array(@view(rast.gstate.points_offset[end]))[1])
     n_rendered == 0 && return rast.image
 
     if length(rast.bstate) != n_rendered # TODO optimize

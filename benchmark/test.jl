@@ -1,4 +1,7 @@
 using GaussianSplatting
+using GaussianSplatting.ImageCore
+using GaussianSplatting.ImageIO
+using GaussianSplatting.FileIO
 
 function main(dataset_path::String, scale::Int = 1)
     kab = GaussianSplatting.gpu_backend()
@@ -21,6 +24,7 @@ function main(dataset_path::String, scale::Int = 1)
         gaussians.points, gaussians.opacities, gaussians.scales,
         gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree,
         covisibility=nothing)
+    save("test.png", GaussianSplatting.to_image(rasterizer))
 
     return
 end
