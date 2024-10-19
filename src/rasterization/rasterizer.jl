@@ -9,6 +9,8 @@ include("forward_v2.jl")
 include("backward.jl")
 include("backward_v2.jl")
 
+include("rasterizer_v2.jl")
+
 mutable struct GaussianRasterizer{
     I <: ImageState,
     G <: GeometryState,
@@ -145,7 +147,7 @@ function (rast::GaussianRasterizer)(
         NU.sigmoid.(opacities),
         exp.(scales),
         rotations;
-        rast, sh_degree, camera, background)
+        rast, camera, sh_degree, background)
 
     # # Apply activation functions and rasterize.
     # rasterize(
@@ -380,12 +382,10 @@ function ∇rasterize(
     return (∂L∂means, ∂L∂shs, ∂L∂opacities, ∂L∂scales, ∂L∂rot, ∂L∂ρ, ∂L∂θ)
 end
 
-function ChainRulesCore.rrule(
-    ::typeof(rasterize), means_3d, shs, opacities, scales, rotations,
-    ρ = nothing, θ = nothing;
+function ChainRulesCore.rrule(::typeof(rasterize),
+    means_3d, shs, opacities, scales, rotations, ρ = nothing, θ = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
-    background::SVector{3, Float32},
-    covisibility::Maybe{AbstractVector{Bool}},
+    background::SVector{3, Float32}, covisibility::Maybe{AbstractVector{Bool}},
 )
     image = rasterize(
         means_3d, shs, opacities, scales, rotations, ρ, θ;

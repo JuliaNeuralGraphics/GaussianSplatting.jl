@@ -106,7 +106,7 @@ function ∇pos_world_to_cam(
 )
     vR = vR + vpoint_cam * point'
     vt = vt + vpoint_cam
-    vpoint = R' * vpoint_cam
+    vpoint = vpoint + R' * vpoint_cam
     return vR, vt, vpoint
 end
 

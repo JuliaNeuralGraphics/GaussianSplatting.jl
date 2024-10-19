@@ -243,6 +243,25 @@ function quat_scale_to_cov(q::SVector{4, Float32}, scale::SVector{3, Float32})
     return M * M'
 end
 
+function ∇quat_scale_to_cov(
+    q::SVector{4, Float32}, scale::SVector{3, Float32},
+    R::SMatrix{3, 3, Float32, 9}, vΣ::SMatrix{3, 3, Float32, 9},
+)
+    S = sdiagm(scale...)
+    M = R * S
+
+    vM = (vΣ + vΣ') * M
+    vR = vM * S
+
+    vq = ∇unnorm_quat2rot(q, vR)
+    vscale = SVector{3, Float32}(
+        R[1, 1] * vM[1, 1] + R[2, 1] * vM[2, 1] + R[3, 1] * vM[3, 1],
+        R[1, 2] * vM[1, 2] + R[2, 2] * vM[2, 2] + R[3, 2] * vM[3, 2],
+        R[1, 3] * vM[1, 3] + R[2, 3] * vM[2, 3] + R[3, 3] * vM[3, 3],
+    )
+    return vq, vscale
+end
+
 function unnorm_quat2rot(q::SVector{4, Float32})
     q = normalize(q)
     w, x, y, z = q
@@ -256,9 +275,37 @@ function unnorm_quat2rot(q::SVector{4, Float32})
         2f0 * (xz + wy), 2f0 * (yz - wx), 1f0 - 2f0 * (x² + y²))
 end
 
-# TODO
-function ∇unnorm_quat2rot()
+function ∇unnorm_quat2rot(q::SVector{4, Float32}, vR::SMatrix{3, 3, Float32, 9})
+    inv_norm = 1f0 / norm(q)
+    q = q / inv_norm
+    w, x, y, z = q
 
+    vqn = SVector{4, Float32}(
+        2f0 * (
+            x * (vR[3, 2] - vR[2, 3]) +
+            y * (vR[1, 3] - vR[3, 1]) +
+            z * (vR[2, 1] - vR[2, 1])
+        ),
+        2f0 * (
+            -2f0 * x * (vR[2, 2] + vR[3, 3]) +
+            y * (vR[2, 1] + vR[2, 1]) +
+            z * (vR[3, 1] + vR[1, 3]) +
+            w * (vR[3, 2] - vR[2, 3])
+        ),
+        2f0 * (
+            x * (vR[2, 1] + vR[1, 2]) -
+            2f0 * y * (vR[1, 1] + vR[3, 3]) +
+            z * (vR[3, 2] + vR[2, 3]) +
+            w * (vR[1, 3] - vR[3, 1])
+        ),
+        2f0 * (
+            x * (vR[3, 1] + vR[1, 3]) +
+            y * (vR[3, 2] + vR[2, 3]) -
+            2f0 * z * (vR[1, 1] + vR[2, 2]) +
+            w * (vR[2, 1] - vR[1, 2])
+        ),
+    )
+    return (vqn - (vqn ⋅ q) * q) * inv_norm
 end
 
 function inverse(x::SMatrix{2, 2, Float32, 4})
@@ -276,9 +323,8 @@ function inverse(x::SMatrix{2, 2, Float32, 4})
     return det, x_inv
 end
 
-# TODO
-function ∇inverse()
-
+function ∇inverse(x::SMatrix{2, 2, Float32, 4}, vx::SMatrix{2, 2, Float32, 4})
+    return -x * vx * x
 end
 
 function add_blur(Σ_2D::SMatrix{2, 2, Float32, 4}, ϵ::Float32)

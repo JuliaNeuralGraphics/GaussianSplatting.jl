@@ -2,7 +2,7 @@
     # Outputs.
     vcolors::AbstractMatrix{Float32},
     vopacities::AbstractMatrix{Float32},
-    vconics::AbstractArray{Float32, 3},
+    vconics::AbstractMatrix{Float32},
     vmeans_2d::AbstractMatrix{Float32},
     # Inputs.
     vpixels::AbstractMatrix{SVector{3, Float32}},
@@ -11,6 +11,7 @@
 
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
+    opacities::AbstractMatrix{Float32},
     conics::AbstractVector{SVector{4, Float32}},
     rgb_features::AbstractVector{SVector{3, Float32}},
 
@@ -93,8 +94,6 @@
             # Skip to the one behind the last.
             contributor ≥ last_contributor && continue
 
-            # Resample using conic matrix:
-            # ("Surface Splatting" by Zwicker et al., 2001).
             xy = collected_xy[j]
             δ = xy .- pix
             opacity = collected_opacity[j]
@@ -103,7 +102,6 @@
                 0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
             σ < 0f0 && continue # TODO replace with `valid` flag and if/else to avoid divergence?
 
-            # Compute α.
             G = exp(-σ)
             α = min(0.99f0, opacity * G)
             α < (1f0 / 255f0) && continue
@@ -112,13 +110,13 @@
             fac = α * T
 
             gaussian_id = collected_id[j]
-            @unroll for c in 1i32:channel
+            @unroll for c in 1i32:channels
                 @atomic vcolors[c, gaussian_id] += fac * vpixel[c]
             end
 
             vα = 0f0
             color = collected_colors[j]
-            @unroll for c in 1i32:channel
+            @unroll for c in 1i32:channels
                 # Update last color (to be used in the next iteration).
                 accum_rec[c] = last_α * last_color[c] + (1f0 - last_α) * accum_rec[c]
                 last_color[c] = color[c]
@@ -134,7 +132,7 @@
             vσ = -opacity * G * vα
             vconic = SVector{3, Float32}(
                 0.5f0 * vσ * δ[1]^2,
-                vσ * δ[1] * δ[2],
+                0.5f0 * vσ * δ[1] * δ[2],
                 0.5f0 * vσ * δ[2]^2,
             )
             vxy = SVector{2, Float32}(
@@ -156,3 +154,104 @@
     end
 end
 
+@kernel cpu=false function ∇project!(
+    # Output.
+    vmeans::AbstractVector{SVector{3, Float32}},
+    vcov_scales::AbstractVector{SVector{3, Float32}},
+    vcov_rotations::AbstractVector{SVector{4, Float32}},
+
+    # Input grad outputs.
+    vmeans_2d::AbstractVector{SVector{2, Float32}},
+    vconics::AbstractArray{SVector{3, Float32}},
+
+    # TODO use SVector{3, Float32}
+    conics::AbstractVector{SVector{4, Float32}},
+    radii::AbstractVector{Int32},
+
+    # Input Gaussians.
+    means::AbstractVector{SVector{3, Float32}},
+    cov_scales::AbstractVector{SVector{3, Float32}},
+    cov_rotations::AbstractVector{SVector{4, Float32}},
+
+    # Input camera properties.
+    R_w2c::SMatrix{3, 3, Float32, 9},
+    t_w2c::SVector{3, Float32},
+    focal::SVector{2, Float32},
+    resolution::SVector{2, Int32},
+    principal::SVector{2, Float32},
+
+    # Config.
+    blur_ϵ::Float32,
+)
+    i = @index(Global)
+
+    conic = conics[i]
+    Σ_2D_inv = SMatrix{2, 2, Float32, 4}(
+        conic[1], conic[2],
+        conic[2], conic[3])
+
+    vconic = vconics[i]
+    vΣ_2D_inv = SMatrix{2, 2, Float32, 4}(
+        vconic[1], vconic[2],
+        vconic[2], vconic[3])
+
+    vΣ_2D = ∇inverse(Σ_2D_inv, vΣ_2D_inv)
+
+    # TODO ∇add_blur: requires storing compensation values in fwd pass.
+
+    mean = means[i]
+    mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
+
+    # TODO store in fwd pass?
+    cov_rotation, cov_scale = cov_rotations[i], cov_scales[i]
+    Σ = quat_scale_to_cov(cov_rotation, cov_scale)
+    Σ_cam = covar_world_to_cam(R_w2c, Σ)
+
+    vmean_2d = vmeans_2d[i]
+    vΣ_cam, vmean_cam = ∇perspective_projection(
+        mean_cam, Σ_cam,
+        focal, resolution, principal,
+        vΣ_2D, vmean_2d,
+    )
+
+    # TODO add vdepth contribution (for diff depth)
+
+    vR = zeros(SMatrix{3, 3, Float32, 9})
+    vt = zeros(SVector{3, Float32})
+    vmean = zeros(SVector{3, Float32})
+    vR, vt, vmean = ∇pos_world_to_cam(
+        R_w2c, t_w2c, mean,
+        vmean_cam, vR, vt, vmean)
+
+    vΣ = zeros(SMatrix{3, 3, Float32, 9})
+    vR, vΣ = ∇covar_world_to_cam(R_w2c, Σ, vΣ_cam, vR, vΣ)
+
+    vq, vscale = ∇quat_scale_to_cov(
+        cov_rotation, cov_scale, unnorm_quat2rot(cov_rotation), vΣ)
+
+    vmeans[i] = vmean
+    vcov_scales[i] = vscale
+    vcov_rotations[i] = vq
+
+    # TODO write grad for vR & vt (for diff camera pose)
+end
+
+@kernel cpu=false function ∇spherical_harmonics!(
+    # Output.
+    vshs::AbstractMatrix{SVector{3, Float32}},
+    vmeans::AbstractVector{SVector{3, Float32}},
+    # Input.
+    means::AbstractVector{SVector{3, Float32}},
+    shs::AbstractMatrix{SVector{3, Float32}},
+    clamped::AbstractVector{SVector{3, Bool}},
+    vcolors::AbstractVector{SVector{3, Float32}},
+    camera_position::SVector{3, Float32},
+    sh_degree,
+)
+    i = @index(Global)
+    vmean = ∇color_from_sh!(
+        @view(vshs[:, i]),
+        means[i], camera_position, @view(shs[:, i]),
+        sh_degree, clamped[i], vcolors[i])
+    vmeans[i] += vmean
+end

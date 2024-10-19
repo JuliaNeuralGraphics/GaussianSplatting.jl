@@ -4,7 +4,7 @@ function rasterize_v2(
     opacities::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32};
-    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+    rast#=::GaussianRasterizer=#, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
     kab = get_backend(rast)
@@ -126,7 +126,7 @@ function ∇rasterize_v2(
     rotations::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
     radii::AbstractVector{Int32};
-    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+    rast#=::GaussianRasterizer=#, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
     kab = get_backend(rast)
@@ -137,7 +137,7 @@ function ∇rasterize_v2(
 
     # Auxiliary buffers.
     vcolors = KA.zeros(kab, Float32, (3, n))
-    vconics = KA.zeros(kab, Float32, (2, 2, n))
+    vconics = KA.zeros(kab, Float32, (3, n))
     vcov = KA.zeros(kab, Float32, (6, n))
 
     vmeans = KA.zeros(kab, Float32, (3, n))
@@ -150,7 +150,7 @@ function ∇rasterize_v2(
     K = camera.intrinsics
     (; width, height) = resolution(camera)
 
-    ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
+    ∇render_v2!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
         vcolors,
         vopacities,
@@ -163,6 +163,7 @@ function ∇rasterize_v2(
 
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
+        opacities,
         rast.gstate.conic_opacities,
         rast.gstate.rgbs,
 
@@ -170,25 +171,61 @@ function ∇rasterize_v2(
         SVector{2, Int32}(width, height), background,
         rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
 
-    # TODO bwd projection
+    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
-    return (vmeans, vshs, vopacities, vscales, vrot)
+    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    blur_ϵ = 0.3f0
+    ∇project!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        _as_T(SVector{3, Float32}, vmeans),
+        _as_T(SVector{3, Float32}, vscales),
+        _as_T(SVector{4, Float32}, vrot),
+
+        # Input grad outputs.
+        rast.gstate.∇means_2d,
+        _as_T(SVector{3, Float32}, vconics),
+
+        rast.gstate.conic_opacities,
+        rast.gstate.radii,
+        # Input Gaussians.
+        _as_T(SVector{3, Float32}, means_3d),
+        _as_T(SVector{3, Float32}, scales),
+        _as_T(SVector{4, Float32}, rotations),
+        # Input camera properties.
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        # Config.
+        blur_ϵ; ndrange=n)
+
+    ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
+        _as_T(SVector{3, Float32}, vmeans),
+        # Input.
+        _as_T(SVector{3, Float32}, means_3d),
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        rast.gstate.clamped,
+        _as_T(SVector{3, Float32}, vcolors),
+        camera.camera_center,
+        Val(sh_degree); ndrange=n)
+
+    return vmeans, vshs, vopacities, vscales, vrot
 end
 
-function ChainRulesCore.rrule(
-    ::typeof(rasterize_v2), means_3d, shs, opacities, scales, rotations;
-    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+function ChainRulesCore.rrule(::typeof(rasterize_v2),
+    means_3d, shs, opacities, scales, rotations;
+    rast#=::GaussianRasterizer=#, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
     image = rasterize_v2(
         means_3d, shs, opacities, scales, rotations;
         rast, camera, sh_degree, background)
 
-    function _rasterize_pullback(vpixels)
+    function _pullback(vpixels)
         ∇ = ∇rasterize_v2(
             vpixels, means_3d, shs, scales, rotations, opacities,
             rast.gstate.radii; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end
-    return image, _rasterize_pullback
+    return image, _pullback
 end
