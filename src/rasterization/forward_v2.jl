@@ -164,8 +164,8 @@ end
 
     # Allocate storage for batches of collectively fetched data.
     collected_conics = @localmem SVector{4, Float32} block_size # TODO replace with 3
-    collected_opacity = @localmem Float32 block_size
     collected_xy = @localmem SVector{2, Float32} block_size
+    collected_opacity = @localmem Float32 block_size
     collected_id = @localmem UInt32 block_size
 
     T = 1f0
@@ -174,7 +174,6 @@ end
 
     color = zeros(MVector{3, Float32})
 
-    # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
@@ -189,28 +188,22 @@ end
             collected_conics[ridx] = conics[gaussian_id]
         end
         @synchronize()
-
         # If `done`, this thread only helps with data fetching.
         done && continue
 
-        # Iterate over current batch.
         for j in 1i32:min(block_size, to_do)
             # Keep track over current position in range.
             contributor += 1u32
 
-            # Resample using conic matrix:
-            # ("Surface Splatting" by Zwicker et al., 2001).
             xy = collected_xy[j]
             opacity = collected_opacity[j]
             conic = collected_conics[j]
-            power = gaussian_power(conic, xy .- pix)
-            power > 0f0 && continue
+            δ = xy .- pix
+            σ = conic[2] * δ[1] * δ[2] +
+                0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
+            σ < 0f0 && continue
 
-            # Eq. (2) from 3D Gaussian splatting paper.
-            # Obtain alpha by multiplying with Gaussian opacity
-            # and its exponential falloff from mean.
-            # Avoid numerical instabilities (see paper appendix).
-            α = min(0.99f0, opacity * exp(power))
+            α = min(0.99f0, opacity * exp(-σ))
             α < (1f0 / 255f0) && continue
 
             T_tmp = T * (1f0 - α)
@@ -220,18 +213,16 @@ end
             end
 
             gaussian_id = collected_id[j]
-
-            # Eq. (3) from 3D Gaussian splatting paper.
             feature = rgb_features[gaussian_id]
             @unroll for c in 1i32:channels
                 color[c] += feature[c] * α * T
             end
 
             T = T_tmp
+
             # Keep track of last range entry to update this pixel.
             last_contributor = contributor
         end
-
         to_do -= block_size
     end
 
