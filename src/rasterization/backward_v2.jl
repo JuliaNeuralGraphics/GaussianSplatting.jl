@@ -235,23 +235,3 @@ end
 
     # TODO write grad for vR & vt (for diff camera pose)
 end
-
-@kernel cpu=false function ∇spherical_harmonics!(
-    # Output.
-    vshs::AbstractMatrix{SVector{3, Float32}},
-    vmeans::AbstractVector{SVector{3, Float32}},
-    # Input.
-    means::AbstractVector{SVector{3, Float32}},
-    shs::AbstractMatrix{SVector{3, Float32}},
-    clamped::AbstractVector{SVector{3, Bool}},
-    vcolors::AbstractVector{SVector{3, Float32}},
-    camera_position::SVector{3, Float32},
-    sh_degree,
-)
-    i = @index(Global)
-    vmean = ∇color_from_sh!(
-        @view(vshs[:, i]),
-        means[i], camera_position, @view(shs[:, i]),
-        sh_degree, clamped[i], vcolors[i])
-    vmeans[i] += vmean
-end

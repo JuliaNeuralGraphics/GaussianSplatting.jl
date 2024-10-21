@@ -3,6 +3,7 @@
 # under the terms of the LICENSE.md file.
 include("states.jl")
 include("projection.jl")
+include("spherical_harmonics.jl")
 include("utils.jl")
 include("forward.jl")
 include("forward_v2.jl")

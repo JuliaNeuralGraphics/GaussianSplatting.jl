@@ -163,7 +163,8 @@ function step!(trainer::Trainer)
     end
 
     if trainer.step ≤ params.densify_until_iter
-        update_stats!(gs, rast.gstate.radii, rast.gstate.∇means_2d)
+        update_stats!(gs, rast.gstate.radii,
+            rast.gstate.∇means_2d, camera.intrinsics.resolution)
         do_densify =
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0

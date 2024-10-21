@@ -22,6 +22,7 @@ function main(dataset_path::String, scale::Int = 1)
 
         if i % 100 == 0
             @show i, loss
+            @show length(gaussians)
 
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
@@ -36,4 +37,4 @@ function main(dataset_path::String, scale::Int = 1)
     end
     return
 end
-main("/home/pxlth/Downloads/360_v2/bicycle", 4)
+main("/home/pxl-th/Downloads/360_v2/bicycle", 4)

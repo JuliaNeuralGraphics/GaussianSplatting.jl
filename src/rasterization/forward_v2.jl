@@ -73,25 +73,6 @@
         Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2], 0f0) # TODO use SVector{3, Float32}
 end
 
-@kernel cpu=false function spherical_harmonics!(
-    # Output.
-    rgbs::AbstractVector{SVector{3, Float32}},
-    clamped::AbstractVector{SVector{3, Bool}},
-    # Inputs.
-    radii::AbstractVector{Int32},
-    means::AbstractVector{SVector{3, Float32}},
-    camera_position::SVector{3, Float32},
-    spherical_harmonics::AbstractMatrix{SVector{3, Float32}},
-    degree,
-)
-    i = @index(Global)
-    radii[i] > 0 || return
-
-    mean = means[i]
-    rgbs[i], clamped[i] = compute_colors_from_sh(
-        mean, camera_position, @view(spherical_harmonics[:, i]), degree)
-end
-
 @kernel cpu=false function count_tiles_per_gaussian!(
     # Output.
     tiles_touched::AbstractVector{Int32},

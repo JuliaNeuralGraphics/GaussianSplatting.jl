@@ -320,39 +320,3 @@ end
         Σ[1, 1], Σ[1, 2], Σ[1, 3],
         Σ[2, 2], Σ[2, 3], Σ[3, 3])
 end
-
-# Convert spherical harmonics coefficients of each Gaussian to a RGB color.
-@inbounds @inline function compute_colors_from_sh(
-    point::SVector{3, Float32}, camera_position::SVector{3, Float32},
-    shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
-) where degree
-    res = SH0 * shs[1]
-    if degree > 0
-        dir = normalize(point - camera_position)
-        x, y, z = dir
-        res = res - SH1 * y * shs[2] + SH1 * z * shs[3] - SH1 * x * shs[4]
-        if degree > 1
-            x², y², z² = x^2, y^2, z^2
-            xy, xz, yz = x * y, x * z, y * z
-            res = res +
-                SH2C1 * xy * shs[5] +
-                SH2C2 * yz * shs[6] +
-                SH2C3 * (2f0 * z² - x² - y²) * shs[7] +
-                SH2C4 * xz * shs[8] +
-                SH2C5 * (x² - y²) * shs[9]
-
-            if degree > 2
-                res = res +
-                    SH3C1 * y * (3f0 * x² - y²) * shs[10] +
-                    SH3C2 * xy * z * shs[11] +
-                    SH3C3 * y * (4f0 * z² - x² - y²) * shs[12] +
-                    SH3C4 * z * (2f0 * z² - 3f0 * x² - 3f0 * y²) * shs[13] +
-                    SH3C5 * x * (4f0 * z² - x² - y²) * shs[14] +
-                    SH3C6 * z * (x² - y²) * shs[15] +
-                    SH3C7 * x * (x² - 3f0 * y²) * shs[16]
-            end
-        end
-    end
-    res = res .+ 0.5f0 .+ eps(Float32) # Add for stability.
-    return max.(0f0, res), (res .< 0f0)
-end
