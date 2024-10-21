@@ -1,4 +1,4 @@
-@kernel cpu=false function spherical_harmonics!(
+@kernel cpu=false inbounds=true function spherical_harmonics!(
     # Output.
     rgbs::AbstractVector{SVector{3, Float32}},
     clamped::AbstractVector{SVector{3, Bool}},
@@ -17,7 +17,7 @@
         mean, camera_position, @view(spherical_harmonics[:, i]), degree)
 end
 
-@kernel cpu=false function ∇spherical_harmonics!(
+@kernel cpu=false inbounds=true function ∇spherical_harmonics!(
     # Output.
     vshs::AbstractMatrix{SVector{3, Float32}},
     vmeans::AbstractVector{SVector{3, Float32}},

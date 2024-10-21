@@ -1,109 +1,124 @@
-# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-"""
-Run preprocessing of gaussians: transforming, bounding, converting SH to RGB.
+@kernel cpu=false inbounds=true function project!(
+    # Output.
+    depths::AbstractVector{Float32},
+    radii::AbstractVector{Int32},
+    means_2D::AbstractVector{SVector{2, Float32}},
+    # TODO use SVector{3, Float32}
+    conics::AbstractVector{SVector{4, Float32}},
 
-Note:
-- P: number of gaussians (in PyTorch size of the 0th dim)
-- M: number of spherical harmonics (in PyTorch size of the 1th dim) output size
-- D: degree of spherical harmonics
-"""
-@kernel cpu=false inbounds=true function _preprocess!(
-    # Outputs.
-    cov3Ds, depths, radii, pixels, conic_opacities, tiles_touched, rgbs, clamped,
-    # Inputs.
-    means,
-    scales,
-    rotations,
-    spherical_harmonics,
-    sh_degree, opacities,
-    projection, view, camera_position,
+    # Input Gaussians.
+    means::AbstractVector{SVector{3, Float32}},
+    cov_scales::AbstractVector{SVector{3, Float32}},
+    cov_rotations::AbstractVector{SVector{4, Float32}},
+
+    # Input camera properties.
+    R_w2c::SMatrix{3, 3, Float32, 9},
+    t_w2c::SVector{3, Float32},
+    focal::SVector{2, Float32},
     resolution::SVector{2, Int32},
-    grid, block,
-    focal_xy::SVector{2, Float32},
-    tan_fov_xy::SVector{2, Float32},
     principal::SVector{2, Float32},
-    scale_modifier::Float32,
+
+    # Config.
+    near_plane::Float32,
+    far_plane::Float32,
+    radius_clip::Float32,
+    blur_ϵ::Float32,
 )
     i = @index(Global)
-    radii[i] = 0i32
-    tiles_touched[i] = 0i32
 
-    point = means[i]
-    point_h = to_homogeneous(point)
-    visible, depth = in_frustum(point_h, view)
-    if visible
-        cov3D = computeCov3D(scales[i], rotations[i], scale_modifier)
-        cov3Ds[i] = cov3D
-
-        cov = computeCov2D(point_h, focal_xy, tan_fov_xy,
-            resolution, principal, cov3D, view)
-        det = cov[1] * cov[3] - cov[2]^2
-        if det ≢ 0f0
-            # Project point into camera space.
-            projected_h = projection * point_h
-            projected =
-                SVector{3, Float32}(projected_h[1], projected_h[2], projected_h[3]) .*
-                (1f0 / (projected_h[4] + eps(Float32)))
-
-            # Compute inverse conic.
-            det_inv = 1f0 / det
-            conic = SVector{3, Float32}(
-                cov[3] * det_inv, -cov[2] * det_inv, cov[1] * det_inv)
-
-            # Compute extent in screen space (by finding eigenvalues of 2D covariance matrix).
-            λ1, λ2 = eigvals_2D(cov, det)
-            radius = gpu_ceil(Int32, 3f0 * sqrt(max(λ1, λ2)))
-            # From `extent`, compute how many tiles does it cover in screen-space.
-            pixel = SVector{2, Float32}(
-                ndc2pix(projected[1], resolution[1]),
-                ndc2pix(projected[2], resolution[2]))
-            rmin, rmax = get_rect(pixel, radius, grid, block)
-            # Quit if does not covert anything.
-            area = (rmax[1] - rmin[1]) * (rmax[2] - rmin[2])
-            if area > 0i32
-                begin
-                    depths[i] = depth
-                    radii[i] = radius
-                    pixels[i] = pixel
-                    conic_opacities[i] = SVector{4, Float32}(
-                        conic[1], conic[2], conic[3], opacities[i])
-                    tiles_touched[i] = area
-
-                    rgbs[i], clamped[i] = compute_colors_from_sh(
-                        point, camera_position, @view(spherical_harmonics[:, i]), sh_degree)
-                end
-            end
-        end
+    mean = means[i]
+    mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
+    if !(near_plane < mean_cam[3] < far_plane)
+        radii[i] = 0i32
+        return
     end
+
+    # Project Gaussian onto image plane.
+    Σ = quat_scale_to_cov(cov_rotations[i], cov_scales[i])
+    Σ_cam = covar_world_to_cam(R_w2c, Σ)
+    Σ_2D, mean_2D = perspective_projection(
+        mean_cam, Σ_cam, focal, resolution, principal)
+
+    Σ_2D, det, compensation = add_blur(Σ_2D, blur_ϵ)
+    if !(det > 0f0)
+        radii[i] = 0i32
+        return
+    end
+
+    _, Σ_2D_inv = inverse(Σ_2D)
+
+    # Take 3σ as the radius.
+    λ = max_eigval_2D(Σ_2D, det)
+    radius = gpu_ceil(Int32, 3f0 * sqrt(λ))
+    if radius ≤ radius_clip
+        radii[i] = 0i32
+        return
+    end
+
+    # Discard Gaussians outside of image plane.
+    if (
+        (mean_2D[1] + radius) ≤ 0 ||
+        (mean_2D[1] - radius) ≥ resolution[1] ||
+        (mean_2D[2] + radius) ≤ 0 ||
+        (mean_2D[2] - radius) ≥ resolution[2]
+    )
+        radii[i] = 0i32
+        return
+    end
+
+    radii[i] = radius
+    means_2D[i] = mean_2D
+    depths[i] = mean_cam[3]
+    conics[i] = SVector{4, Float32}(
+        Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2], 0f0) # TODO use SVector{3, Float32}
+end
+
+@kernel cpu=false inbounds=true function count_tiles_per_gaussian!(
+    # Output.
+    tiles_touched::AbstractVector{Int32},
+    # Input.
+    means_2D::AbstractVector{SVector{2, Float32}},
+    radii::AbstractVector{Int32},
+    tile_grid::SVector{2, Int32},
+    tile_size::SVector{2, Int32},
+)
+    i = @index(Global)
+    radius = radii[i]
+    if !(radius > 0f0)
+        tiles_touched[i] = 0i32
+        return
+    end
+
+    mean_2D = means_2D[i]
+    rect_min, rect_max = get_rect(mean_2D, radius, tile_grid, tile_size)
+    area = prod(rect_max .- rect_min)
+    tiles_touched[i] = area
 end
 
 @kernel cpu=false inbounds=true function render!(
-    # Outputs.
+    # Output.
     out_color::AbstractArray{Float32, 3},
-    auxiliary::A,
-    covisibility::C,
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
-    # Inputs.
+    # Input.
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
-    conic_opacities::AbstractVector{SVector{4, Float32}},
+    opacities::AbstractMatrix{Float32},
+    conics::AbstractVector{SVector{4, Float32}},
     rgb_features::AbstractVector{SVector{3, Float32}},
     depths::AbstractVector{Float32},
 
     ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
-    bg_color::SVector{3, Float32},
+    background::SVector{3, Float32},
     block::SVector{2, Int32},
     ::Val{block_size}, ::Val{channels},
-) where {A, C, block_size, channels}
-    @uniform horizontal_blocks = gpu_cld(resolution[1], block[1])
-
+) where {block_size, channels}
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
     ridx = @index(Local)         # ≡ thread_rank
+
+    horizontal_blocks = gpu_cld(resolution[1], block[1])
 
     # Get current tile and starting pixel range (0-based indices).
     pix_min = SVector{2, Int32}(
@@ -118,7 +133,7 @@ end
     # If not inside, this thread will help with data fetching,
     # but will not participate in rasterization.
     inside = pix[1] < resolution[1] && pix[2] < resolution[2]
-    done = ifelse(inside, Cint(0), Cint(1))
+    done::Bool = ifelse(inside, false, true)
 
     # Load start/end range of IDs to process.
     range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
@@ -129,84 +144,66 @@ end
     rounds::Int32 = gpu_cld(to_do, block_size)
 
     # Allocate storage for batches of collectively fetched data.
-    collected_conic_opacity = @localmem SVector{4, Float32} block_size
+    collected_conics = @localmem SVector{4, Float32} block_size # TODO replace with 3
     collected_xy = @localmem SVector{2, Float32} block_size
+    collected_opacity = @localmem Float32 block_size
     collected_id = @localmem UInt32 block_size
-    collected_depth = (A !== Nothing) ? (@localmem Float32 block_size) : nothing
 
     T = 1f0
     contributor = 0u32
     last_contributor = 0u32
 
     color = zeros(MVector{3, Float32})
-    auxiliary_px = (A !== Nothing) ? zeros(MVector{3, Float32}) : nothing
 
-    # Iterate over batches until done or range is complete.
     for round in 0i32:(rounds - 1i32)
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
 
         @synchronize()
         if progress ≤ range[2]
+            # TODO vectorize load with SIMD
             gaussian_id = gaussian_values_sorted[progress]
             collected_id[ridx] = gaussian_id
             collected_xy[ridx] = means_2d[gaussian_id]
-            collected_conic_opacity[ridx] = conic_opacities[gaussian_id]
-            if A !== Nothing
-                collected_depth[ridx] = depths[gaussian_id]
-            end
+            collected_opacity[ridx] = opacities[gaussian_id]
+            collected_conics[ridx] = conics[gaussian_id]
         end
         @synchronize()
-
         # If `done`, this thread only helps with data fetching.
-        done == Cint(1) && continue
+        done && continue
 
-        # Iterate over current batch.
         for j in 1i32:min(block_size, to_do)
             # Keep track over current position in range.
             contributor += 1u32
 
-            # Resample using conic matrix:
-            # ("Surface Splatting" by Zwicker et al., 2001).
             xy = collected_xy[j]
-            con_o = collected_conic_opacity[j]
-            power = gaussian_power(con_o, xy .- pix)
-            power > 0f0 && continue
+            opacity = collected_opacity[j]
+            conic = collected_conics[j]
+            δ = xy .- pix
+            σ = conic[2] * δ[1] * δ[2] +
+                0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
+            σ < 0f0 && continue
 
-            # Eq. (2) from 3D Gaussian splatting paper.
-            # Obtain alpha by multiplying with Gaussian opacity
-            # and its exponential falloff from mean.
-            # Avoid numerical instabilities (see paper appendix).
-            α = min(0.99f0, con_o[4] * exp(power))
+            α = min(0.99f0, opacity * exp(-σ))
             α < (1f0 / 255f0) && continue
 
             T_tmp = T * (1f0 - α)
             if T_tmp < 1f-4
-                done = Cint(1)
+                done = true
                 break
             end
 
             gaussian_id = collected_id[j]
-            # If needed, mark current Gaussian as visible.
-            if C !== Nothing && T > 0.5f0
-                covisibility[gaussian_id] = true
-            end
-
-            # Eq. (3) from 3D Gaussian splatting paper.
-            feature = rgb_features[collected_id[j]]
-            for c in 1i32:channels
+            feature = rgb_features[gaussian_id]
+            @unroll for c in 1i32:channels
                 color[c] += feature[c] * α * T
-            end
-            if A !== Nothing
-                auxiliary_px[1] += collected_depth[j] * α * T
-                auxiliary_px[2] += α * T
             end
 
             T = T_tmp
+
             # Keep track of last range entry to update this pixel.
             last_contributor = contributor
         end
-
         to_do -= block_size
     end
 
@@ -214,109 +211,122 @@ end
         px, py = pix .+ 1i32
         accum_α[px, py] = T
         n_contrib[px, py] = last_contributor
-        for c in 1i32:channels
-            out_color[c, px, py] = color[c] + T * bg_color[c]
-        end
-        if A !== Nothing
-            auxiliary[1, px, py] = auxiliary_px[1]
-            auxiliary[2, px, py] = auxiliary_px[2]
+        @unroll for c in 1i32:channels
+            out_color[c, px, py] = color[c] + T * background[c]
         end
     end
 end
 
-@inbounds @inline function gaussian_power(
-    con_o::SVector{4, Float32}, δxy::SVector{2, Float32},
+function quat_scale_to_cov(q::SVector{4, Float32}, scale::SVector{3, Float32})
+    S = sdiagm(scale...)
+    R = unnorm_quat2rot(q)
+    M = R * S
+    return M * M'
+end
+
+function ∇quat_scale_to_cov(
+    q::SVector{4, Float32}, scale::SVector{3, Float32},
+    R::SMatrix{3, 3, Float32, 9}, vΣ::SMatrix{3, 3, Float32, 9},
 )
-    -0.5f0 * (con_o[1] * δxy[1]^2 + con_o[3] * δxy[2]^2) -
-        con_o[2] * δxy[1] * δxy[2]
+    S = sdiagm(scale...)
+    M = R * S
+
+    vM = (vΣ + vΣ') * M
+    vR = vM * S
+
+    vq = ∇unnorm_quat2rot(q, vR)
+    vscale = SVector{3, Float32}(
+        R[1, 1] * vM[1, 1] + R[2, 1] * vM[2, 1] + R[3, 1] * vM[3, 1],
+        R[1, 2] * vM[1, 2] + R[2, 2] * vM[2, 2] + R[3, 2] * vM[3, 2],
+        R[1, 3] * vM[1, 3] + R[2, 3] * vM[2, 3] + R[3, 3] * vM[3, 3],
+    )
+    return vq, vscale
 end
 
-@inbounds @inline to_homogeneous(x) = SVector{4, Float32}(x[1], x[2], x[3], 1f0)
+function unnorm_quat2rot(q::SVector{4, Float32})
+    q = normalize(q)
+    w, x, y, z = q
+    x², y², z² = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
 
-@inbounds @inline function eigvals_2D(cov::SVector{3, Float32}, det::Float32)
-    mid = 0.5f0 * (cov[1] + cov[3])
-    tmp = √(max(0.1f0, mid^2 - det))
-    λ1 = mid + tmp
-    λ2 = mid - tmp
-    return λ1, λ2
+    return SMatrix{3, 3, Float32, 9}(
+        1f0 - 2f0 * (y² + z²), 2f0 * (xy + wz), 2f0 * (xz - wy),
+        2f0 * (xy - wz), 1f0 - 2f0 * (x² + z²), 2f0 * (yz + wx),
+        2f0 * (xz + wy), 2f0 * (yz - wx), 1f0 - 2f0 * (x² + y²))
 end
 
-function max_eigval_2D(Σ_2D::SMatrix{2, 2, Float32, 4}, det::Float32)
+function ∇unnorm_quat2rot(q::SVector{4, Float32}, vR::SMatrix{3, 3, Float32, 9})
+    inv_norm = 1f0 / norm(q)
+    q = q / inv_norm
+    w, x, y, z = q
+
+    vqn = SVector{4, Float32}(
+        2f0 * (
+            x * (vR[3, 2] - vR[2, 3]) +
+            y * (vR[1, 3] - vR[3, 1]) +
+            z * (vR[2, 1] - vR[2, 1])
+        ),
+        2f0 * (
+            -2f0 * x * (vR[2, 2] + vR[3, 3]) +
+            y * (vR[2, 1] + vR[2, 1]) +
+            z * (vR[3, 1] + vR[1, 3]) +
+            w * (vR[3, 2] - vR[2, 3])
+        ),
+        2f0 * (
+            x * (vR[2, 1] + vR[1, 2]) -
+            2f0 * y * (vR[1, 1] + vR[3, 3]) +
+            z * (vR[3, 2] + vR[2, 3]) +
+            w * (vR[1, 3] - vR[3, 1])
+        ),
+        2f0 * (
+            x * (vR[3, 1] + vR[1, 3]) +
+            y * (vR[3, 2] + vR[2, 3]) -
+            2f0 * z * (vR[1, 1] + vR[2, 2]) +
+            w * (vR[2, 1] - vR[1, 2])
+        ),
+    )
+    return (vqn - (vqn ⋅ q) * q) * inv_norm
+end
+
+function inverse(x::SMatrix{2, 2, Float32, 4})
+    det = x[1, 1] * x[2, 2] - x[1, 2] * x[2, 1]
+    if det ≈ 0f0
+        return det, zeros(SMatrix{2, 2, Float32, 4})
+    end
+
+    det_inv = 1f0 / det
+    tmp = -x[1, 2] * det_inv
+    x_inv = SMatrix{2, 2, Float32, 4}(
+        x[2, 2] * det_inv, tmp,
+        tmp, x[1, 1] * det_inv,
+    )
+    return det, x_inv
+end
+
+function ∇inverse(x::SMatrix{2, 2, Float32, 4}, vx::SMatrix{2, 2, Float32, 4})
+    return -x * vx * x
+end
+
+function add_blur(Σ_2D::SMatrix{2, 2, Float32, 4}, ϵ::Float32)
+    det_orig = Σ_2D[1, 1] * Σ_2D[2, 2] - Σ_2D[1, 2] * Σ_2D[2, 1]
+    Σ_2D = SMatrix{2, 2, Float32, 4}(
+        Σ_2D[1, 1] + ϵ, Σ_2D[2, 1],
+        Σ_2D[1, 2],     Σ_2D[2, 2] + ϵ,
+    )
+    det_blur = Σ_2D[1, 1] * Σ_2D[2, 2] - Σ_2D[1, 2] * Σ_2D[2, 1]
+    compensation = sqrt(max(0f0, det_orig / det_blur))
+    return Σ_2D, det_blur, compensation
+end
+
+# TODO
+function ∇add_blur()
+
+end
+
+@inbounds @inline function max_eigval_2D(
+    Σ_2D::SMatrix{2, 2, Float32, 4}, det::Float32,
+)
     mid = 0.5f0 * (Σ_2D[1, 1] + Σ_2D[2, 2])
     return mid + sqrt(max(0.1f0, mid * mid - det))
-end
-
-@inbounds @inline function computeCov2D(
-    point::SVector{4, Float32},
-    focal_xy::SVector{2, Float32},
-    tan_fov_xy::SVector{2, Float32},
-    resolution::SVector{2, Int32},
-    principal::SVector{2, Float32},
-    Σ::SVector{6, Float32},
-    view::SMatrix{4, 4, Float32, 16},
-    ::Val{backward} = Val{false}(),
-) where backward
-    pv = view * point
-    pxpz, pypz = (pv[1] / pv[3]), (pv[2] / pv[3])
-
-    scaled_tan_fov_xy = 0.3f0 .* tan_fov_xy
-    scaled_principal = principal .* resolution
-    lim_xy = (resolution .- scaled_principal) ./ focal_xy .+ scaled_tan_fov_xy
-    lim_xy_neg = scaled_principal ./ focal_xy .+ scaled_tan_fov_xy
-
-    t = SVector{3, Float32}(
-        min(lim_xy[1], max(-lim_xy_neg[1], pxpz)) * pv[3],
-        min(lim_xy[2], max(-lim_xy_neg[2], pypz)) * pv[3],
-        pv[3])
-
-    # W & J are already transposed, because T = W' * J'.
-    J = SMatrix{3, 3, Float32, 9}(
-        focal_xy[1] / t[3], 0f0, -(focal_xy[1] * t[1]) / t[3]^2,
-        0f0, focal_xy[2] / t[3], -(focal_xy[2] * t[2]) / t[3]^2,
-        0f0, 0f0, 0f0)
-    W = SMatrix{3, 3, Float32, 9}(
-        view[1, 1], view[1, 2], view[1, 3],
-        view[2, 1], view[2, 2], view[2, 3],
-        view[3, 1], view[3, 2], view[3, 3])
-    # TODO
-    # W is the rotation of [R|t] w2c transform
-    # apply it to Vrk cov
-    # https://github.com/nerfstudio-project/gsplat/blob/fc1a3ca8b901279461a8dca2676eb9d600c18b7c/gsplat/cuda/csrc/utils.cuh#L261
-    T = W * J
-
-    Vrk = SMatrix{3, 3, Float32, 9}(
-        Σ[1], Σ[2], Σ[3],
-        Σ[2], Σ[4], Σ[5],
-        Σ[3], Σ[5], Σ[6])
-    # Eq. (5).
-    cov = transpose(T) * Vrk * T
-    # Apply low-pass filter: every Gaussian should be at least 1-pixel wide/high.
-    # Discard 3rd row and column.
-    cov_sub = SVector{3, Float32}(cov[1, 1] + 0.3f0, cov[1, 2], cov[2, 2] + 0.3f0)
-
-    if backward
-        x_grad_mul = ifelse(-lim_xy_neg[1] ≤ pxpz ≤ lim_xy[1], 1f0, 0f0)
-        y_grad_mul = ifelse(-lim_xy_neg[2] ≤ pypz ≤ lim_xy[2], 1f0, 0f0)
-        return cov_sub, J, T, W, Vrk, t, x_grad_mul, y_grad_mul
-    else
-        return cov_sub
-    end
-end
-
-# Convert scale and rotation properties of each Gaussian to a 3D covariance
-# matrix in world space.
-@inbounds @inline function computeCov3D(
-    scale::SVector{3, Float32}, rotation::SVector{4, Float32},
-    scale_modifier::Float32,
-)
-    scale = scale * scale_modifier
-    # Eq. 6.
-    S = sdiagm(scale...)
-    R = transpose(quat2mat(rotation))
-    M = S * R # M = S' * R'
-    Σ = transpose(M) * M
-    # Covariance is symmetric, return upper-right part.
-    SVector{6, Float32}(
-        Σ[1, 1], Σ[1, 2], Σ[1, 3],
-        Σ[2, 2], Σ[2, 3], Σ[3, 3])
 end

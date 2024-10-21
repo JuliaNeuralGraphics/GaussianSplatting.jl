@@ -70,7 +70,7 @@ function main(dataset_path::String; scale::Int)
     dataset = ColmapDataset(kab, dataset_path; scale)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     for i in 1:3000
@@ -86,17 +86,8 @@ function main(dataset_path::String; scale::Int)
                 hcat(gaussians.features_dc, gaussians.features_rest)
             rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
-                gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree,
-                covisibility=nothing)
-
+                gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
             save("image-$(trainer.step).png", to_image(rasterizer))
-
-            if has_auxiliary(rasterizer)
-                depth_img = to_depth(rasterizer; normalize=true)
-                uncertainty_img = to_uncertainty(rasterizer)
-                save("depth-$(trainer.step).png", depth_img)
-                save("uncertainty-$(trainer.step).png", uncertainty_img)
-            end
         end
     end
 
@@ -127,31 +118,6 @@ function gui(model_path::String, camera::Camera; fullscreen::Bool = false)
 
     gui = GSGUI(gaussians, camera; width, height, fullscreen, resizable)
     gui |> launch!
-    return
-end
-
-function benchmark(dataset_path::String; scale::Int)
-    kab = gpu_backend()
-
-    dataset = ColmapDataset(kab, dataset_path; scale)
-    opt_params = OptimizationParams()
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; auxiliary=false)
-    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
-
-    println("Benchmarking `$dataset_path` dataset at `$scale` scale.")
-    warmup_steps = 500
-    n_steps = 1000
-
-    println("Timing `$warmup_steps` warmup steps:")
-    @time for i in 1:warmup_steps
-        GaussianSplatting.step!(trainer)
-    end
-
-    println("Timing `$n_steps` post-warmup steps:")
-    @time for i in 1:n_steps
-        GaussianSplatting.step!(trainer)
-    end
     return
 end
 

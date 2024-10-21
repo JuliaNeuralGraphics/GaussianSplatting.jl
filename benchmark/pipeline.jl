@@ -7,8 +7,7 @@ function main(dataset_path::String, scale::Int = 1)
     opt_params = GaussianSplatting.OptimizationParams()
     gaussians = GaussianSplatting.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianSplatting.GaussianRasterizer(kab,
-        dataset.cameras[1]; auxiliary=false)
+    rasterizer = GaussianSplatting.GaussianRasterizer(kab, dataset.cameras[1])
     trainer = GaussianSplatting.Trainer(rasterizer, gaussians, dataset, opt_params)
 
     println("Benchmarking `$dataset_path` dataset at `$scale` scale.")
@@ -30,4 +29,4 @@ function main(dataset_path::String, scale::Int = 1)
     println("Benchmark `$n_steps` steps took $(t2 - t1) seconds.")
     return
 end
-main("/home/pxlth/Downloads/360_v2/bicycle", 4)
+main("/home/pxl-th/Downloads/360_v2/bicycle", 4)

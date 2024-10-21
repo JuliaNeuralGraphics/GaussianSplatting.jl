@@ -6,19 +6,13 @@ include("projection.jl")
 include("spherical_harmonics.jl")
 include("utils.jl")
 include("forward.jl")
-include("forward_v2.jl")
 include("backward.jl")
-include("backward_v2.jl")
-
-include("rasterizer_v2.jl")
 
 mutable struct GaussianRasterizer{
     I <: ImageState,
     G <: GeometryState,
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
-    A,
-    H <: Maybe{Array{Float32, 3}},
 }
     istate::I
     gstate::G
@@ -27,23 +21,15 @@ mutable struct GaussianRasterizer{
     image::K
     host_image::Array{Float32, 3}
 
-    # If not nothing, then it is a buffer of the same resolution as `image`.
-    # 1st channel - depth
-    # 2nd channel - silhouette values in [0, 1] range:
-    #   0 - if nothing is rendered in the pixel
-    #   1 - if pixel if fully opaque
-    auxiliary::A
-    host_auxiliary::H
-
     grid::SVector{2, Int32}
 end
 
-function GaussianRasterizer(kab, camera::Camera; auxiliary::Bool = false)
+function GaussianRasterizer(kab, camera::Camera)
     (; width, height) = resolution(camera)
-    GaussianRasterizer(kab; width, height, auxiliary)
+    GaussianRasterizer(kab; width, height)
 end
 
-function GaussianRasterizer(kab; width::Int, height::Int, auxiliary::Bool = false)
+function GaussianRasterizer(kab; width::Int, height::Int)
     @assert width % 16 == 0 && height % 16 == 0
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
@@ -53,66 +39,16 @@ function GaussianRasterizer(kab; width::Int, height::Int, auxiliary::Bool = fals
 
     image = KA.allocate(kab, Float32, (3, width, height))
     host_image = Array{Float32, 3}(undef, (3, width, height))
-    aux = auxiliary ? KA.allocate(kab, Float32, (2, width, height)) : nothing
-    host_aux = auxiliary ? Array{Float32, 3}(undef, (2, width, height)) : nothing
-    GaussianRasterizer(istate, gstate, bstate,
-        image, host_image, aux, host_aux, grid)
+    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
-
-has_auxiliary(r::GaussianRasterizer) = r.auxiliary ≢ nothing
-
-function to_raw_depth(r::GaussianRasterizer; normalize::Bool = false)
-    isnothing(r.auxiliary) && error("""
-    GaussianRasterizer does not have auxiliary information.
-    To compute it, re-create rasterizer with `auxiliary=true` keyword argument.
-    """)
-
-    raw_aux = Array(r.auxiliary)
-    depth = raw_aux[1, :, :]
-    normalize || return depth
-
-    # Normalize by max depth to be in [0, 1] range.
-    max_depth = 0f0
-    for d in depth
-        isinf(d) && continue
-        max_depth = max(max_depth, d)
-    end
-    depth .*= 1f0 / (max_depth + 1f-6)
-
-    return depth
-end
 
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
     copyto!(r.host_image, @view(r.image[:, :, end:-1:1]))
     clamp01!(r.host_image)
-    return r.host_image
-end
-
-function to_gl_depth(r::GaussianRasterizer)
-    copyto!(r.host_auxiliary, @view(r.auxiliary[:, :, end:-1:1]))
-
-    # Normalize by max depth to be in [0, 1] range.
-    max_depth = 0f0
-    for w in 1:size(r.host_auxiliary, 2), h in 1:size(r.host_auxiliary, 3)
-        @inbounds d = r.host_auxiliary[1, w, h]
-        isinf(d) && continue
-        max_depth = max(max_depth, d)
-    end
-    r.host_auxiliary[1, :, :] .*= 1f0 / (max_depth + 1f-6)
-
-    # Copy depth values to RGB image.
-    r.host_image .= r.host_auxiliary[1:1, :, :]
-    return r.host_image
-end
-
-function to_gl_uncertainty(r::GaussianRasterizer)
-    copyto!(r.host_auxiliary, @view(r.auxiliary[:, :, end:-1:1]))
-    # Copy uncertainty to RGB image.
-    r.host_image .= r.host_auxiliary[2:2, :, :]
     return r.host_image
 end
 
@@ -123,109 +59,88 @@ function to_image(r::GaussianRasterizer)
     return colorview(RGB, raw_img)
 end
 
-function to_depth(r::GaussianRasterizer; normalize::Bool = false)
-    depth = to_raw_depth(r; normalize)
-    depth = transpose(depth)
-    return colorview(Gray, depth)
-end
-
-function to_uncertainty(r::GaussianRasterizer)
-    raw_aux = Array(r.auxiliary)
-    uncertainty = transpose(raw_aux[2, :, :])
-    return colorview(Gray, uncertainty)
-end
-
 function (rast::GaussianRasterizer)(
-    means_3d, opacities, scales, rotations, shs,
-    # Trigger camera gradients for AD.
-    ρ = nothing, θ = nothing;
+    means_3d, opacities, scales, rotations, shs;
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
-    covisibility::Maybe{AbstractVector{Bool}} = nothing,
 )
-    rasterize_v2(
+    rasterize(
         means_3d, shs,
         NU.sigmoid.(opacities),
         exp.(scales),
         rotations;
         rast, camera, sh_degree, background)
-
-    # # Apply activation functions and rasterize.
-    # rasterize(
-    #     means_3d,
-    #     shs,
-    #     NU.sigmoid.(opacities),
-    #     exp.(scales),
-    #     rotations ./ sqrt.(sum(abs2, rotations; dims=1)),
-    #     ρ, θ;
-    #     rast, sh_degree, camera, background, covisibility)
 end
 
-"""
-Computing gradients w.r.t. means_3d, shs, opacities, scales, rotations?
-"""
 function rasterize(
-    means_3d, shs, opacities, scales, rotations, ρ = nothing, θ = nothing;
+    means_3d::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3},
+    opacities::AbstractMatrix{Float32},
+    scales::AbstractMatrix{Float32},
+    rotations::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
-    covisibility::Maybe{AbstractVector{Bool}},
 )
-    covisibility ≢ nothing && length(covisibility) != size(means_3d, 2) &&
-        error("""
-        Size of covisibility vector `$(length(covisibility))`
-        must be equal to the number of gaussians `$(size(means_3d, 2))`.
-        """)
-
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    if length(rast.gstate) != n
-        rast.gstate = GeometryState(kab, n)
-    end
+    length(rast.gstate) == n || (rast.gstate = GeometryState(kab, n))
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    K = camera.intrinsics
-    tan_fov_xy = tan.(deg2rad.(0.5f0 .* NU.focal2fov.(K.resolution, K.focal)))
-    focal_xy = K.resolution ./ (2f0 .* tan_fov_xy)
-
-    fill!(rast.image, 0f0)
-    has_auxiliary(rast) && fill!(rast.auxiliary, 0f0)
-
     _as_T(T, x) = reinterpret(T, reshape(x, :))
-    scale_modifier = 1f0 # TODO compute correctly
+    fill!(rast.image, 0f0)
 
-    # Preprocess per-Gaussian: transformation, bounding, sh-to-rgb.
-    _preprocess!(kab, Int(BLOCK_SIZE))(
+    K = camera.intrinsics
+    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+
+    # TODO make configurable.
+    near_plane, far_plane = 0.2f0, 1000f0
+    radius_clip = 3f0 # In pixels.
+    blur_ϵ = 0.3f0
+
+    project!(kab, Int(BLOCK_SIZE))(
         # Output.
-        rast.gstate.cov3Ds,
         rast.gstate.depths,
         rast.gstate.radii,
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
-        rast.gstate.tiles_touched,
-        rast.gstate.rgbs,
-        rast.gstate.clamped,
-        # Input.
+        # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
-        reinterpret(SVector{3, Float32}, reshape(shs, :, n)), Val(sh_degree),
-        opacities,
-        camera.full_projection,
-        camera.w2c,
+        # Input camera properties.
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        # Config.
+        near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
+
+    spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.rgbs,
+        rast.gstate.clamped,
+        # Input.
+        rast.gstate.radii,
+        _as_T(SVector{3, Float32}, means_3d),
         camera.camera_center,
-        SVector{2, Int32}(width, height),
-        rast.grid, BLOCK, focal_xy, tan_fov_xy, K.principal, scale_modifier; ndrange=n)
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        Val(sh_degree); ndrange=n)
+
+    count_tiles_per_gaussian!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        rast.gstate.tiles_touched,
+        # Input.
+        rast.gstate.means_2d,
+        rast.gstate.radii,
+        rast.grid, BLOCK; ndrange=n)
 
     cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
     # Get total number of tiles touched.
-    n_rendered = Int(Array(@view(rast.gstate.points_offset[end]))[1])
+    n_rendered = Int(@allowscalar rast.gstate.points_offset[end])
     n_rendered == 0 && return rast.image
 
-    if length(rast.bstate) != n_rendered # TODO optimize
-        rast.bstate = BinningState(kab, n_rendered)
-    end
+    length(rast.bstate) == n_rendered ||
+        (rast.bstate = BinningState(kab, n_rendered))
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
@@ -258,13 +173,12 @@ function rasterize(
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
         rast.image,
-        rast.auxiliary,
-        covisibility,
         rast.istate.n_contrib,
         rast.istate.accum_α,
         # Inputs.
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
+        opacities,
         rast.gstate.conic_opacities,
         rast.gstate.rgbs,
         rast.gstate.depths,
@@ -277,10 +191,13 @@ function rasterize(
     return rast.image
 end
 
-# NOTE: storing radii, means_2d, ∇means_2d in rast.gstate
 function ∇rasterize(
-    ∂L∂pixels::AbstractArray{Float32, 3},
-    means_3d, shs, scales, rotations, ρ, θ,
+    vpixels::AbstractArray{Float32, 3},
+    means_3d::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3},
+    scales::AbstractMatrix{Float32},
+    rotations::AbstractMatrix{Float32},
+    opacities::AbstractMatrix{Float32},
     radii::AbstractVector{Int32};
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
@@ -291,42 +208,34 @@ function ∇rasterize(
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    # Auxiliary buffers.
-    ∂L∂colors = KA.zeros(kab, Float32, (3, n))
-    ∂L∂conic_opacities = KA.zeros(kab, Float32, (2, 2, n))
-    ∂L∂cov = KA.zeros(kab, Float32, (6, n))
+    vcolors = KA.zeros(kab, Float32, (3, n))
+    vconics = KA.zeros(kab, Float32, (3, n))
+    vcov = KA.zeros(kab, Float32, (6, n))
 
-    # TODO pre-allocate
-    ∂L∂means = KA.zeros(kab, Float32, (3, n))
-    ∂L∂shs = KA.zeros(kab, Float32, size(shs))
-    ∂L∂opacities = KA.zeros(kab, Float32, (1, n))
-    ∂L∂scales = KA.zeros(kab, Float32, (3, n))
-    ∂L∂rot = KA.zeros(kab, Float32, (4, n))
+    vmeans = KA.zeros(kab, Float32, (3, n))
+    vshs = KA.zeros(kab, Float32, size(shs))
+    vopacities = KA.zeros(kab, Float32, (1, n))
+    vscales = KA.zeros(kab, Float32, (3, n))
+    vrot = KA.zeros(kab, Float32, (4, n))
     fill!(reinterpret(Float32, rast.gstate.∇means_2d), 0f0)
 
-    compute_cam_grad = !isnothing(ρ) && !isnothing(θ)
-    ∂L∂τ = compute_cam_grad ?
-        KA.zeros(kab, Float32, (6, n)) : nothing
-
     K = camera.intrinsics
-    tan_fov_xy = tan.(deg2rad.(0.5f0 .* NU.focal2fov.(K.resolution, K.focal)))
-    focal_xy = K.resolution ./ (2f0 .* tan_fov_xy)
     (; width, height) = resolution(camera)
 
     ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
-        ∂L∂colors,
-        ∂L∂opacities,
-        ∂L∂conic_opacities,
+        vcolors,
+        vopacities,
+        vconics,
         reshape(reinterpret(Float32, rast.gstate.∇means_2d), 2, :),
         # Inputs.
-        reshape(reinterpret(SVector{3, Float32}, ∂L∂pixels), size(∂L∂pixels)[2:3]),
-        # (output from the forward `render!` pass)
+        reshape(reinterpret(SVector{3, Float32}, vpixels), size(vpixels)[2:3]),
         rast.istate.n_contrib,
         rast.istate.accum_α,
 
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
+        opacities,
         rast.gstate.conic_opacities,
         rast.gstate.rgbs,
 
@@ -335,68 +244,60 @@ function ∇rasterize(
         rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
 
     _as_T(T, x) = reinterpret(T, reshape(x, :))
-    ∇compute_cov_2d!(kab, Int(BLOCK_SIZE))(
-        # Outputs.
-        _as_T(SVector{3, Float32}, ∂L∂means),
-        ∂L∂cov,
-        ∂L∂τ,
-        # Inputs.
-        ∂L∂conic_opacities,
-        rast.gstate.cov3Ds,
-        radii,
-        _as_T(SVector{3, Float32}, means_3d),
-        camera.w2c,
-        focal_xy, tan_fov_xy,
-        SVector{2, Int32}(width, height), K.principal; ndrange=n)
 
-    scale_modifier = 1f0
-    ∇_preprocess!(kab, Int(BLOCK_SIZE))(
-        # Outputs.
-        _as_T(SVector{3, Float32}, ∂L∂means),
-        reinterpret(SVector{3, Float32}, reshape(∂L∂shs, :, n)),
-        _as_T(SVector{3, Float32}, ∂L∂scales),
-        _as_T(SVector{4, Float32}, ∂L∂rot),
-        ∂L∂τ,
-        # Inputs.
-        ∂L∂cov,
-        _as_T(SVector{3, Float32}, ∂L∂colors),
+    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    blur_ϵ = 0.3f0
+    ∇project!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        _as_T(SVector{3, Float32}, vmeans),
+        _as_T(SVector{3, Float32}, vscales),
+        _as_T(SVector{4, Float32}, vrot),
+
+        # Input grad outputs.
         rast.gstate.∇means_2d,
-        radii,
+        _as_T(SVector{3, Float32}, vconics),
+
+        rast.gstate.conic_opacities,
+        rast.gstate.radii,
+        # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
-        reinterpret(SVector{3, Float32}, reshape(shs, :, n)), Val(sh_degree),
+        # Input camera properties.
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        # Config.
+        blur_ϵ; ndrange=n)
+
+    ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
+        _as_T(SVector{3, Float32}, vmeans),
+        # Input.
+        _as_T(SVector{3, Float32}, means_3d),
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
         rast.gstate.clamped,
-        camera.full_projection,
-        camera.projection,
-        camera.w2c,
+        _as_T(SVector{3, Float32}, vcolors),
         camera.camera_center,
-        scale_modifier; ndrange=n)
+        Val(sh_degree); ndrange=n)
 
-    compute_cam_grad || return (
-        ∂L∂means, ∂L∂shs, ∂L∂opacities, ∂L∂scales, ∂L∂rot, nothing, nothing)
-
-    # Compute final camera gradients.
-    ∂L∂τ = sum(∂L∂τ; dims=2)
-    ∂L∂ρ = ∂L∂τ[1:3]
-    ∂L∂θ = ∂L∂τ[4:6]
-    return (∂L∂means, ∂L∂shs, ∂L∂opacities, ∂L∂scales, ∂L∂rot, ∂L∂ρ, ∂L∂θ)
+    return vmeans, vshs, vopacities, vscales, vrot
 end
 
 function ChainRulesCore.rrule(::typeof(rasterize),
-    means_3d, shs, opacities, scales, rotations, ρ = nothing, θ = nothing;
+    means_3d, shs, opacities, scales, rotations;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
-    background::SVector{3, Float32}, covisibility::Maybe{AbstractVector{Bool}},
+    background::SVector{3, Float32},
 )
     image = rasterize(
-        means_3d, shs, opacities, scales, rotations, ρ, θ;
-        rast, camera, sh_degree, background, covisibility)
+        means_3d, shs, opacities, scales, rotations;
+        rast, camera, sh_degree, background)
 
-    function _rasterize_pullback(∂L∂pixels)
+    function _pullback(vpixels)
         ∇ = ∇rasterize(
-            ∂L∂pixels, means_3d, shs, scales, rotations, ρ, θ,
+            vpixels, means_3d, shs, scales, rotations, opacities,
             rast.gstate.radii; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end
-    return image, _rasterize_pullback
+    return image, _pullback
 end

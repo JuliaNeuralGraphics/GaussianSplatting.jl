@@ -106,8 +106,7 @@ function resize_callback(_, width, height)
     set_resolution!(gsgui.camera; width, height)
     kab = get_backend(gsgui.rasterizer)
     # TODO free the old one before creating new one.
-    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera;
-        auxiliary=has_auxiliary(gsgui.rasterizer))
+    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera)
     gsgui.render_state.need_render = true
     return
 end
@@ -128,7 +127,7 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    rasterizer = GaussianRasterizer(kab, camera; auxiliary=true)
+    rasterizer = GaussianRasterizer(kab, camera)
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -171,7 +170,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    gui_rasterizer = GaussianRasterizer(kab, camera; auxiliary=true)
+    gui_rasterizer = GaussianRasterizer(kab, camera)
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -281,12 +280,13 @@ function handle_ui!(gui::GSGUI; frame_time)
                     gui.render_state.need_render = true
                 end
 
-                CImGui.PushItemWidth(-100)
-                if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-                    gui.ui_state.render_modes, length(gui.ui_state.render_modes),
-                )
-                    gui.render_state.need_render = true
-                end
+                # TODO add depth mode
+                # CImGui.PushItemWidth(-100)
+                # if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+                #     gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+                # )
+                #     gui.render_state.need_render = true
+                # end
 
                 if !viewer_only(gui)
                     CImGui.Separator()
