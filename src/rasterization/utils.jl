@@ -1,50 +1,6 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
-function in_frustum(point::SVector{4, Float32}, view::SMatrix{4, 4, Float32, 16})
-    depth = (view * point)[3]
-    return depth > 0.2f0, depth
-end
-
-"""
-`q` must be normalized.
-"""
-function quat2mat(q::SVector{4, Float32})
-    r, x, y, z = q
-    SMatrix{3, 3, Float32, 9}(
-        1f0 - 2f0 * (y^2 + z^2), 2f0 * (x * y + r * z), 2f0 * (x * z - r * y),
-        2f0 * (x * y - r * z), 1f0 - 2f0 * (x^2 + z^2), 2f0 * (y * z + r * x),
-        2f0 * (x * z + r * y), 2f0 * (y * z - r * x), 1f0 - 2f0 * (x^2 + y^2))
-end
-
-function quat2mat(q)
-    r, x, y, z = q[[1]], q[[2]], q[[3]], q[[4]]
-    reshape(vcat(
-        @.(1f0 - 2f0 * (y^2 + z^2)),
-        @.(2f0 * (x * y + r * z)),
-        @.(2f0 * (x * z - r * y)),
-        @.(2f0 * (x * y - r * z)),
-        @.(1f0 - 2f0 * (x^2 + z^2)),
-        @.(2f0 * (y * z + r * x)),
-        @.(2f0 * (x * z + r * y)),
-        @.(2f0 * (y * z - r * x)),
-        @.(1f0 - 2f0 * (x^2 + y^2))), 3, 3)
-end
-
-function quat_mul(q1, q2)
-    @assert ndims(q1) == 1
-    @assert ndims(q2) == 2
-
-    r1, x1, y1, z1 = q1[[1]], q1[[2]], q1[[3]], q1[[4]]
-    r2, x2, y2, z2 = q2[[1], :], q2[[2], :], q2[[3], :], q2[[4], :]
-
-    r = @. r1 * r2 - x1 * x2 - y1 * y2 - z1 * z2
-    x = @. r1 * x2 + x1 * r2 + y1 * z2 - z1 * y2
-    y = @. r1 * y2 - x1 * z2 + y1 * r2 + z1 * x2
-    z = @. r1 * z2 + x1 * y2 - y1 * x2 + z1 * r2
-    return vcat(r, x, y, z)
-end
-
 sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
     x, 0f0, 0f0,
     0f0, y, 0f0,
@@ -85,8 +41,6 @@ const SH3C4::Float32 =  0.3731763325901154f0
 const SH3C5::Float32 = -0.4570457994644658f0
 const SH3C6::Float32 =  1.445305721320277f0
 const SH3C7::Float32 = -0.5900435899266435f0
-
-ndc2pix(x, S) = ((x + 1f0) * S - 1f0) * 0.5f0
 
 """
 For each tile in `ranges`, given a sorted list of keys,
@@ -140,22 +94,22 @@ end
     # No need for the default key/value, since `gaussian_offset` covers
     # only valid gaussians.
     radius = radii[i]
-    if radius > 0
-        rmin, rmax = get_rect(means_2d[i], radius, grid, block)
-        # For each tile that the bounding rect overlaps, emit a key/value pair.
-        # Key: [tile_id | depth], value: id of the Gaussian.
-        # Sorting the values with this key yields Gaussian ids in a list,
-        # such that they are first sorted by the tile and then depth.
-        depth::UInt64 = reinterpret(UInt32, depths[i])
+    radius > 0 || return
 
-        offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
-        for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
-            key::UInt64 = UInt64(y) * grid[1] + x
-            key <<= 32
-            key |= depth
-            gaussian_keys[offset] = key
-            gaussian_values[offset] = i
-            offset += 1
-        end
+    rmin, rmax = get_rect(means_2d[i], radius, grid, block)
+    # For each tile that the bounding rect overlaps, emit a key/value pair.
+    # Key: [tile_id | depth], value: id of the Gaussian.
+    # Sorting the values with this key yields Gaussian ids in a list,
+    # such that they are first sorted by the tile and then depth.
+    depth::UInt64 = reinterpret(UInt32, depths[i])
+
+    offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
+    for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
+        key::UInt64 = UInt64(y) * grid[1] + x
+        key <<= 32
+        key |= depth
+        gaussian_keys[offset] = key
+        gaussian_values[offset] = i
+        offset += 1
     end
 end

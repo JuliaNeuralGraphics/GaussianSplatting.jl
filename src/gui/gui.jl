@@ -309,6 +309,15 @@ function handle_ui!(gui::GSGUI; frame_time)
                     end
                     CImGui.TableNextColumn()
                     CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+
+                    # Row 3.
+                    CImGui.TableNextRow()
+                    CImGui.TableNextColumn()
+                    if CImGui.Checkbox("Densify", gui.ui_state.densify)
+                        gui.trainer.densify = gui.ui_state.densify[]
+                    end
+                    CImGui.TableNextColumn()
+
                     CImGui.EndTable()
 
                     image_filenames = gui.trainer.dataset.image_filenames

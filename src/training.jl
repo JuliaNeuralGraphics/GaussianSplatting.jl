@@ -18,6 +18,7 @@ mutable struct Trainer{
     points_lr_scheduler::F
     opt_params::OptimizationParams
 
+    densify::Bool
     step::Int
     ids::Vector{Int}
 end
@@ -45,9 +46,11 @@ function Trainer(
         opt_params.lr_points_steps)
 
     ids = collect(1:length(dataset))
+    densify = true
+    step = 0
     Trainer(
         rast, gs, dataset, optimizers, ssim,
-        points_lr_scheduler, opt_params, 0, ids)
+        points_lr_scheduler, opt_params, densify, step, ids)
 end
 
 function bson_params(opt::NU.Adam)
@@ -162,7 +165,7 @@ function step!(trainer::Trainer)
         NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=true)
     end
 
-    if trainer.step ≤ params.densify_until_iter
+    if trainer.densify && trainer.step ≤ params.densify_until_iter
         update_stats!(gs, rast.gstate.radii,
             rast.gstate.∇means_2d, camera.intrinsics.resolution)
         do_densify =
@@ -297,7 +300,7 @@ end
         randn(Float32) * σ[3])
 
     q = rots[i]
-    R = quat2mat(normalize(q))
+    R = unnorm_quat2rot(q)
     p = points[i]
     points[i] = p .+ R * ξ
 end
