@@ -134,10 +134,11 @@ Base.length(g::GaussianModel) = size(g.points, 2)
 function update_stats!(
     gs::GaussianModel, radii::AbstractVector{Int32},
     ∇means_2d::AbstractVector{SVector{2, Float32}},
+    resolution::SVector{2, UInt32},
 )
     _update_stats!(get_backend(gs), 256)(
         gs.max_radii, gs.accum_∇means_2d, gs.denom,
-        radii, ∇means_2d; ndrange=length(radii))
+        radii, ∇means_2d, resolution; ndrange=length(radii))
     return
 end
 
@@ -149,14 +150,16 @@ end
     # Inputs.
     radii::AbstractVector{Int32},
     ∇means_2d::AbstractVector{SVector{2, Float32}},
+    resolution::SVector{2, UInt32},
 )
     i = @index(Global)
     r = radii[i]
-    if r > 0
-        max_radii[i] = max(max_radii[i], r)
-        accum_∇means_2d[i] += norm(∇means_2d[i])
-        denom[i] += 1f0
-    end
+    r > 0 || return
+
+    max_radii[i] = max(max_radii[i], r)
+    ∇mean_2d = ∇means_2d[i] .* resolution .* 0.5f0
+    accum_∇means_2d[i] += norm(∇mean_2d)
+    denom[i] += 1f0
 end
 
 """

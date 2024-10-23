@@ -7,8 +7,7 @@ function main(dataset_path::String, scale::Int = 1)
     opt_params = GaussianSplatting.OptimizationParams()
     gaussians = GaussianSplatting.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianSplatting.GaussianRasterizer(kab,
-        dataset.cameras[1]; auxiliary=false)
+    rasterizer = GaussianSplatting.GaussianRasterizer(kab, dataset.cameras[1])
     trainer = GaussianSplatting.Trainer(rasterizer, gaussians, dataset, opt_params)
 
     println("Benchmarking `$dataset_path` dataset at `$scale` scale.")

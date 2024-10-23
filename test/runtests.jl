@@ -16,8 +16,6 @@ import KernelAbstractions as KA
 
 const Backend = GaussianSplatting.Backend
 
-GaussianSplatting.get_module(Backend).versioninfo()
-
 @testset "quat2mat" begin
     r = RotXYZ(rand(Float32), rand(Float32), rand(Float32))
     q = QuatRotation{Float32}(r)

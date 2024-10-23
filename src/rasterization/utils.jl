@@ -87,3 +87,75 @@ const SH3C6::Float32 =  1.445305721320277f0
 const SH3C7::Float32 = -0.5900435899266435f0
 
 ndc2pix(x, S) = ((x + 1f0) * S - 1f0) * 0.5f0
+
+"""
+For each tile in `ranges`, given a sorted list of keys,
+find start/end index ranges.
+I.e. tile 0 spans gaussian keys from `1` to `k₁` index,
+tile 1 from `k₁` to `k₂`, etc.
+"""
+@kernel cpu=false inbounds=true function identify_tile_range!(
+    ranges::AbstractMatrix{UInt32},
+    gaussian_keys::AbstractVector{UInt64},
+)
+    @uniform n = @ndrange()[1]
+    i = @index(Global)
+
+    tile = (gaussian_keys[i] >> 32) + 1u32
+
+    if i == 1
+        ranges[1, tile] = 0u32
+    else
+        prev_tile = (gaussian_keys[i - 1] >> 32) + 1u32
+        if tile != prev_tile
+            ranges[2, prev_tile] = i - 1u32
+            ranges[1, tile] = i - 1u32
+        end
+    end
+
+    if i == n
+        ranges[2, tile] = n
+    end
+end
+
+@kernel cpu=false inbounds=true function _permute!(y, @Const(x), @Const(ix))
+    i = @index(Global)
+    y[i] = x[ix[i]]
+end
+
+@kernel cpu=false inbounds=true function duplicate_with_keys!(
+    # Outputs.
+    gaussian_keys::AbstractVector{UInt64},
+    gaussian_values::AbstractVector{UInt32},
+    # Inputs.
+    means_2d::AbstractVector{SVector{2, Float32}},
+    depths::AbstractVector{Float32},
+    gaussian_offset::AbstractVector{Int32},
+    radii::AbstractVector{Int32},
+    grid::SVector{2, Int32}, block::SVector{2, Int32},
+)
+    i = @index(Global)
+
+    # No key/value for invisible Gaussians.
+    # No need for the default key/value, since `gaussian_offset` covers
+    # only valid gaussians.
+    radius = radii[i]
+    if radius > 0
+        rmin, rmax = get_rect(means_2d[i], radius, grid, block)
+        # For each tile that the bounding rect overlaps, emit a key/value pair.
+        # Key: [tile_id | depth], value: id of the Gaussian.
+        # Sorting the values with this key yields Gaussian ids in a list,
+        # such that they are first sorted by the tile and then depth.
+        depth::UInt64 = reinterpret(UInt32, depths[i])
+
+        offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
+        for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
+            key::UInt64 = UInt64(y) * grid[1] + x
+            key <<= 32
+            key |= depth
+            gaussian_keys[offset] = key
+            gaussian_values[offset] = i
+            offset += 1
+        end
+    end
+end
