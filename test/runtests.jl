@@ -12,7 +12,6 @@ using Rotations
 
 using GaussianSplatting: i32, u32
 
-import GaussianSplatting as GSP
 import KernelAbstractions as KA
 
 const Backend = GaussianSplatting.Backend
