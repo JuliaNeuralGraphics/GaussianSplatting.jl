@@ -3,8 +3,7 @@
     depths::AbstractVector{Float32},
     radii::AbstractVector{Int32},
     means_2D::AbstractVector{SVector{2, Float32}},
-    # TODO use SVector{3, Float32}
-    conics::AbstractVector{SVector{4, Float32}},
+    conics::AbstractVector{SVector{3, Float32}},
 
     # Input Gaussians.
     means::AbstractVector{SVector{3, Float32}},
@@ -69,8 +68,7 @@
     radii[i] = radius
     means_2D[i] = mean_2D
     depths[i] = mean_cam[3]
-    conics[i] = SVector{4, Float32}(
-        Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2], 0f0) # TODO use SVector{3, Float32}
+    conics[i] = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
 end
 
 @kernel cpu=false inbounds=true function count_tiles_per_gaussian!(
@@ -104,7 +102,7 @@ end
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
     opacities::AbstractMatrix{Float32},
-    conics::AbstractVector{SVector{4, Float32}},
+    conics::AbstractVector{SVector{3, Float32}},
     rgb_features::AbstractVector{SVector{3, Float32}},
     depths::AbstractVector{Float32},
 
@@ -144,7 +142,7 @@ end
     rounds::Int32 = gpu_cld(to_do, block_size)
 
     # Allocate storage for batches of collectively fetched data.
-    collected_conics = @localmem SVector{4, Float32} block_size # TODO replace with 3
+    collected_conics = @localmem SVector{3, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_opacity = @localmem Float32 block_size
     collected_id = @localmem UInt32 block_size
@@ -320,9 +318,8 @@ function add_blur(Σ_2D::SMatrix{2, 2, Float32, 4}, ϵ::Float32)
 end
 
 # TODO
-function ∇add_blur()
-
-end
+# function ∇add_blur(, ϵ::Float32)
+# end
 
 @inbounds @inline function max_eigval_2D(
     Σ_2D::SMatrix{2, 2, Float32, 4}, det::Float32,

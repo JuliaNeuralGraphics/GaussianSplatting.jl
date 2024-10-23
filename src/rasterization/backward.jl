@@ -12,7 +12,7 @@
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
     opacities::AbstractMatrix{Float32},
-    conics::AbstractVector{SVector{4, Float32}},
+    conics::AbstractVector{SVector{3, Float32}},
     rgb_features::AbstractVector{SVector{3, Float32}},
 
     ranges::AbstractMatrix{UInt32},
@@ -52,7 +52,7 @@
     rounds::Int32 = gpu_cld(to_do, block_size)
 
     # Allocate storage for batches of collectively fetched data.
-    collected_conics = @localmem SVector{4, Float32} block_size # TODO replace with 3
+    collected_conics = @localmem SVector{3, Float32} block_size
     collected_colors = @localmem SVector{3, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_opacity = @localmem Float32 block_size
@@ -163,9 +163,7 @@ end
     # Input grad outputs.
     vmeans_2d::AbstractVector{SVector{2, Float32}},
     vconics::AbstractArray{SVector{3, Float32}},
-
-    # TODO use SVector{3, Float32}
-    conics::AbstractVector{SVector{4, Float32}},
+    conics::AbstractVector{SVector{3, Float32}},
     radii::AbstractVector{Int32},
 
     # Input Gaussians.
@@ -179,9 +177,6 @@ end
     focal::SVector{2, Float32},
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
-
-    # Config.
-    blur_ϵ::Float32,
 )
     i = @index(Global)
 
@@ -202,7 +197,6 @@ end
     mean = means[i]
     mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
 
-    # TODO store in fwd pass?
     cov_rotation, cov_scale = cov_rotations[i], cov_scales[i]
     Σ = quat_scale_to_cov(cov_rotation, cov_scale)
     Σ_cam = covar_world_to_cam(R_w2c, Σ)

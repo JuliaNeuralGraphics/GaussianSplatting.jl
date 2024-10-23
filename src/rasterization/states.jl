@@ -2,16 +2,14 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 struct GeometryState{
-    C <: AbstractVector{SVector{6, Float32}},
     D <: AbstractVector{Float32},
     M <: AbstractVector{SVector{2, Float32}},
     R <: AbstractVector{SVector{3, Float32}},
     K <: AbstractVector{SVector{3, Bool}},
     T <: AbstractVector{Int32},
-    O <: AbstractVector{SVector{4, Float32}},
+    O <: AbstractVector{SVector{3, Float32}},
     I <: AbstractVector{Int32},
 }
-    cov3Ds::C
     depths::D
     means_2d::M
     ∇means_2d::M
@@ -24,7 +22,6 @@ struct GeometryState{
 end
 
 GeometryState(kab, n::Int) = GeometryState(
-    KA.zeros(kab, SVector{6, Float32}, n),
     KA.zeros(kab, Float32, n),
     KA.zeros(kab, SVector{2, Float32}, n),
     KA.zeros(kab, SVector{2, Float32}, n),
@@ -32,7 +29,7 @@ GeometryState(kab, n::Int) = GeometryState(
     KA.zeros(kab, SVector{3, Bool}, n),
     KA.zeros(kab, Int32, n),
     KA.zeros(kab, Int32, n),
-    KA.zeros(kab, SVector{4, Float32}, n),
+    KA.zeros(kab, SVector{3, Float32}, n),
     KA.zeros(kab, Int32, n))
 
 Base.length(gstate::GeometryState) = length(gstate.depths)

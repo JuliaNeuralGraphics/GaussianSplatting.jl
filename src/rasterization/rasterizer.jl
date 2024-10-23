@@ -247,7 +247,6 @@ function ∇rasterize(
 
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
-    blur_ϵ = 0.3f0
     ∇project!(kab, Int(BLOCK_SIZE))(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
@@ -265,9 +264,7 @@ function ∇rasterize(
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
         # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
-        # Config.
-        blur_ϵ; ndrange=n)
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal; ndrange=n)
 
     ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
         # Output.
