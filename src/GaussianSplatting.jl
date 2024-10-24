@@ -40,6 +40,7 @@ import ImageFiltering
 import KernelAbstractions as KA
 import NerfUtils as NU
 import NeuralGraphicsGL as NGL
+import PlyIO
 
 const Maybe{T} = Union{T, Nothing}
 
@@ -69,7 +70,7 @@ function main(dataset_path::String; scale::Int)
 
     dataset = ColmapDataset(kab, dataset_path; scale)
     opt_params = OptimizationParams()
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=0)
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 

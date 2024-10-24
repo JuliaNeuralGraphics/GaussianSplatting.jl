@@ -19,6 +19,7 @@ mutable struct GaussianModel{
     accum_∇means_2d::G
     denom::G
 
+    # Remove ids.
     ids::I
 
     sh_degree::Int
@@ -170,3 +171,69 @@ rgb_2_sh(x) = (x - 0.5f0) * (1f0 / SH0)
 sh_2_rgb(x) = x * SH0 + 0.5f0
 
 inverse_sigmoid(x) = log(x / (1f0 - x))
+
+function export_ply!(g::GaussianModel, filename::String)
+    ply = PlyIO.Ply()
+
+    n = size(g.points, 2)
+
+    xyz = Array(g.points)
+    features_dc = reshape(Array(g.features_dc), :, n)
+    features_rest = reshape(Array(g.features_rest), :, n)
+    scales = Array(g.scales)
+    rotations = Array(g.rotations)
+    opacities = reshape(Array(g.opacities), :)
+
+    vertex = PlyIO.PlyElement("vertex",
+        PlyIO.ArrayProperty("x", xyz[1, :]),
+        PlyIO.ArrayProperty("y", xyz[2, :]),
+        PlyIO.ArrayProperty("z", xyz[3, :]),
+
+        [PlyIO.ArrayProperty("f_dc_$i", features_dc[i, :]) for i in 1:size(features_dc, 1)]...,
+        [PlyIO.ArrayProperty("f_rest_$i", features_rest[i, :]) for i in 1:size(features_rest, 1)]...,
+        [PlyIO.ArrayProperty("scale_$i", scales[i, :]) for i in 1:size(scales, 1)]...,
+        [PlyIO.ArrayProperty("rot_$i", rotations[i, :]) for i in 1:size(rotations, 1)]...,
+
+        PlyIO.ArrayProperty("opacity", opacities),
+    )
+    push!(ply, vertex)
+
+    PlyIO.save_ply(ply, filename)
+    return
+end
+
+function import_ply(filename::String, kab)
+    ply = PlyIO.load_ply(filename)
+    vertex = ply["vertex"]
+
+    prop_names = PlyIO.plyname.(vertex.properties)
+    n_frest = count(k -> startswith(k, "f_rest_"), prop_names)
+
+    n = length(vertex["x"])
+    xyz = vcat([reshape(vertex[i], 1, n) for i in ("x", "y", "z")]...)
+    scales = vcat([reshape(vertex["scale_$i"], 1, n) for i in 1:3]...)
+    rotations = vcat([reshape(vertex["rot_$i"], 1, n) for i in 1:4]...)
+    opacities = reshape(Array(vertex["opacity"]), 1, n)
+
+    features_dc = vcat([reshape(vertex["f_dc_$i"], 1, 1, n) for i in 1:3]...)
+    features_rest = if n_frest > 0
+        reshape(
+            vcat([reshape(vertex["f_rest_$i"], 1, n) for i in 1:n_frest]...),
+            3, :, n)
+    else
+        Array{Float32}(undef, 3, 0, n)
+    end
+
+    max_sh_degree::Int = sqrt(size(features_rest, 2) + 1) - 1
+    sh_degree::Int = max_sh_degree
+
+    max_radii = KA.zeros(kab, Int32, n)
+    accum_∇means_2d = KA.zeros(kab, Float32, n)
+    denom = KA.zeros(kab, Float32, n)
+
+    return GaussianModel(
+        adapt(kab, xyz), adapt(kab, features_dc), adapt(kab, features_rest),
+        adapt(kab, scales), adapt(kab, rotations), adapt(kab, opacities),
+        max_radii, accum_∇means_2d, denom,
+        nothing, sh_degree, max_sh_degree)
+end
