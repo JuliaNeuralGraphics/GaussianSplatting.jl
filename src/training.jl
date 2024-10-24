@@ -136,6 +136,18 @@ function step!(trainer::Trainer)
     target_image = get_image(trainer, idx)
     background = rand(SVector{3, Float32})
 
+    Zygote.gradient(
+        gs.points, gs.scales, gs.rotations,
+    ) do means_3d, scales, rotations
+        means_2d, conics = project(
+            means_3d, scales, rotations;
+            rast, camera, near_plane=0.2f0, far_plane=1000f0,
+            radius_clip=3f0, blur_ϵ=0.3f0,
+        )
+        sum(means_2d) + sum(conics)
+    end
+    return
+
     θ = (
         gs.points, gs.features_dc, gs.features_rest,
         gs.opacities, gs.scales, gs.rotations)

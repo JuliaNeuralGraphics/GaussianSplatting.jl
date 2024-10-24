@@ -1,4 +1,4 @@
-@kernel cpu=false inbounds=true function project!(
+@kernel cpu=false function project!(
     # Output.
     depths::AbstractVector{Float32},
     radii::AbstractVector{Int32},

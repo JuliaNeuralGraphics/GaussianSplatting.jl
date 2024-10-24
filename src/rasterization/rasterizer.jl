@@ -44,6 +44,8 @@ end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
 
+include("rules.jl")
+
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
