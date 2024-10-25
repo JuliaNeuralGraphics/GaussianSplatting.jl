@@ -136,38 +136,51 @@ function step!(trainer::Trainer)
     target_image = get_image(trainer, idx)
     background = rand(SVector{3, Float32})
 
-    Zygote.gradient(
-        gs.points, gs.scales, gs.rotations,
-    ) do means_3d, scales, rotations
-        means_2d, conics = project(
-            means_3d, scales, rotations;
-            rast, camera, near_plane=0.2f0, far_plane=1000f0,
-            radius_clip=3f0, blur_ϵ=0.3f0,
-        )
-        sum(means_2d) + sum(conics)
-    end
-    return
-
     θ = (
         gs.points, gs.features_dc, gs.features_rest,
         gs.opacities, gs.scales, gs.rotations)
     loss, ∇ = Zygote.withgradient(
         θ...,
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
+        means_2d, conics = project(
+            means_3d, scales, rotations;
+            rast, camera, near_plane=0.2f0, far_plane=1000f0,
+            radius_clip=3f0, blur_ϵ=0.3f0,
+        )
+
         shs = isempty(features_rest) ?
             features_dc : hcat(features_dc, features_rest)
-        img = rast(
-            means_3d, opacities, scales, rotations, shs;
-            camera, sh_degree=gs.sh_degree, background)
+        colors = spherical_harmonics(means_3d, shs; rast, camera, gs.sh_degree)
+
+        image = render(means_2d, conics, opacities, colors;
+            rast, camera, background)
 
         # From (c, w, h) to (w, h, c, 1) for SSIM.
-        img_tmp = permutedims(img, (2, 3, 1))
-        img_eval = reshape(img_tmp, size(img_tmp)..., 1)
+        image_tmp = permutedims(image, (2, 3, 1))
+        image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
-        l1 = mean(abs.(img_eval .- target_image))
-        s = 1f0 - ssim(img_eval, target_image)
+        l1 = mean(abs.(image_eval .- target_image))
+        s = 1f0 - ssim(image_eval, target_image)
         (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
     end
+
+    # loss, ∇ = Zygote.withgradient(
+    #     θ...,
+    # ) do means_3d, features_dc, features_rest, opacities, scales, rotations
+    #     shs = isempty(features_rest) ?
+    #         features_dc : hcat(features_dc, features_rest)
+    #     img = rast(
+    #         means_3d, opacities, scales, rotations, shs;
+    #         camera, sh_degree=gs.sh_degree, background)
+
+    #     # From (c, w, h) to (w, h, c, 1) for SSIM.
+    #     img_tmp = permutedims(img, (2, 3, 1))
+    #     img_eval = reshape(img_tmp, size(img_tmp)..., 1)
+
+    #     l1 = mean(abs.(img_eval .- target_image))
+    #     s = 1f0 - ssim(img_eval, target_image)
+    #     (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+    # end
 
     # Apply gradients.
     for i in 1:length(θ)
