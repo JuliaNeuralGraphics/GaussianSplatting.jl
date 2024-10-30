@@ -74,6 +74,9 @@ function main(dataset_path::String; scale::Int)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
+    camera = dataset.cameras[1]
+    @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
+
     for i in 1:3000
         loss = step!(trainer)
         @show i, loss

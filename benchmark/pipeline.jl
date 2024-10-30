@@ -10,8 +10,8 @@ function main(dataset_path::String; scale::Int)
     rasterizer = GSP.GaussianRasterizer(kab, dataset.cameras[1])
     trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    GSP.step!(trainer)
-    return
+    camera = dataset.cameras[1]
+    @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
     println("Benchmarking `$dataset_path` dataset at `$scale` scale.")
     warmup_steps = 500

@@ -21,7 +21,10 @@ function project(
     means_2d = KA.zeros(kab, Float32, (2, n))
     conics = KA.zeros(kab, Float32, (3, n))
 
-    length(rast.gstate) == n || (rast.gstate = GeometryState(kab, n))
+    if length(rast.gstate) < n
+        KA.unsafe_free!(rast.gstate)
+        rast.gstate = GeometryState(kab, n)
+    end
 
     project!(kab, Int(BLOCK_SIZE))(
         # Output.
@@ -85,7 +88,7 @@ function ∇project(
         R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal; ndrange=n)
 
     # Accumulate for densificaton.
-    rast.gstate.∇means_2d .+= _as_T(SVector{2, Float32}, vmeans_2d)
+    @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)
 
     return vmeans, vscales, vrot
 end
@@ -198,17 +201,17 @@ function render(
         rast.gstate.tiles_touched,
         # Input.
         _as_T(SVector{2, Float32}, means_2d),
-        rast.gstate.radii,
-        rast.grid, BLOCK; ndrange=n)
+        rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
+    cumsum!(
+        @view(rast.gstate.points_offset[1:n]),
+        @view(rast.gstate.tiles_touched[1:n]))
     # Get total number of tiles touched.
-    n_rendered = Int(@allowscalar rast.gstate.points_offset[end])
+    n_rendered = Int(@allowscalar rast.gstate.points_offset[n])
     n_rendered == 0 && return image
 
     if length(rast.bstate) < n_rendered
-        @info "Expanding BinningState: $(length(rast.bstate)) vs $n_rendered"
-        unsafe_free!(rast.bstate)
+        KA.unsafe_free!(rast.bstate)
         rast.bstate = BinningState(kab, n_rendered)
     end
 
@@ -308,7 +311,7 @@ function ∇render(
         rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
 
     # Accumulate for densificaton.
-    rast.gstate.∇means_2d .+= _as_T(SVector{2, Float32}, vmeans_2d)
+    @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)
 
     return vmeans_2d, vconics, vopacities, vcolors
 end

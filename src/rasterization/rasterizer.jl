@@ -85,7 +85,10 @@ function rasterize(
 )
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    length(rast.gstate) == n || (rast.gstate = GeometryState(kab, n))
+    if length(rast.gstate) < n
+        KA.unsafe_free!(rast.gstate)
+        rast.gstate = GeometryState(kab, n)
+    end
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
@@ -136,13 +139,17 @@ function rasterize(
         rast.gstate.radii,
         rast.grid, BLOCK; ndrange=n)
 
-    cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
+    cumsum!(
+        @view(rast.gstate.points_offset[1:n]),
+        @view(rast.gstate.tiles_touched[1:n]))
     # Get total number of tiles touched.
-    n_rendered = Int(@allowscalar rast.gstate.points_offset[end])
+    n_rendered = Int(@allowscalar rast.gstate.points_offset[n])
     n_rendered == 0 && return rast.image
 
-    length(rast.bstate) == n_rendered ||
-        (rast.bstate = BinningState(kab, n_rendered))
+    if length(rast.bstate) < n_rendered
+        KA.unsafe_free!(rast.bstate)
+        rast.bstate = BinningState(kab, n_rendered)
+    end
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
@@ -156,7 +163,9 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
+    sortperm!(
+        @view(rast.bstate.permutation[1:n_rendered]),
+        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)
@@ -166,11 +175,9 @@ function rasterize(
 
     # Identify start-end of per-tile workloads in sorted keys.
     fill!(rast.istate.ranges, 0u32)
-    if n_rendered > 0
-        identify_tile_range!(kab, Int(BLOCK_SIZE))(
-            rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
-            ndrange=n_rendered)
-    end
+    identify_tile_range!(kab, Int(BLOCK_SIZE))(
+        rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
+        ndrange=n_rendered)
 
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.

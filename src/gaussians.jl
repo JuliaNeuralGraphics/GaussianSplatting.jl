@@ -139,7 +139,7 @@ function update_stats!(
 )
     _update_stats!(get_backend(gs), 256)(
         gs.max_radii, gs.accum_∇means_2d, gs.denom,
-        radii, ∇means_2d, resolution; ndrange=length(radii))
+        radii, ∇means_2d, resolution; ndrange=length(gs))
     return
 end
 
