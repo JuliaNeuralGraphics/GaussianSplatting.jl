@@ -132,8 +132,7 @@ function step!(trainer::Trainer)
         shuffle!(trainer.ids)
     end
     idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
-    # camera = trainer.dataset.cameras[idx]
-    camera = trainer.dataset.cameras[1]
+    camera = trainer.dataset.cameras[idx]
     target_image = get_image(trainer, idx)
     background = rand(SVector{3, Float32})
 

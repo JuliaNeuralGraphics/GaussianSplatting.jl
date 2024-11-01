@@ -84,9 +84,6 @@ function main(dataset_path::String; scale::Int)
         @show i, loss
 
         if trainer.step % 100 == 0
-            cam_idx = rand(1:length(trainer.dataset.cameras))
-            camera = trainer.dataset.cameras[cam_idx]
-
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
                 hcat(gaussians.features_dc, gaussians.features_rest)
