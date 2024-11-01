@@ -16,7 +16,6 @@ function project(
 
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     means_2d = KA.zeros(kab, Float32, (2, n))
     conics = KA.zeros(kab, Float32, (3, n))
@@ -62,7 +61,6 @@ function ∇project(
 
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     vmeans = KA.zeros(kab, Float32, (3, n))
     vscales = KA.zeros(kab, Float32, (3, n))
@@ -89,7 +87,6 @@ function ∇project(
 
     # Accumulate for densificaton.
     @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)
-
     return vmeans, vscales, vrot
 end
 
@@ -124,7 +121,6 @@ function spherical_harmonics(
 )
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     colors = KA.zeros(kab, Float32, (3, n))
     spherical_harmonics!(kab, Int(BLOCK_SIZE))(
@@ -149,7 +145,6 @@ function ∇spherical_harmonics(
 )
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     vmeans_3d = KA.zeros(kab, Float32, size(means_3d))
     vshs = KA.zeros(kab, Float32, size(shs))
@@ -189,7 +184,6 @@ function render(
 )
     kab = get_backend(rast)
     n = size(means_2d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
@@ -276,7 +270,6 @@ function ∇render(
 )
     kab = get_backend(rast)
     n = size(means_2d, 2)
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
@@ -312,7 +305,6 @@ function ∇render(
 
     # Accumulate for densificaton.
     @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)
-
     return vmeans_2d, vconics, vopacities, vcolors
 end
 
@@ -333,6 +325,5 @@ function ChainRulesCore.rrule(::typeof(render),
             rast, camera, background)
         return (NoTangent, ∇...)
     end
-
     return image, _render_pullback
 end

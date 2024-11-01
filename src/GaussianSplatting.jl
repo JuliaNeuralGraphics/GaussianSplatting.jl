@@ -52,6 +52,8 @@ const i32 = Literal{Int32}
 const BLOCK::SVector{2, Int32} = SVector{2, Int32}(16i32, 16i32)
 const BLOCK_SIZE::Int32 = 256i32
 
+_as_T(T, x) = reinterpret(T, reshape(x, :))
+
 include("utils.jl")
 include("camera.jl")
 include("dataset.jl")

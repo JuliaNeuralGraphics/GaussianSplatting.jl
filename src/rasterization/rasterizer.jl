@@ -74,6 +74,28 @@ function (rast::GaussianRasterizer)(
         rast, camera, sh_degree, background)
 end
 
+function (rast::GaussianRasterizer)(
+    ::Val{:alloc},
+    means_3d::AbstractMatrix{Float32},
+    opacities::AbstractMatrix{Float32},
+    scales::AbstractMatrix{Float32},
+    rotations::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3};
+    camera::Camera, sh_degree::Int,
+    background::SVector{3, Float32} = zeros(SVector{3, Float32}),
+)
+    means_2d, conics = project(
+        means_3d, exp.(scales), rotations;
+        rast, camera, near_plane=0.2f0, far_plane=1000f0,
+        radius_clip=3f0, blur_ϵ=0.3f0)
+
+    colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
+    image = render(
+        means_2d, conics, NU.sigmoid.(opacities), colors;
+        rast, camera, background)
+    return image
+end
+
 function rasterize(
     means_3d::AbstractMatrix{Float32},
     shs::AbstractArray{Float32, 3},
@@ -93,7 +115,6 @@ function rasterize(
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
     fill!(rast.image, 0f0)
 
     K = camera.intrinsics
@@ -251,8 +272,6 @@ function ∇rasterize(
         rast.istate.ranges,
         SVector{2, Int32}(width, height), background,
         rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
-
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
