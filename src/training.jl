@@ -132,28 +132,31 @@ function step!(trainer::Trainer)
         shuffle!(trainer.ids)
     end
     idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
-    camera = trainer.dataset.cameras[idx]
+    # camera = trainer.dataset.cameras[idx]
+    camera = trainer.dataset.cameras[1]
     target_image = get_image(trainer, idx)
     background = rand(SVector{3, Float32})
 
     θ = (
         gs.points, gs.features_dc, gs.features_rest,
         gs.opacities, gs.scales, gs.rotations)
+
     loss, ∇ = Zygote.withgradient(
         θ...,
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
         shs = isempty(features_rest) ?
             features_dc : hcat(features_dc, features_rest)
-        img = rast(
+        # image = rast(Val{:alloc}(),
+        image = rast(
             means_3d, opacities, scales, rotations, shs;
             camera, sh_degree=gs.sh_degree, background)
 
         # From (c, w, h) to (w, h, c, 1) for SSIM.
-        img_tmp = permutedims(img, (2, 3, 1))
-        img_eval = reshape(img_tmp, size(img_tmp)..., 1)
+        image_tmp = permutedims(image, (2, 3, 1))
+        image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
-        l1 = mean(abs.(img_eval .- target_image))
-        s = 1f0 - ssim(img_eval, target_image)
+        l1 = mean(abs.(image_eval .- target_image))
+        s = 1f0 - ssim(image_eval, target_image)
         (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
     end
 

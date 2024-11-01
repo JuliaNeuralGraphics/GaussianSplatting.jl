@@ -44,6 +44,8 @@ end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
 
+include("rules.jl")
+
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
@@ -72,6 +74,28 @@ function (rast::GaussianRasterizer)(
         rast, camera, sh_degree, background)
 end
 
+function (rast::GaussianRasterizer)(
+    ::Val{:alloc},
+    means_3d::AbstractMatrix{Float32},
+    opacities::AbstractMatrix{Float32},
+    scales::AbstractMatrix{Float32},
+    rotations::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3};
+    camera::Camera, sh_degree::Int,
+    background::SVector{3, Float32} = zeros(SVector{3, Float32}),
+)
+    means_2d, conics = project(
+        means_3d, exp.(scales), rotations;
+        rast, camera, near_plane=0.2f0, far_plane=1000f0,
+        radius_clip=3f0, blur_ϵ=0.3f0)
+
+    colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
+    image = render(
+        means_2d, conics, NU.sigmoid.(opacities), colors;
+        rast, camera, background)
+    return image
+end
+
 function rasterize(
     means_3d::AbstractMatrix{Float32},
     shs::AbstractArray{Float32, 3},
@@ -83,12 +107,14 @@ function rasterize(
 )
     kab = get_backend(rast)
     n = size(means_3d, 2)
-    length(rast.gstate) == n || (rast.gstate = GeometryState(kab, n))
+    if length(rast.gstate) < n
+        KA.unsafe_free!(rast.gstate)
+        rast.gstate = GeometryState(kab, n)
+    end
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
     fill!(rast.image, 0f0)
 
     K = camera.intrinsics
@@ -134,13 +160,17 @@ function rasterize(
         rast.gstate.radii,
         rast.grid, BLOCK; ndrange=n)
 
-    cumsum!(rast.gstate.points_offset, rast.gstate.tiles_touched)
+    cumsum!(
+        @view(rast.gstate.points_offset[1:n]),
+        @view(rast.gstate.tiles_touched[1:n]))
     # Get total number of tiles touched.
-    n_rendered = Int(@allowscalar rast.gstate.points_offset[end])
+    n_rendered = Int(@allowscalar rast.gstate.points_offset[n])
     n_rendered == 0 && return rast.image
 
-    length(rast.bstate) == n_rendered ||
-        (rast.bstate = BinningState(kab, n_rendered))
+    if length(rast.bstate) < n_rendered
+        KA.unsafe_free!(rast.bstate)
+        rast.bstate = BinningState(kab, n_rendered)
+    end
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
@@ -154,7 +184,9 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    sortperm!(rast.bstate.permutation, rast.bstate.gaussian_keys_unsorted)
+    sortperm!(
+        @view(rast.bstate.permutation[1:n_rendered]),
+        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)
@@ -164,11 +196,9 @@ function rasterize(
 
     # Identify start-end of per-tile workloads in sorted keys.
     fill!(rast.istate.ranges, 0u32)
-    if n_rendered > 0
-        identify_tile_range!(kab, Int(BLOCK_SIZE))(
-            rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
-            ndrange=n_rendered)
-    end
+    identify_tile_range!(kab, Int(BLOCK_SIZE))(
+        rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
+        ndrange=n_rendered)
 
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
@@ -242,8 +272,6 @@ function ∇rasterize(
         rast.istate.ranges,
         SVector{2, Int32}(width, height), background,
         rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
-
-    _as_T(T, x) = reinterpret(T, reshape(x, :))
 
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])

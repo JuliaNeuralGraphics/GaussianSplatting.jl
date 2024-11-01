@@ -52,6 +52,8 @@ const i32 = Literal{Int32}
 const BLOCK::SVector{2, Int32} = SVector{2, Int32}(16i32, 16i32)
 const BLOCK_SIZE::Int32 = 256i32
 
+_as_T(T, x) = reinterpret(T, reshape(x, :))
+
 include("utils.jl")
 include("camera.jl")
 include("dataset.jl")
@@ -73,6 +75,9 @@ function main(dataset_path::String; scale::Int)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+
+    camera = dataset.cameras[1]
+    @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
     for i in 1:3000
         loss = step!(trainer)
