@@ -5,7 +5,7 @@
     vconics::AbstractMatrix{Float32},
     vmeans_2d::AbstractMatrix{Float32},
     # Inputs.
-    vpixels::AbstractMatrix{SVector{3, Float32}},
+    vpixels::AbstractMatrix{SVector{channels, Float32}},
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
 
@@ -13,13 +13,12 @@
     means_2d::AbstractVector{SVector{2, Float32}},
     opacities::AbstractMatrix{Float32},
     conics::AbstractVector{SVector{3, Float32}},
-    rgb_features::AbstractVector{SVector{3, Float32}},
+    rgb_features::AbstractVector{SVector{channels, Float32}},
 
     ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
-    bg_color::SVector{3, Float32},
-    grid::SVector{2, Int32}, block::SVector{2, Int32},
-    ::Val{block_size}, ::Val{channels},
+    bg_color::SVector{channels, Float32},
+    grid::SVector{2, Int32}, block::SVector{2, Int32}, ::Val{block_size},
 ) where {block_size, channels}
     @uniform horizontal_blocks = gpu_cld(resolution[1], block[1])
 
@@ -53,7 +52,7 @@
 
     # Allocate storage for batches of collectively fetched data.
     collected_conics = @localmem SVector{3, Float32} block_size
-    collected_colors = @localmem SVector{3, Float32} block_size
+    collected_colors = @localmem SVector{channels, Float32} block_size
     collected_xy = @localmem SVector{2, Float32} block_size
     collected_opacity = @localmem Float32 block_size
     collected_id = @localmem UInt32 block_size
@@ -65,11 +64,10 @@
     contributor = to_do
     last_contributor = inside ? n_contrib[px, py] : 0i32
 
-    accum_rec = zeros(MVector{3, Float32})
-    vpixel = inside ? vpixels[px, py] : zeros(SVector{3, Float32})
-
+    accum_rec = zeros(MVector{channels, Float32})
+    vpixel = inside ? vpixels[px, py] : zeros(SVector{channels, Float32})
+    last_color = zeros(MVector{channels, Float32})
     last_α = 0f0
-    last_color = zeros(MVector{3, Float32})
 
     for round in 0i32:(rounds - 1i32)
         @synchronize()
@@ -164,6 +162,7 @@ end
     vmeans_2d::AbstractVector{SVector{2, Float32}},
     vconics::AbstractArray{SVector{3, Float32}},
     vcompensations::VC, #::AbstractVector{Float32},
+    vdepths::VD,
 
     conics::AbstractVector{SVector{3, Float32}},
     radii::AbstractVector{Int32},
@@ -181,7 +180,7 @@ end
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
     ϵ::Float32,
-) where {C <: Maybe{AbstractMatrix{Float32}}, VC}
+) where {C <: Maybe{AbstractMatrix{Float32}}, VC, VD}
     i = @index(Global)
 
     conic = conics[i]
@@ -216,7 +215,11 @@ end
         vΣ_2D, vmean_2d,
     )
 
-    # TODO add vdepth contribution (for diff depth)
+    if VD <: AbstractVector{Float32}
+        vdepth = vdepths[i]
+        vmean_cam = SVector{3, Float32}(
+            vmean_cam[1], vmean_cam[2], vmean_cam[3] + vdepth)
+    end
 
     vR = zeros(SMatrix{3, 3, Float32, 9})
     vt = zeros(SVector{3, Float32})

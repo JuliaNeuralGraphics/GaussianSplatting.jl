@@ -74,7 +74,7 @@ function main(dataset_path::String; scale::Int)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1];
-        antialias=true, fused=false)
+        antialias=false, fused=true, mode=:rgb)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     camera = dataset.cameras[1]
@@ -88,10 +88,23 @@ function main(dataset_path::String; scale::Int)
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
                 hcat(gaussians.features_dc, gaussians.features_rest)
-            image = rasterizer(
+            image_features = rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
+
+            image = if rasterizer.mode ∈ (:rgbd, :rgbed)
+                image_features[1:3, :, :]
+            else
+                image_features
+            end
             save("image-$(trainer.step).png", to_image(image))
+
+            if rasterizer.mode ∈ (:rgbd, :rgbed)
+                depth_image = permutedims(Array(image_features[4, :, :]), (2, 1))
+                depth_image ./= maximum(depth_image)
+                clamp01!(depth_image)
+                save("depth-$(trainer.step).png", colorview(Gray, depth_image))
+            end
 
             GC.gc(false)
             GC.gc(true)

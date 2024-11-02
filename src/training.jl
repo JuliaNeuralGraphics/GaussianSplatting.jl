@@ -145,9 +145,15 @@ function step!(trainer::Trainer)
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
         shs = isempty(features_rest) ?
             features_dc : hcat(features_dc, features_rest)
-        image = rast(
+        image_features = rast(
             means_3d, opacities, scales, rotations, shs;
             camera, sh_degree=gs.sh_degree, background)
+
+        image = if rast.mode ∈ (:rgbd, :rgbed)
+            image_features[1:3, :, :]
+        else
+            image_features
+        end
 
         # From (c, w, h) to (w, h, c, 1) for SSIM.
         image_tmp = permutedims(image, (2, 3, 1))
