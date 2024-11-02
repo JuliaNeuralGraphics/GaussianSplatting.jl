@@ -265,8 +265,7 @@ function render(
         _as_T(SVector{channels, Float32}, colors),
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        background,
-        BLOCK, Val(BLOCK_SIZE))
+        background, BLOCK, Val(BLOCK_SIZE))
     return image
 end
 

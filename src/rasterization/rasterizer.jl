@@ -233,22 +233,16 @@ function rasterize(
 
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
-        rast.image,
-        rast.istate.n_contrib,
-        rast.istate.accum_α,
+        rast.image, rast.istate.n_contrib, rast.istate.accum_α,
         # Inputs.
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
         opacities,
         rast.gstate.conic_opacities,
         rast.gstate.rgbs,
-        rast.gstate.depths,
-
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        background,
-        BLOCK, Val(BLOCK_SIZE), Val(3i32))
-
+        background, BLOCK, Val(BLOCK_SIZE))
     return rast.image
 end
 
@@ -302,7 +296,7 @@ function ∇rasterize(
 
         rast.istate.ranges,
         SVector{2, Int32}(width, height), background,
-        rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
+        rast.grid, BLOCK, Val(BLOCK_SIZE))
 
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])

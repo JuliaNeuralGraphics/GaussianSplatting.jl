@@ -74,7 +74,7 @@ function main(dataset_path::String; scale::Int)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, dataset.cameras[1];
-        antialias=true, fused=false, mode=:rgbd)
+        antialias=false, fused=true, mode=:rgb)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     camera = dataset.cameras[1]
