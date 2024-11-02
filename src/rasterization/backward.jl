@@ -163,6 +163,8 @@ end
     # Input grad outputs.
     vmeans_2d::AbstractVector{SVector{2, Float32}},
     vconics::AbstractArray{SVector{3, Float32}},
+    vcompensations::VC, #::AbstractVector{Float32},
+
     conics::AbstractVector{SVector{3, Float32}},
     radii::AbstractVector{Int32},
 
@@ -170,6 +172,7 @@ end
     means::AbstractVector{SVector{3, Float32}},
     cov_scales::AbstractVector{SVector{3, Float32}},
     cov_rotations::AbstractVector{SVector{4, Float32}},
+    compensations::C,
 
     # Input camera properties.
     R_w2c::SMatrix{3, 3, Float32, 9},
@@ -177,7 +180,8 @@ end
     focal::SVector{2, Float32},
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
-)
+    ϵ::Float32,
+) where {C <: Maybe{AbstractMatrix{Float32}}, VC}
     i = @index(Global)
 
     conic = conics[i]
@@ -192,7 +196,11 @@ end
 
     vΣ_2D = ∇inverse(Σ_2D_inv, vΣ_2D_inv)
 
-    # TODO ∇add_blur: requires storing compensation values in fwd pass.
+    if C <: AbstractMatrix{Float32} && VC <: AbstractMatrix{Float32}
+        compensation = compensations[i]
+        vcompensation = vcompensations[i]
+        vΣ_2D = vΣ_2D + ∇add_blur(compensation, vcompensation, Σ_2D_inv, ϵ)
+    end
 
     mean = means[i]
     mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)

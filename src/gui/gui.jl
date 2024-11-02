@@ -162,7 +162,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
 
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; fused=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     # Set-up separate renderer camera & rasterizer.
