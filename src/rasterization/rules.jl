@@ -19,6 +19,7 @@ function project(
     means_2d = KA.zeros(kab, Float32, (2, n))
     conics = KA.zeros(kab, Float32, (3, n))
     compensations = KA.zeros(kab, Float32, (1, rast.antialias ? n : 0))
+    depths = KA.zeros(kab, Float32, n)
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
@@ -27,7 +28,7 @@ function project(
 
     project!(kab, Int(BLOCK_SIZE))(
         # Output.
-        rast.gstate.depths, # TODO support diff depth
+        depths,
         rast.gstate.radii,
         _as_T(SVector{2, Float32}, means_2d),
         _as_T(SVector{3, Float32}, conics),
@@ -40,13 +41,14 @@ function project(
         R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
         # Config.
         near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
-    return means_2d, conics, compensations
+    return means_2d, conics, compensations, depths
 end
 
 function ∇project(
     vmeans_2d::AbstractMatrix{Float32},
     vconics::AbstractMatrix{Float32},
     vcompensations, # TODO Union{ZeroTangent, AbstractVector{Float32}},
+    vdepths, # TODO Union{ZeroTangent, AbstractVector{Float32}},
     # FWD input.
     means_3d::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
@@ -79,6 +81,7 @@ function ∇project(
         _as_T(SVector{2, Float32}, vmeans_2d),
         _as_T(SVector{3, Float32}, vconics),
         vcompensations,
+        vdepths,
 
         _as_T(SVector{3, Float32}, conics),
         rast.gstate.radii,
@@ -105,21 +108,21 @@ function ChainRulesCore.rrule(::typeof(project),
     near_plane::Float32, far_plane::Float32,
     radius_clip::Float32, blur_ϵ::Float32,
 )
-    means_2d, conics, compensations = project(
+    means_2d, conics, compensations, depths = project(
         means_3d, scales, rotations;
         rast, camera, near_plane, far_plane,
         radius_clip, blur_ϵ)
 
     function _project_pullback(Ω)
-        vmeans_2d, vconics, vcompensations = Ω
+        vmeans_2d, vconics, vcompensations, vdepths = Ω
         ∇ = ∇project(
-            vmeans_2d, vconics, vcompensations,
+            vmeans_2d, vconics, vcompensations, vdepths,
             means_3d, scales, rotations, compensations, conics;
             rast, camera, near_plane, far_plane,
             radius_clip, blur_ϵ)
         return (NoTangent(), ∇...)
     end
-    return (means_2d, conics, compensations), _project_pullback
+    return (means_2d, conics, compensations, depths), _project_pullback
 end
 
 function spherical_harmonics(
@@ -194,7 +197,8 @@ function render(
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    image = KA.zeros(kab, Float32, (3, width, height))
+    channels = size(colors, 1)
+    image = KA.zeros(kab, Float32, (channels, width, height))
 
     count_tiles_per_gaussian!(kab, Int(BLOCK_SIZE))(
         # Output.
@@ -243,29 +247,29 @@ function render(
         rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
         ndrange=n_rendered)
 
+    if channels > 3
+        background_tmp = zeros(MVector{channels, Float32})
+        background_tmp[1:3] = background
+        background = SVector{channels, Float32}(background_tmp)
+    end
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
-        image,
-        rast.istate.n_contrib,
-        rast.istate.accum_α,
+        image, rast.istate.n_contrib, rast.istate.accum_α,
         # Inputs.
         rast.bstate.gaussian_values_sorted,
         _as_T(SVector{2, Float32}, means_2d),
         opacities,
         _as_T(SVector{3, Float32}, conics),
-        _as_T(SVector{3, Float32}, colors),
-        rast.gstate.depths,
-
+        _as_T(SVector{channels, Float32}, colors),
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
         background,
-        BLOCK, Val(BLOCK_SIZE), Val(3i32))
+        BLOCK, Val(BLOCK_SIZE))
     return image
 end
 
 function ∇render(
     vpixels::AbstractArray{Float32, 3},
-
     means_2d::AbstractMatrix{Float32},
     conics::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
@@ -285,27 +289,27 @@ function ∇render(
     vopacities = KA.zeros(kab, Float32, size(opacities))
     vcolors = KA.zeros(kab, Float32, size(colors))
 
+    channels = size(colors, 1)
+    if channels > 3
+        background_tmp = zeros(MVector{channels, Float32})
+        background_tmp[1:3] = background
+        background = SVector{channels, Float32}(background_tmp)
+    end
     ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
-        vcolors,
-        vopacities,
-        vconics,
-        vmeans_2d,
-
+        vcolors, vopacities, vconics, vmeans_2d,
         # Inputs.
-        reshape(reinterpret(SVector{3, Float32}, vpixels), size(vpixels)[2:3]),
+        reshape(reinterpret(SVector{channels, Float32}, vpixels), size(vpixels)[2:3]),
         rast.istate.n_contrib,
         rast.istate.accum_α,
-
         rast.bstate.gaussian_values_sorted,
         _as_T(SVector{2, Float32}, means_2d),
         opacities,
         _as_T(SVector{3, Float32}, conics),
-        _as_T(SVector{3, Float32}, colors),
-
+        _as_T(SVector{channels, Float32}, colors),
         rast.istate.ranges,
         SVector{2, Int32}(width, height), background,
-        rast.grid, BLOCK, Val(BLOCK_SIZE), Val(3i32))
+        rast.grid, BLOCK, Val(BLOCK_SIZE))
 
     # Accumulate for densificaton.
     @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)

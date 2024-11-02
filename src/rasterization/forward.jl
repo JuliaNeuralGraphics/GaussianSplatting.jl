@@ -107,14 +107,13 @@ end
     means_2d::AbstractVector{SVector{2, Float32}},
     opacities::AbstractMatrix{Float32},
     conics::AbstractVector{SVector{3, Float32}},
-    rgb_features::AbstractVector{SVector{3, Float32}},
-    depths::AbstractVector{Float32},
+    rgb_features::AbstractVector{SVector{channels, Float32}},
 
     ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
-    background::SVector{3, Float32},
+    background::SVector{channels, Float32},
     block::SVector{2, Int32},
-    ::Val{block_size}, ::Val{channels},
+    ::Val{block_size},
 ) where {block_size, channels}
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
@@ -155,8 +154,7 @@ end
     contributor = 0u32
     last_contributor = 0u32
 
-    color = zeros(MVector{3, Float32})
-
+    color = zeros(MVector{channels, Float32})
     for round in 0i32:(rounds - 1i32)
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.

@@ -25,16 +25,28 @@ mutable struct GaussianRasterizer{
 
     antialias::Bool
     fused::Bool
+    mode::Symbol
 end
 
-function GaussianRasterizer(kab, camera::Camera; antialias::Bool = false, fused::Bool = true)
+function GaussianRasterizer(kab, camera::Camera;
+    antialias::Bool = false, fused::Bool = true, mode::Symbol = :rgb,
+)
     (; width, height) = resolution(camera)
-    GaussianRasterizer(kab; width, height, antialias, fused)
+    GaussianRasterizer(kab; width, height, antialias, fused, mode)
 end
 
-function GaussianRasterizer(kab; width::Int, height::Int, antialias::Bool = false, fused::Bool = true)
+function GaussianRasterizer(kab;
+    width::Int, height::Int, antialias::Bool = false, fused::Bool = true,
+    mode::Symbol = :rgb,
+)
     @assert width % 16 == 0 && height % 16 == 0
     antialias && fused && error("`antialias=true` requires `fused=false` for GaussianRasterizer.")
+
+    # TODO support only :d, :ed
+    modes = (:rgb, :rgbd, :rgbed)
+    mode in modes || error("Invalid render: $mode ∉ $modes")
+
+    mode != :rgb && fused && error("Only :rgb mode is supported for fused=true.")
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
     istate = ImageState(kab; width, height, grid_size=Int(prod(grid)))
@@ -43,7 +55,7 @@ function GaussianRasterizer(kab; width::Int, height::Int, antialias::Bool = fals
 
     image = KA.allocate(kab, Float32, (3, width, height))
     host_image = Array{Float32, 3}(undef, (3, width, height))
-    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid, antialias, fused)
+    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid, antialias, fused, mode)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -87,10 +99,12 @@ function (rast::GaussianRasterizer)(
             rotations;
             rast, camera, sh_degree, background)
     else
-        means_2d, conics, compensations = project(
+        means_2d, conics, compensations, depths = project(
             means_3d, exp.(scales), rotations;
             rast, camera, near_plane=0.2f0, far_plane=1000f0,
             radius_clip=3f0, blur_ϵ=0.3f0)
+
+        colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
         opacities_act = if rast.antialias
             NU.sigmoid.(opacities) .* compensations
@@ -98,9 +112,15 @@ function (rast::GaussianRasterizer)(
             NU.sigmoid.(opacities)
         end
 
-        colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
+        # TODO handle :d, :ed modes
+        color_features = if rast.mode ∈ (:rgbd, :rgbed)
+            vcat(colors, reshape(depths, 1, :))
+        else
+            colors
+        end
+
         image = render(
-            means_2d, conics, opacities_act, colors;
+            means_2d, conics, opacities_act, color_features;
             rast, camera, background)
         return image
     end
@@ -297,6 +317,7 @@ function ∇rasterize(
         rast.gstate.∇means_2d,
         _as_T(SVector{3, Float32}, vconics),
         nothing, # vcompensations
+        nothing, # vdepths
 
         rast.gstate.conic_opacities,
         rast.gstate.radii,
