@@ -22,15 +22,19 @@ mutable struct GaussianRasterizer{
     host_image::Array{Float32, 3}
 
     grid::SVector{2, Int32}
+
+    antialias::Bool
+    fused::Bool
 end
 
-function GaussianRasterizer(kab, camera::Camera)
+function GaussianRasterizer(kab, camera::Camera; antialias::Bool = false, fused::Bool = true)
     (; width, height) = resolution(camera)
-    GaussianRasterizer(kab; width, height)
+    GaussianRasterizer(kab; width, height, antialias, fused)
 end
 
-function GaussianRasterizer(kab; width::Int, height::Int)
+function GaussianRasterizer(kab; width::Int, height::Int, antialias::Bool = false, fused::Bool = true)
     @assert width % 16 == 0 && height % 16 == 0
+    antialias && fused && error("`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
     istate = ImageState(kab; width, height, grid_size=Int(prod(grid)))
@@ -39,7 +43,7 @@ function GaussianRasterizer(kab; width::Int, height::Int)
 
     image = KA.allocate(kab, Float32, (3, width, height))
     host_image = Array{Float32, 3}(undef, (3, width, height))
-    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid)
+    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid, antialias, fused)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -61,21 +65,12 @@ function to_image(r::GaussianRasterizer)
     return colorview(RGB, raw_img)
 end
 
-function (rast::GaussianRasterizer)(
-    means_3d, opacities, scales, rotations, shs;
-    camera::Camera, sh_degree::Int,
-    background::SVector{3, Float32} = zeros(SVector{3, Float32}),
-)
-    rasterize(
-        means_3d, shs,
-        NU.sigmoid.(opacities),
-        exp.(scales),
-        rotations;
-        rast, camera, sh_degree, background)
+function to_image(image)
+    raw_img = clamp01!(permutedims(Array(image), (1, 3, 2)))
+    return colorview(RGB, raw_img)
 end
 
 function (rast::GaussianRasterizer)(
-    ::Val{:alloc},
     means_3d::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
@@ -84,16 +79,31 @@ function (rast::GaussianRasterizer)(
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
 )
-    means_2d, conics = project(
-        means_3d, exp.(scales), rotations;
-        rast, camera, near_plane=0.2f0, far_plane=1000f0,
-        radius_clip=3f0, blur_ϵ=0.3f0)
+    if rast.fused
+        return rasterize(
+            means_3d, shs,
+            NU.sigmoid.(opacities),
+            exp.(scales),
+            rotations;
+            rast, camera, sh_degree, background)
+    else
+        means_2d, conics, compensations = project(
+            means_3d, exp.(scales), rotations;
+            rast, camera, near_plane=0.2f0, far_plane=1000f0,
+            radius_clip=3f0, blur_ϵ=0.3f0)
 
-    colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
-    image = render(
-        means_2d, conics, NU.sigmoid.(opacities), colors;
-        rast, camera, background)
-    return image
+        opacities_act = if rast.antialias
+            NU.sigmoid.(opacities) .* compensations
+        else
+            NU.sigmoid.(opacities)
+        end
+
+        colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
+        image = render(
+            means_2d, conics, opacities_act, colors;
+            rast, camera, background)
+        return image
+    end
 end
 
 function rasterize(
@@ -132,6 +142,7 @@ function rasterize(
         rast.gstate.radii,
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
+        nothing, # compensations
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
@@ -275,6 +286,7 @@ function ∇rasterize(
 
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    blur_ϵ = 0.3f0
     ∇project!(kab, Int(BLOCK_SIZE))(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
@@ -284,6 +296,7 @@ function ∇rasterize(
         # Input grad outputs.
         rast.gstate.∇means_2d,
         _as_T(SVector{3, Float32}, vconics),
+        nothing, # vcompensations
 
         rast.gstate.conic_opacities,
         rast.gstate.radii,
@@ -291,8 +304,9 @@ function ∇rasterize(
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
+        nothing, # compensations
         # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal; ndrange=n)
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal, blur_ϵ; ndrange=n)
 
     ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
         # Output.

@@ -73,7 +73,8 @@ function main(dataset_path::String; scale::Int)
     dataset = ColmapDataset(kab, dataset_path; scale)
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1])
+    rasterizer = GaussianRasterizer(kab, dataset.cameras[1];
+        antialias=true, fused=false)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     camera = dataset.cameras[1]
@@ -83,18 +84,21 @@ function main(dataset_path::String; scale::Int)
         loss = step!(trainer)
         @show i, loss
 
-        if trainer.step % 100 == 0
+        if trainer.step % 100 == 0 || trainer.step == 1
             shs = isempty(gaussians.features_rest) ?
                 gaussians.features_dc :
                 hcat(gaussians.features_dc, gaussians.features_rest)
-            rasterizer(
+            image = rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
-            save("image-$(trainer.step).png", to_image(rasterizer))
+            save("image-$(trainer.step).png", to_image(image))
+
+            GC.gc(false)
+            GC.gc(true)
         end
     end
 
-    save_state(trainer, "../state.bson")
+    # save_state(trainer, "../state.bson")
     return
 end
 

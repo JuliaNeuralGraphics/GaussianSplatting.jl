@@ -4,6 +4,7 @@
     radii::AbstractVector{Int32},
     means_2D::AbstractVector{SVector{2, Float32}},
     conics::AbstractVector{SVector{3, Float32}},
+    compensations::C,
 
     # Input Gaussians.
     means::AbstractVector{SVector{3, Float32}},
@@ -22,7 +23,7 @@
     far_plane::Float32,
     radius_clip::Float32,
     blur_ϵ::Float32,
-)
+) where {C <: Maybe{AbstractMatrix{Float32}}}
     i = @index(Global)
 
     mean = means[i]
@@ -69,6 +70,9 @@
     means_2D[i] = mean_2D
     depths[i] = mean_cam[3]
     conics[i] = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
+    if C <: AbstractMatrix{Float32}
+        compensations[i] = compensation
+    end
 end
 
 @kernel cpu=false inbounds=true function count_tiles_per_gaussian!(
@@ -317,9 +321,22 @@ function add_blur(Σ_2D::SMatrix{2, 2, Float32, 4}, ϵ::Float32)
     return Σ_2D, det_blur, compensation
 end
 
-# TODO
-# function ∇add_blur(, ϵ::Float32)
-# end
+function ∇add_blur(
+    compensation::Float32, vcompensation::Float32,
+    Σ_2D_blur::SMatrix{2, 2, Float32, 4}, ϵ::Float32,
+)
+    det_Σ_blur =
+        Σ_2D_blur[1, 1] * Σ_2D_blur[2, 2] -
+        Σ_2D_blur[1, 2] * Σ_2D_blur[2, 1]
+    vsqrt_comp = 0.5f0 * vcompensation / (compensation + 1f-6)
+    comp_tmp = 1f0 - compensation^2
+    return SMatrix{2, 2, Float32, 4}(
+        vsqrt_comp * (comp_tmp * Σ_2D_blur[1, 1] - ϵ * det_Σ_blur),
+        vsqrt_comp * comp_tmp * Σ_2D_blur[2, 1],
+        vsqrt_comp * comp_tmp * Σ_2D_blur[1, 2],
+        vsqrt_comp * (comp_tmp * Σ_2D_blur[2, 2] - ϵ * det_Σ_blur),
+    )
+end
 
 @inbounds @inline function max_eigval_2D(
     Σ_2D::SMatrix{2, 2, Float32, 4}, det::Float32,

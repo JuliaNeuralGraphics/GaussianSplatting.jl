@@ -2,7 +2,6 @@ function project(
     means_3d::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32};
-
     rast::GaussianRasterizer, camera::Camera,
     near_plane::Float32, far_plane::Float32,
     radius_clip::Float32, blur_ϵ::Float32,
@@ -19,6 +18,7 @@ function project(
 
     means_2d = KA.zeros(kab, Float32, (2, n))
     conics = KA.zeros(kab, Float32, (3, n))
+    compensations = KA.zeros(kab, Float32, (1, rast.antialias ? n : 0))
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
@@ -31,6 +31,7 @@ function project(
         rast.gstate.radii,
         _as_T(SVector{2, Float32}, means_2d),
         _as_T(SVector{3, Float32}, conics),
+        rast.antialias ? compensations : nothing,
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
@@ -39,18 +40,19 @@ function project(
         R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
         # Config.
         near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
-
-    return means_2d, conics
+    return means_2d, conics, compensations
 end
 
 function ∇project(
     vmeans_2d::AbstractMatrix{Float32},
     vconics::AbstractMatrix{Float32},
+    vcompensations, # TODO Union{ZeroTangent, AbstractVector{Float32}},
     # FWD input.
     means_3d::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
-    rotations::AbstractMatrix{Float32};
-
+    rotations::AbstractMatrix{Float32},
+    compensations::AbstractMatrix{Float32},
+    conics::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera,
     near_plane::Float32, far_plane::Float32,
     radius_clip::Float32, blur_ϵ::Float32,
@@ -66,6 +68,7 @@ function ∇project(
     vscales = KA.zeros(kab, Float32, (3, n))
     vrot = KA.zeros(kab, Float32, (4, n))
 
+    # TODO check that vcompensations is not ZeroTangent if antialias
     ∇project!(kab, Int(BLOCK_SIZE))(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
@@ -75,15 +78,18 @@ function ∇project(
         # Input grad outputs.
         _as_T(SVector{2, Float32}, vmeans_2d),
         _as_T(SVector{3, Float32}, vconics),
+        vcompensations,
 
-        rast.gstate.conic_opacities,
+        _as_T(SVector{3, Float32}, conics),
         rast.gstate.radii,
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
+        rast.antialias ? compensations : nothing,
         # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal; ndrange=n)
+        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        blur_ϵ; ndrange=n)
 
     # Accumulate for densificaton.
     @view(rast.gstate.∇means_2d[1:n]) .+= _as_T(SVector{2, Float32}, vmeans_2d)
@@ -99,19 +105,21 @@ function ChainRulesCore.rrule(::typeof(project),
     near_plane::Float32, far_plane::Float32,
     radius_clip::Float32, blur_ϵ::Float32,
 )
-    means_2d, conics = project(
+    means_2d, conics, compensations = project(
         means_3d, scales, rotations;
         rast, camera, near_plane, far_plane,
         radius_clip, blur_ϵ)
 
     function _project_pullback(Ω)
-        vmeans_2d, vconics = Ω
+        vmeans_2d, vconics, vcompensations = Ω
         ∇ = ∇project(
-            vmeans_2d, vconics, means_3d, scales, rotations;
-            rast, camera, near_plane, far_plane, radius_clip, blur_ϵ)
+            vmeans_2d, vconics, vcompensations,
+            means_3d, scales, rotations, compensations, conics;
+            rast, camera, near_plane, far_plane,
+            radius_clip, blur_ϵ)
         return (NoTangent(), ∇...)
     end
-    return (means_2d, conics), _project_pullback
+    return (means_2d, conics, compensations), _project_pullback
 end
 
 function spherical_harmonics(
@@ -133,7 +141,6 @@ function spherical_harmonics(
         camera.camera_center,
         reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
         Val(sh_degree); ndrange=n)
-
     return colors
 end
 
@@ -159,7 +166,6 @@ function ∇spherical_harmonics(
         _as_T(SVector{3, Float32}, vcolors),
         camera.camera_center,
         Val(sh_degree); ndrange=n)
-
     return vmeans_3d, vshs
 end
 
@@ -254,7 +260,6 @@ function render(
         SVector{2, Int32}(width, height),
         background,
         BLOCK, Val(BLOCK_SIZE), Val(3i32))
-
     return image
 end
 
@@ -265,7 +270,6 @@ function ∇render(
     conics::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
     colors::AbstractMatrix{Float32};
-
     rast::GaussianRasterizer, camera::Camera, background::SVector{3, Float32},
 )
     kab = get_backend(rast)
@@ -318,7 +322,6 @@ function ChainRulesCore.rrule(::typeof(render),
     image = render(
         means_2d, conics, opacities, colors;
         rast, camera, background)
-
     function _render_pullback(vpixels)
         ∇ = ∇render(
             vpixels, means_2d, conics, opacities, colors;

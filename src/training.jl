@@ -145,7 +145,6 @@ function step!(trainer::Trainer)
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
         shs = isempty(features_rest) ?
             features_dc : hcat(features_dc, features_rest)
-        # image = rast(Val{:alloc}(),
         image = rast(
             means_3d, opacities, scales, rotations, shs;
             camera, sh_degree=gs.sh_degree, background)
