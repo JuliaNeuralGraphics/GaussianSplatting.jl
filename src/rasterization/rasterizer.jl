@@ -28,19 +28,20 @@ mutable struct GaussianRasterizer{
     mode::Symbol
 end
 
-function GaussianRasterizer(kab, camera::Camera;
-    antialias::Bool = false, fused::Bool = true, mode::Symbol = :rgb,
-)
+function GaussianRasterizer(kab, camera::Camera; kwargs...)
     (; width, height) = resolution(camera)
-    GaussianRasterizer(kab; width, height, antialias, fused, mode)
+    GaussianRasterizer(kab; width, height, kwargs...)
 end
 
 function GaussianRasterizer(kab;
-    width::Int, height::Int, antialias::Bool = false, fused::Bool = true,
+    width::Int, height::Int,
+    antialias::Bool = false,
+    fused::Bool = true,
     mode::Symbol = :rgb,
 )
     @assert width % 16 == 0 && height % 16 == 0
-    antialias && fused && error("`antialias=true` requires `fused=false` for GaussianRasterizer.")
+    antialias && fused && error(
+        "`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
     # TODO support only :d, :ed
     modes = (:rgb, :rgbd, :rgbed)
@@ -55,7 +56,8 @@ function GaussianRasterizer(kab;
 
     image = KA.allocate(kab, Float32, (3, width, height))
     host_image = Array{Float32, 3}(undef, (3, width, height))
-    GaussianRasterizer(istate, gstate, bstate, image, host_image, grid, antialias, fused, mode)
+    GaussianRasterizer(
+        istate, gstate, bstate, image, host_image, grid, antialias, fused, mode)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)

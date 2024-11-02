@@ -7,7 +7,8 @@ function main(dataset_path::String; scale::Int)
     opt_params = GSP.OptimizationParams()
     gaussians = GSP.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GSP.GaussianRasterizer(kab, dataset.cameras[1])
+    rasterizer = GSP.GaussianRasterizer(kab, dataset.cameras[1];
+        antialias=false, fused=false, mode=:rgb)
     trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
 
     camera = dataset.cameras[1]
