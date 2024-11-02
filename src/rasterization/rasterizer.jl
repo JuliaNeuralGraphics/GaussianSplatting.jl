@@ -106,12 +106,6 @@ function (rast::GaussianRasterizer)(
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
-        opacities_act = if rast.antialias
-            NU.sigmoid.(opacities) .* compensations
-        else
-            NU.sigmoid.(opacities)
-        end
-
         # TODO handle :d, :ed modes
         color_features = if rast.mode ∈ (:rgbd, :rgbed)
             vcat(colors, reshape(depths, 1, :))
@@ -119,9 +113,15 @@ function (rast::GaussianRasterizer)(
             colors
         end
 
+        opacities_act = if rast.antialias
+            NU.sigmoid.(opacities) .* compensations
+        else
+            NU.sigmoid.(opacities)
+        end
+
         image = render(
             means_2d, conics, opacities_act, color_features;
-            rast, camera, background)
+            rast, camera, background, depths)
         return image
     end
 end

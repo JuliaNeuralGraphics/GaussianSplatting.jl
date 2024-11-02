@@ -190,6 +190,8 @@ function render(
     opacities::AbstractMatrix{Float32},
     colors::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera, background::SVector{3, Float32},
+    # Used only for sorting.
+    depths::AbstractVector{Float32},
 )
     kab = get_backend(rast)
     n = size(means_2d, 2)
@@ -227,7 +229,7 @@ function render(
         rast.bstate.gaussian_values_unsorted,
         # Input.
         _as_T(SVector{2, Float32}, means_2d),
-        rast.gstate.depths,
+        depths,
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
@@ -322,10 +324,11 @@ function ChainRulesCore.rrule(::typeof(render),
     opacities::AbstractMatrix{Float32},
     colors::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera, background::SVector{3, Float32},
+    depths::AbstractVector{Float32},
 )
     image = render(
         means_2d, conics, opacities, colors;
-        rast, camera, background)
+        rast, camera, background, depths)
     function _render_pullback(vpixels)
         ∇ = ∇render(
             vpixels, means_2d, conics, opacities, colors;
