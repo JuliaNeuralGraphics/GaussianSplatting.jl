@@ -55,6 +55,7 @@ const BLOCK_SIZE::Int32 = 256i32
 _as_T(T, x) = reinterpret(T, reshape(x, :))
 
 include("utils.jl")
+include("metrics.jl")
 include("camera.jl")
 include("dataset.jl")
 
@@ -70,19 +71,24 @@ function main(dataset_path::String; scale::Int)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(kab, dataset_path; scale)
+    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=0.8)
+    camera = dataset.test_cameras[1]
+
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1];
+    rasterizer = GaussianRasterizer(kab, camera;
         antialias=false, fused=true, mode=:rgb)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    camera = dataset.cameras[1]
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
+    @info "N train images: $(length(dataset.train_cameras))"
+    @info "N test images: $(length(dataset.test_cameras))"
 
-    for i in 1:3000
+    for i in 1:7000
         loss = step!(trainer)
-        @show i, loss
+        if i == 3000
+            trainer.densify = false
+        end
 
         if trainer.step % 100 == 0 || trainer.step == 1
             shs = isempty(gaussians.features_rest) ?
@@ -92,19 +98,25 @@ function main(dataset_path::String; scale::Int)
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
 
-            image = if rasterizer.mode ∈ (:rgbd, :rgbed)
+            image = if rasterizer.mode == :rgbd
                 image_features[1:3, :, :]
             else
                 image_features
             end
             save("image-$(trainer.step).png", to_image(image))
 
-            if rasterizer.mode ∈ (:rgbd, :rgbed)
+            if rasterizer.mode == :rgbd
                 depth_image = permutedims(Array(image_features[4, :, :]), (2, 1))
                 depth_image ./= maximum(depth_image)
                 clamp01!(depth_image)
                 save("depth-$(trainer.step).png", colorview(Gray, depth_image))
             end
+
+            GC.gc(false)
+            GC.gc(true)
+
+            (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
+            @show i, loss, eval_ssim, eval_mse, eval_psnr
 
             GC.gc(false)
             GC.gc(true)

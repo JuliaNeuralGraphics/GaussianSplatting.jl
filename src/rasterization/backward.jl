@@ -120,7 +120,7 @@
                 last_color[c] = color[c]
                 vα += (color[c] - accum_rec[c]) * vpixel[c]
             end
-            vα *= T
+            vα *= T # TODO mull by vaccum_α when supporting :rgbed mode
             # Account for the fact that `α` also influences how
             # much of the background is added.
             vα += (-T_final / (1f0 - α)) * (bg_color ⋅ vpixel)

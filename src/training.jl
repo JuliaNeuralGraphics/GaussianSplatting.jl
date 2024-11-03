@@ -107,18 +107,57 @@ function reset_opacity!(trainer::Trainer)
 end
 
 # Convert image from UInt8 to Float32 & permute from (c, w, h) to (w, h, c, 1).
-function get_image(trainer::Trainer, idx::Integer)
+function get_image(trainer::Trainer, idx::Integer, set::Symbol)
     kab = get_backend(trainer.gaussians)
-    target_image = get_image(trainer.dataset, kab, idx)
+    target_image = get_image(trainer.dataset, kab, idx, set)
     target_image = permutedims(target_image, (2, 3, 1))
     return reshape(target_image, size(target_image)..., 1)
+end
+
+function validate(trainer::Trainer)
+    gs = trainer.gaussians
+    rast = trainer.rast
+    ssim = trainer.ssim
+    dataset = trainer.dataset
+
+    shs = isempty(gs.features_rest) ?
+        gs.features_dc :
+        hcat(gs.features_dc, gs.features_rest)
+
+    eval_ssim = 0f0
+    eval_mse = 0f0
+    eval_psnr = 0f0
+    for (idx, camera) in enumerate(dataset.test_cameras)
+        target_image = get_image(trainer, idx, :test)
+
+        image_features = rast(
+            gs.points, gs.opacities, gs.scales,
+            gs.rotations, shs; camera, sh_degree=gs.sh_degree)
+
+        image = if rast.mode == :rgbd
+            image_features[1:3, :, :]
+        else
+            image_features
+        end
+
+        # From (c, w, h) to (w, h, c, 1) for SSIM.
+        image_tmp = permutedims(image, (2, 3, 1))
+        image_eval = reshape(image_tmp, size(image_tmp)..., 1)
+
+        eval_ssim += ssim(image_eval, target_image)
+        eval_mse += mse(image_eval, target_image)
+        eval_psnr += psnr(image_eval, target_image)
+    end
+    eval_ssim /= length(dataset.test_cameras)
+    eval_mse /= length(dataset.test_cameras)
+    eval_psnr /= length(dataset.test_cameras)
+    return (; eval_ssim, eval_mse, eval_psnr)
 end
 
 function step!(trainer::Trainer)
     trainer.step += 1
     update_lr!(trainer)
 
-    # Aliases.
     gs = trainer.gaussians
     rast = trainer.rast
     ssim = trainer.ssim
@@ -132,8 +171,8 @@ function step!(trainer::Trainer)
         shuffle!(trainer.ids)
     end
     idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
-    camera = trainer.dataset.cameras[idx]
-    target_image = get_image(trainer, idx)
+    camera = trainer.dataset.train_cameras[idx]
+    target_image = get_image(trainer, idx, :train)
     background = rand(SVector{3, Float32})
 
     θ = (
@@ -149,7 +188,7 @@ function step!(trainer::Trainer)
             means_3d, opacities, scales, rotations, shs;
             camera, sh_degree=gs.sh_degree, background)
 
-        image = if rast.mode ∈ (:rgbd, :rgbed)
+        image = if rast.mode == :rgbd
             image_features[1:3, :, :]
         else
             image_features
@@ -168,7 +207,6 @@ function step!(trainer::Trainer)
     for i in 1:length(θ)
         θᵢ = θ[i]
         isempty(θᵢ) && continue
-
         NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=true)
     end
 
