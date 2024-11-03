@@ -43,8 +43,8 @@ function GaussianRasterizer(kab;
     antialias && fused && error(
         "`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
-    # TODO support only :d, :ed
-    modes = (:rgb, :rgbd, :rgbed)
+    # TODO support only :d
+    modes = (:rgb, :rgbd)
     mode in modes || error("Invalid render: $mode ∉ $modes")
 
     mode != :rgb && fused && error("Only :rgb mode is supported for fused=true.")
@@ -108,8 +108,8 @@ function (rast::GaussianRasterizer)(
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
-        # TODO handle :d, :ed modes
-        color_features = if rast.mode ∈ (:rgbd, :rgbed)
+        # TODO handle :d modes
+        color_features = if rast.mode == :rgbd
             vcat(colors, reshape(depths, 1, :))
         else
             colors

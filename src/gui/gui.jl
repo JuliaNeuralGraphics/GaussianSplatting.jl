@@ -127,7 +127,7 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    rasterizer = GaussianRasterizer(kab, camera)
+    rasterizer = GaussianRasterizer(kab, camera; fused=true)
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -158,15 +158,16 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     fonts = unsafe_load(CImGui.GetIO().Fonts)
     CImGui.AddFontFromFileTTF(fonts, font_file, 16)
 
-    dataset = ColmapDataset(kab, dataset_path; scale)
+    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
+    camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GaussianRasterizer(kab, dataset.cameras[1]; fused=true)
+    rasterizer = GaussianRasterizer(kab, camera; fused=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     # Set-up separate renderer camera & rasterizer.
-    camera = deepcopy(dataset.cameras[1])
+    camera = deepcopy(camera)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
@@ -242,7 +243,7 @@ function loop!(gui::GSGUI)
     if !viewer_only(gui) && gui.ui_state.draw_cameras[]
         dataset = gui.trainer.dataset
         for view_id in 1:length(dataset)
-            camera = dataset.cameras[view_id]
+            camera = dataset.train_cameras[view_id]
             camera_perspective =
                 NGL.perspective(camera; near=0.1f0, far=0.2f0) *
                 NGL.look_at(camera)
@@ -320,14 +321,14 @@ function handle_ui!(gui::GSGUI; frame_time)
 
                     CImGui.EndTable()
 
-                    image_filenames = gui.trainer.dataset.image_filenames
+                    image_filenames = gui.trainer.dataset.train_image_filenames
                     CImGui.Text("Camera view:")
                     CImGui.PushItemWidth(-1)
                     if CImGui.ListBox("##views", gui.ui_state.selected_view,
                         image_filenames, length(image_filenames),
                     )
                         vid = gui.ui_state.selected_view[] + 1
-                        set_c2w!(gui.camera, gui.trainer.dataset.cameras[vid].c2w)
+                        set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
                         gui.render_state.need_render = true
                     end
                 end

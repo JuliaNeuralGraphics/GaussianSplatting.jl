@@ -9,25 +9,33 @@ struct ColmapDataset{
     points::P
     colors::C
     scales::P
-    cameras::Vector{Camera}
-    images::I
+
+    train_image_filenames::Vector{String}
+    train_cameras::Vector{Camera}
+    train_images::I
+
+    test_image_filenames::Vector{String}
+    test_cameras::Vector{Camera}
+    test_images::I
 
     camera_extent::Float32
-
-    image_filenames::Vector{String}
 end
 
-function ColmapDataset(kab, dataset_dir::String; scale::Int = 1)
+function ColmapDataset(kab,
+    dataset_dir::String; scale::Int = 1, train_test_split::Real = 0.8,
+)
     cameras_file = joinpath(dataset_dir, "sparse/0/cameras.bin")
     images_file = joinpath(dataset_dir, "sparse/0/images.bin")
     points_file = joinpath(dataset_dir, "sparse/0/points3D.bin")
     images_dir = joinpath(dataset_dir, "images")
-    ColmapDataset(kab; cameras_file, images_file, points_file, scale, images_dir)
+    ColmapDataset(kab;
+        cameras_file, images_file, points_file,
+        scale, images_dir, train_test_split)
 end
 
 function ColmapDataset(kab;
     cameras_file::String, images_file::String, points_file::String,
-    scale::Int = 1, images_dir::String,
+    scale::Int = 1, images_dir::String, train_test_split::Real = 0.8,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
 
@@ -84,11 +92,41 @@ function ColmapDataset(kab;
 
     scales = compute_scales(points.points_3d)
 
+    n_cameras = length(cameras)
+    perm = randperm(n_cameras)
+
+    cameras = cameras[perm]
+    images = images[:, :, :, perm]
+    image_filenames = image_filenames[perm]
+
+    if train_test_split < 1
+        n_train = ceil(Int, n_cameras * train_test_split)
+
+        train_cameras = cameras[1:n_train]
+        train_images = images[:, :, :, 1:n_train]
+        train_image_filenames = image_filenames[1:n_train]
+
+        test_cameras = cameras[(n_train + 1):end]
+        test_images = images[:, :, :, (n_train + 1):end]
+        test_image_filenames = image_filenames[(n_train + 1):end]
+    else
+        train_cameras = cameras
+        train_images = images
+        train_image_filenames = image_filenames
+
+        test_cameras = Camera[]
+        test_images = Array{UInt8, 4}(undef, 0, 0, 0, 0)
+        test_image_filenames = String[]
+    end
+
     ColmapDataset(
+        # TODO why move to GPU?
         adapt(kab, Float32.(points.points_3d)),
-        adapt(kab, Float32.(points.points_colors) ./ 255f0),
+        adapt(kab, Float32.(points.points_colors) .* (1f0 / 255f0)),
         adapt(kab, scales),
-        cameras, images, camera_extent, image_filenames)
+        train_image_filenames, train_cameras, train_images,
+        test_image_filenames, test_cameras, test_images,
+        camera_extent)
 end
 
 function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)
@@ -107,8 +145,13 @@ function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)
     return scales
 end
 
-Base.length(d::ColmapDataset) = length(d.cameras)
+Base.length(d::ColmapDataset) = length(d.train_cameras)
 
-function get_image(dataset::ColmapDataset, kab, idx::Int)
-    adapt(kab, Float32.(dataset.images[:, :, :, idx]) .* (1f0 / 255f0))
+function get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol)
+    image = if set == :train
+        dataset.train_images[:, :, :, idx]
+    else
+        dataset.test_images[:, :, :, idx]
+    end
+    return adapt(kab, Float32.(image) .* (1f0 / 255f0))
 end
