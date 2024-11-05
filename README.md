@@ -9,6 +9,28 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 - Julia 1.10.
 - AMD GPU (ROCm) or Nvidia (CUDA) capable machine.
 
+## Features
+
+||`fused=true`|`fused=false`|
+|-|-|-|
+|RGB|+|+|
+|Depth rendering|+|+|
+|Differentiable depth|-|+|
+|Differentiable camera pose|-|`in-progress`|
+|Antialiasing|-|+|
+
+||Default|Antialiasing|
+|-|-|-|
+|Bicycle 7K steps|![image-7000-default](https://github.com/user-attachments/assets/4f32dec8-5dfd-4ecf-8ee3-f8a956d94355)|![image-7000-antialiasing](https://github.com/user-attachments/assets/10ffa668-2ad9-4637-96b3-0553caf3ec3d)|
+
+## FYI
+
+- Because Julia is JIT-compiled, first iteration will take longer because of kernels compilation.
+  In GUI you may even see that an application is unresponsive, so you should just wait a bit.
+- Julia relies on GC that is not GPU-aware, excessive allocations will impact the performance.
+  To free GPU arrays we have to perform GC-sweep (in contrast to refcounting in Python) which is significantly slower.
+  Because of that, you'll see significantly higher memory usage (compared to Python), but that is because of delayed freeing, not because the algorithm requires more memory.
+
 ## Usage
 
 0. Install GaussianSplatting.jl package:
