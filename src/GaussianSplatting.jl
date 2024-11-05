@@ -1,9 +1,5 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
 module GaussianSplatting
-
-using VideoIO
 
 using Adapt
 using ChainRulesCore
@@ -25,6 +21,7 @@ using ImageCore
 using ImageIO
 using ImageTransformations
 using FileIO
+using VideoIO
 using Zygote
 
 using NeuralGraphicsGL
