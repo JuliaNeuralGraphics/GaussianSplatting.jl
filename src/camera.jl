@@ -1,6 +1,4 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
 mutable struct Camera
     R::SMatrix{3, 3, Float32, 9}
     t::SVector{3, Float32}
