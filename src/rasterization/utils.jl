@@ -72,7 +72,7 @@ tile 1 from `k₁` to `k₂`, etc.
     end
 end
 
-@kernel cpu=false inbounds=true function _permute!(y, @Const(x), @Const(ix))
+@kernel cpu=false inbounds=true function _permute!(y, x, ix)
     i = @index(Global)
     y[i] = x[ix[i]]
 end
@@ -112,4 +112,26 @@ end
         gaussian_values[offset] = i
         offset += 1
     end
+end
+
+@kernel cpu=false inbounds=true function count_tiles_per_gaussian!(
+    # Output.
+    tiles_touched::AbstractVector{Int32},
+    # Input.
+    means_2D::AbstractVector{SVector{2, Float32}},
+    radii::AbstractVector{Int32},
+    tile_grid::SVector{2, Int32},
+    tile_size::SVector{2, Int32},
+)
+    i = @index(Global)
+    radius = radii[i]
+    if !(radius > 0f0)
+        tiles_touched[i] = 0i32
+        return
+    end
+
+    mean_2D = means_2D[i]
+    rect_min, rect_max = get_rect(mean_2D, radius, tile_grid, tile_size)
+    area = prod(rect_max .- rect_min)
+    tiles_touched[i] = area
 end

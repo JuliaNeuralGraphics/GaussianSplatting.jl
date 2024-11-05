@@ -225,7 +225,7 @@ function step!(trainer::Trainer)
                 min_opacity=0.05f0, max_screen_size, params.dense_percent)
         end
 
-        if trainer.step % params.opacity_reset_interval == 0 # TODO or if white background
+        if trainer.step % params.opacity_reset_interval == 0
             reset_opacity!(trainer)
         end
     end
@@ -336,7 +336,7 @@ function densify_split!(gs::GaussianModel, optimizers;
     return
 end
 
-@kernel cpu=false inbounds=true function _add_split_noise!(points, @Const(rots), @Const(stds))
+@kernel cpu=false inbounds=true function _add_split_noise!(points, rots, stds)
     i = @index(Global)
     σ = stds[i]
     ξ = SVector{3, Float32}(

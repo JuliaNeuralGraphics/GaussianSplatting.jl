@@ -2,11 +2,7 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 include("states.jl")
-include("projection.jl")
-include("spherical_harmonics.jl")
 include("utils.jl")
-include("forward.jl")
-include("backward.jl")
 
 mutable struct GaussianRasterizer{
     I <: ImageState,
@@ -62,7 +58,9 @@ end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
 
-include("rules.jl")
+include("projection.jl")
+include("spherical_harmonics.jl")
+include("render.jl")
 
 # OpenGL convertions.
 
@@ -108,7 +106,7 @@ function (rast::GaussianRasterizer)(
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
-        # TODO handle :d modes
+        # TODO handle :d mode
         color_features = if rast.mode == :rgbd
             vcat(colors, reshape(depths, 1, :))
         else

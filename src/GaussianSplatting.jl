@@ -71,7 +71,8 @@ function main(dataset_path::String; scale::Int)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=0.8)
+    dataset = ColmapDataset(kab, dataset_path;
+        scale, train_test_split=0.9, permute=false)
     camera = dataset.test_cameras[1]
 
     opt_params = OptimizationParams()
@@ -84,6 +85,7 @@ function main(dataset_path::String; scale::Int)
     @info "N train images: $(length(dataset.train_cameras))"
     @info "N test images: $(length(dataset.test_cameras))"
 
+    t1 = time()
     for i in 1:7000
         loss = step!(trainer)
         if i == 3000
@@ -122,6 +124,8 @@ function main(dataset_path::String; scale::Int)
             GC.gc(true)
         end
     end
+    t2 = time()
+    println("Time took: $((t2 - t1) / 60) minutes.")
 
     # save_state(trainer, "../state.bson")
     return

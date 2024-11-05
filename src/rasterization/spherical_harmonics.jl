@@ -1,3 +1,62 @@
+function spherical_harmonics(
+    means_3d::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3};
+    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+)
+    kab = get_backend(rast)
+    n = size(means_3d, 2)
+
+    colors = KA.zeros(kab, Float32, (3, n))
+    spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        _as_T(SVector{3, Float32}, colors),
+        rast.gstate.clamped,
+        # Input.
+        rast.gstate.radii,
+        _as_T(SVector{3, Float32}, means_3d),
+        camera.camera_center,
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        Val(sh_degree); ndrange=n)
+    return colors
+end
+
+function ∇spherical_harmonics(
+    vcolors::AbstractMatrix{Float32},
+    means_3d::AbstractMatrix{Float32},
+    shs::AbstractArray{Float32, 3};
+    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+)
+    kab = get_backend(rast)
+    n = size(means_3d, 2)
+
+    vmeans_3d = KA.zeros(kab, Float32, size(means_3d))
+    vshs = KA.zeros(kab, Float32, size(shs))
+    ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+        # Output.
+        reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
+        _as_T(SVector{3, Float32}, vmeans_3d),
+        # Input.
+        _as_T(SVector{3, Float32}, means_3d),
+        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        rast.gstate.clamped,
+        _as_T(SVector{3, Float32}, vcolors),
+        camera.camera_center,
+        Val(sh_degree); ndrange=n)
+    return vmeans_3d, vshs
+end
+
+function ChainRulesCore.rrule(::typeof(spherical_harmonics),
+    means_3d::AbstractMatrix{Float32}, shs::AbstractArray{Float32, 3};
+    rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
+)
+    colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
+    function _spherical_harmonics_pullback(vcolors)
+        ∇ = ∇spherical_harmonics(vcolors, means_3d, shs; rast, camera, sh_degree)
+        return (NoTangent(), ∇...)
+    end
+    return colors, _spherical_harmonics_pullback
+end
+
 @kernel cpu=false inbounds=true function spherical_harmonics!(
     # Output.
     rgbs::AbstractVector{SVector{3, Float32}},

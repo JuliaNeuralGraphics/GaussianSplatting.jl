@@ -23,6 +23,7 @@ end
 
 function ColmapDataset(kab,
     dataset_dir::String; scale::Int = 1, train_test_split::Real = 0.8,
+    permute::Bool = true,
 )
     cameras_file = joinpath(dataset_dir, "sparse/0/cameras.bin")
     images_file = joinpath(dataset_dir, "sparse/0/images.bin")
@@ -30,12 +31,13 @@ function ColmapDataset(kab,
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(kab;
         cameras_file, images_file, points_file,
-        scale, images_dir, train_test_split)
+        scale, images_dir, train_test_split, permute)
 end
 
 function ColmapDataset(kab;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, train_test_split::Real = 0.8,
+    permute::Bool = true,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
 
@@ -93,11 +95,12 @@ function ColmapDataset(kab;
     scales = compute_scales(points.points_3d)
 
     n_cameras = length(cameras)
-    perm = randperm(n_cameras)
-
-    cameras = cameras[perm]
-    images = images[:, :, :, perm]
-    image_filenames = image_filenames[perm]
+    if permute
+        perm = randperm(n_cameras)
+        cameras = cameras[perm]
+        images = images[:, :, :, perm]
+        image_filenames = image_filenames[perm]
+    end
 
     if train_test_split < 1
         n_train = ceil(Int, n_cameras * train_test_split)
