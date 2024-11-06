@@ -215,7 +215,6 @@ end
 
         @synchronize()
         if progress ≤ range[2]
-            # TODO vectorize load with SIMD
             gaussian_id = gaussian_values_sorted[progress]
             collected_id[ridx] = gaussian_id
             collected_xy[ridx] = means_2d[gaussian_id]

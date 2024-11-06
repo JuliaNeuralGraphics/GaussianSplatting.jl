@@ -37,6 +37,7 @@ import ImageFiltering
 import KernelAbstractions as KA
 import NerfUtils as NU
 import NeuralGraphicsGL as NGL
+import SIMD
 import PlyIO
 
 const Maybe{T} = Union{T, Nothing}
@@ -51,6 +52,7 @@ const BLOCK_SIZE::Int32 = 256i32
 
 _as_T(T, x) = reinterpret(T, reshape(x, :))
 
+include("simd.jl")
 include("utils.jl")
 include("metrics.jl")
 include("camera.jl")

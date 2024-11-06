@@ -2,17 +2,19 @@ import GaussianSplatting as GSP
 
 function main(dataset_path::String; scale::Int)
     kab = GSP.gpu_backend()
+    @info "Using `$kab` GPU backend."
 
-    dataset = GSP.ColmapDataset(kab, dataset_path; scale)
+    dataset = GSP.ColmapDataset(kab, dataset_path; scale,
+        train_test_split=0.9, permute=false)
+    camera = dataset.test_cameras[1]
+    @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
+
     opt_params = GSP.OptimizationParams()
     gaussians = GSP.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
-    rasterizer = GSP.GaussianRasterizer(kab, dataset.cameras[1];
-        antialias=false, fused=false, mode=:rgb)
+    rasterizer = GSP.GaussianRasterizer(kab, camera;
+        antialias=false, fused=true, mode=:rgb)
     trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
-
-    camera = dataset.cameras[1]
-    @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
     println("Benchmarking `$dataset_path` dataset at `$scale` scale.")
     warmup_steps = 500

@@ -161,7 +161,8 @@ end
     end
 
     # Project Gaussian onto image plane.
-    Σ = quat_scale_to_cov(cov_rotations[i], cov_scales[i])
+    cov_rotation = vload(pointer(cov_rotations, i)) # SIMD load
+    Σ = quat_scale_to_cov(cov_rotation, cov_scales[i])
     Σ_cam = covar_world_to_cam(R_w2c, Σ)
     Σ_2D, mean_2D = perspective_projection(
         mean_cam, Σ_cam, focal, resolution, principal)
@@ -254,7 +255,8 @@ end
     mean = means[i]
     mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
 
-    cov_rotation, cov_scale = cov_rotations[i], cov_scales[i]
+    cov_rotation = vload(pointer(cov_rotations, i))
+    cov_scale = cov_scales[i]
     Σ = quat_scale_to_cov(cov_rotation, cov_scale)
     Σ_cam = covar_world_to_cam(R_w2c, Σ)
 
@@ -286,7 +288,7 @@ end
 
     vmeans[i] = vmean
     vcov_scales[i] = vscale
-    vcov_rotations[i] = vq
+    vstore!(pointer(vcov_rotations, i), vq) # SIMD store
 
     # TODO write grad for vR & vt (for diff camera pose)
 end
