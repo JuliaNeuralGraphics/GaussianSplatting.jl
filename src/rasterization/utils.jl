@@ -14,10 +14,12 @@ function get_rect(
     pixel::SVector{2, Float32}, max_radius::Int32,
     grid::SVector{2, Int32}, block::SVector{2, Int32},
 )
-    rmin = gpu_floor.(Int32, (pixel .- max_radius) ./ block)
+    rblock = inv.(block)
+
+    rmin = gpu_floor.(Int32, (pixel .- max_radius) .* rblock)
     rmin = clamp.(rmin, 0i32, grid)
 
-    rmax = gpu_ceil.(Int32, (pixel .+ max_radius) ./ block)
+    rmax = gpu_ceil.(Int32, (pixel .+ max_radius) .* rblock)
     rmax = clamp.(rmax, 0i32, grid)
     return rmin, rmax
 end
