@@ -6,6 +6,7 @@ using ChainRulesCore
 using Dates
 using Distributions
 using GPUArraysCore: @allowscalar
+using GPUCompiler: @device_code
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using KernelAbstractions.Extras: @unroll

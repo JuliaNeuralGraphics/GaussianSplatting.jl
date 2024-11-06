@@ -97,7 +97,7 @@ end
 end
 
 # Convert spherical harmonics coefficients of each Gaussian to a RGB color.
-@inbounds @inline function compute_colors_from_sh(
+Base.@propagate_inbounds function compute_colors_from_sh(
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
     shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
 ) where degree
@@ -132,7 +132,7 @@ end
     return max.(0f0, res), (res .< 0f0)
 end
 
-@inbounds function ∇color_from_sh!(
+Base.@propagate_inbounds function ∇color_from_sh!(
     # Outputs.
     ∂L∂shs::AbstractVector{SVector{3, Float32}},
     # Inputs.
@@ -223,18 +223,18 @@ end
     # The view direction is an input to the computation.
     # View direction is influenced by the Gaussian's mean,
     # so SHs gradients must propagate back into 3D position.
-    ∂L∂dir = SVector{3, Float32}(
+    vdir = SVector{3, Float32}(
         ∂color∂x ⋅ ∂L∂color, ∂color∂y ⋅ ∂L∂color, ∂color∂z ⋅ ∂L∂color)
 
     # Account for normalization.
-    return ∇normalize(dir_orig, ∂L∂dir)
+    return ∇normalize(dir_orig, vdir)
 end
 
-@inbounds function ∇normalize(dir::SVector{3, Float32}, ∂L∂dir::SVector{3, Float32})
+Base.@propagate_inbounds function ∇normalize(dir::SVector{3, Float32}, vdir::SVector{3, Float32})
     s² = sum(abs2, dir)
     inv_s = 1f0 / √(s²^3)
-    SVector{3, Float32}(
-        ((s² - dir[1]^2) * ∂L∂dir[1] - dir[2] * dir[1] * ∂L∂dir[2] - dir[3] * dir[1] * ∂L∂dir[3]) * inv_s,
-        (-dir[1] * dir[2] * ∂L∂dir[1] + (s² - dir[2]^2) * ∂L∂dir[2] - dir[3] * dir[2] * ∂L∂dir[3]) * inv_s,
-        (-dir[1] * dir[3] * ∂L∂dir[1] - dir[2] * dir[3] * ∂L∂dir[2] + (s² - dir[3]^2) * ∂L∂dir[3]) * inv_s)
+    @inbounds SVector{3, Float32}(
+        ((s² - dir[1]^2) * vdir[1] - dir[2] * dir[1] * vdir[2] - dir[3] * dir[1] * vdir[3]) * inv_s,
+        (-dir[1] * dir[2] * vdir[1] + (s² - dir[2]^2) * vdir[2] - dir[3] * dir[2] * vdir[3]) * inv_s,
+        (-dir[1] * dir[3] * vdir[1] - dir[2] * dir[3] * vdir[2] + (s² - dir[3]^2) * vdir[3]) * inv_s)
 end

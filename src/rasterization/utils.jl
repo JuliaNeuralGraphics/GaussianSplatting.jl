@@ -6,18 +6,19 @@ sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
 
 gpu_floor(T, x) = unsafe_trunc(T, floor(x))
 gpu_ceil(T, x) = unsafe_trunc(T, ceil(x))
-gpu_cld(x, y::T) where T = (x + y - one(T)) ÷ y
+
+# NOTE: ÷ uses Base.checked_sdiv_int(x, y)::Int64 which throws exception.
+# gpu_cld(x, y::T) where T = (x + y - one(T)) ÷ y
 
 function get_rect(
     pixel::SVector{2, Float32}, max_radius::Int32,
     grid::SVector{2, Int32}, block::SVector{2, Int32},
 )
-    rmin = SVector{2, Int32}(
-        clamp(gpu_floor(Int32, (pixel[1] - max_radius) / block[1]), 0i32, grid[1]),
-        clamp(gpu_floor(Int32, (pixel[2] - max_radius) / block[2]), 0i32, grid[2]))
-    rmax = SVector{2, Int32}(
-        clamp(gpu_floor(Int32, gpu_cld(pixel[1] + max_radius, block[1])), 0i32, grid[1]),
-        clamp(gpu_floor(Int32, gpu_cld(pixel[2] + max_radius, block[2])), 0i32, grid[2]))
+    rmin = gpu_floor.(Int32, (pixel .- max_radius) ./ block)
+    rmin = clamp.(rmin, 0i32, grid)
+
+    rmax = gpu_ceil.(Int32, (pixel .+ max_radius) ./ block)
+    rmax = clamp.(rmax, 0i32, grid)
     return rmin, rmax
 end
 
@@ -50,7 +51,7 @@ tile 1 from `k₁` to `k₂`, etc.
     ranges::AbstractMatrix{UInt32},
     gaussian_keys::AbstractVector{UInt64},
 )
-    @uniform n = @ndrange()[1]
+    n = @ndrange()[1]
     i = @index(Global)
 
     tile = (gaussian_keys[i] >> 32) + 1u32
@@ -99,15 +100,15 @@ end
     # Key: [tile_id | depth], value: id of the Gaussian.
     # Sorting the values with this key yields Gaussian ids in a list,
     # such that they are first sorted by the tile and then depth.
-    depth::UInt64 = reinterpret(UInt32, depths[i])
+    depth = unsafe_trunc(UInt64, reinterpret(UInt32, depths[i]))
 
     offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
     for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
-        key::UInt64 = UInt64(y) * grid[1] + x
+        key = unsafe_trunc(UInt64, y * grid[1] + x)
         key <<= 32
         key |= depth
         gaussian_keys[offset] = key
-        gaussian_values[offset] = i
+        gaussian_values[offset] = unsafe_trunc(UInt32, i)
         offset += 1
     end
 end
