@@ -173,16 +173,9 @@ end
     lidx = @index(Local, NTuple) # ≡ thread_index
     ridx = @index(Local)         # ≡ thread_rank
 
-    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
-
     # Get current tile and starting pixel range (0-based indices).
-    pix_min = SVector{2, Int32}(
-        (unsafe_trunc(Int32, gidx[1]) - 1i32) * unsafe_trunc(Int32, block[1]),
-        (unsafe_trunc(Int32, gidx[2]) - 1i32) * unsafe_trunc(Int32, block[2]))
-    # 0-based indices.
-    pix = SVector{2, Int32}(
-        pix_min[1] + unsafe_trunc(Int32, lidx[1]) - 1i32,
-        pix_min[2] + unsafe_trunc(Int32, lidx[2]) - 1i32)
+    pix_min = (unsafe_trunc.(Int32, gidx) .- 1i32) .* block
+    pix = pix_min .+ unsafe_trunc.(Int32, lidx) .- 1i32
 
     # Check if this thread corresponds to a valid pixel or is outside.
     # If not inside, this thread will help with data fetching,
@@ -191,6 +184,7 @@ end
     done::Bool = ifelse(inside, false, true)
 
     # Load start/end range of IDs to process.
+    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
     range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
     range = (
         unsafe_trunc(Int32, ranges[1, range_idx]),
@@ -254,9 +248,8 @@ end
                 color[c] += feature[c] * α * T
             end
 
-            T = T_tmp
-
             # Keep track of last range entry to update this pixel.
+            T = T_tmp
             last_contributor = contributor
         end
         to_do -= block_size
@@ -294,20 +287,13 @@ end
     bg_color::SVector{channels, Float32},
     grid::SVector{2, Int32}, block::SVector{2, Int32}, ::Val{block_size},
 ) where {block_size, channels}
-    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
-
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
     ridx = @index(Local)         # ≡ thread_rank
 
     # Get current tile and starting pixel range (0-based indices).
-    pix_min = SVector{2, Int32}(
-        (unsafe_trunc(Int32, gidx[1]) - 1i32) * unsafe_trunc(Int32, block[1]),
-        (unsafe_trunc(Int32, gidx[2]) - 1i32) * unsafe_trunc(Int32, block[2]))
-    # 0-based indices.
-    pix = SVector{2, Int32}(
-        pix_min[1] + unsafe_trunc(Int32, lidx[1]) - 1i32,
-        pix_min[2] + unsafe_trunc(Int32, lidx[2]) - 1i32)
+    pix_min = (unsafe_trunc.(Int32, gidx) .- 1i32) .* block
+    pix = pix_min .+ unsafe_trunc.(Int32, lidx) .- 1i32
     px, py = pix .+ 1i32 # 1-based indices.
 
     # Check if this thread corresponds to a valid pixel or is outside.
@@ -317,6 +303,7 @@ end
     done::Bool = ifelse(inside, false, true)
 
     # Load start/end range of IDs to process.
+    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
     range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
     range = (
         unsafe_trunc(Int32, ranges[1, range_idx]),
