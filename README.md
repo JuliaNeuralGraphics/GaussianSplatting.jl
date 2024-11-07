@@ -19,10 +19,6 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 |Differentiable camera pose|`in-progress`|`in-progress`|
 |Antialiasing|-|+|
 
-||Default|Antialiasing|
-|-|-|-|
-|Bicycle 7K steps|![image-7000-default](https://github.com/user-attachments/assets/4f32dec8-5dfd-4ecf-8ee3-f8a956d94355)|![image-7000-antialiasing](https://github.com/user-attachments/assets/10ffa668-2ad9-4637-96b3-0553caf3ec3d)|
-
 ## FYI
 
 - Because Julia is JIT-compiled, first iteration will take longer because of kernels compilation.
