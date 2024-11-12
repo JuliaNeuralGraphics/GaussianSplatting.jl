@@ -174,8 +174,13 @@ end
     ridx = @index(Local)         # ≡ thread_rank
 
     # Get current tile and starting pixel range (0-based indices).
-    pix_min = (unsafe_trunc.(Int32, gidx) .- 1i32) .* block
-    pix = pix_min .+ unsafe_trunc.(Int32, lidx) .- 1i32
+    # 0-based indices.
+    pix_min = SVector{2, Int32}(
+        (gidx[1] - 1i32) * block[1],
+        (gidx[2] - 1i32) * block[2])
+    pix = SVector{2, Int32}(
+        pix_min[1] + lidx[1] - 1i32,
+        pix_min[2] + lidx[2] - 1i32)
 
     # Check if this thread corresponds to a valid pixel or is outside.
     # If not inside, this thread will help with data fetching,
@@ -184,15 +189,13 @@ end
     done::Bool = ifelse(inside, false, true)
 
     # Load start/end range of IDs to process.
-    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
+    horizontal_blocks = gpu_cld(resolution[1], block[1])
     range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
-    range = (
-        unsafe_trunc(Int32, ranges[1, range_idx]),
-        unsafe_trunc(Int32, ranges[2, range_idx]))
+    range = (Int32(ranges[1, range_idx]), Int32(ranges[2, range_idx]))
     to_do::Int32 = range[2] - range[1]
     # If `to_do` > `block_size`, repeat rasterization several times
     # with workitems in the workgroup.
-    rounds::Int32 = unsafe_trunc(Int32, ceil(to_do / block_size))
+    rounds::Int32 = gpu_cld(to_do, block_size)
 
     # Allocate storage for batches of collectively fetched data.
     collected_conics = @localmem SVector{3, Float32} block_size
@@ -292,8 +295,13 @@ end
     ridx = @index(Local)         # ≡ thread_rank
 
     # Get current tile and starting pixel range (0-based indices).
-    pix_min = (unsafe_trunc.(Int32, gidx) .- 1i32) .* block
-    pix = pix_min .+ unsafe_trunc.(Int32, lidx) .- 1i32
+    # 0-based indices.
+    pix_min = SVector{2, Int32}(
+        (gidx[1] - 1i32) * block[1],
+        (gidx[2] - 1i32) * block[2])
+    pix = SVector{2, Int32}(
+        pix_min[1] + lidx[1] - 1i32,
+        pix_min[2] + lidx[2] - 1i32)
     px, py = pix .+ 1i32 # 1-based indices.
 
     # Check if this thread corresponds to a valid pixel or is outside.
@@ -303,15 +311,13 @@ end
     done::Bool = ifelse(inside, false, true)
 
     # Load start/end range of IDs to process.
-    horizontal_blocks = unsafe_trunc(Int32, ceil(resolution[1] / block[1]))
+    horizontal_blocks = gpu_cld(resolution[1], block[1])
     range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
-    range = (
-        unsafe_trunc(Int32, ranges[1, range_idx]),
-        unsafe_trunc(Int32, ranges[2, range_idx]))
+    range = (Int32(ranges[1, range_idx]), Int32(ranges[2, range_idx]))
     to_do::Int32 = range[2] - range[1]
     # If `to_do` > `block_size`, repeat rasterization several times
     # with workitems in the workgroup.
-    rounds::Int32 = unsafe_trunc(Int32, ceil(to_do / block_size))
+    rounds::Int32 = gpu_cld(to_do, block_size)
 
     # Allocate storage for batches of collectively fetched data.
     collected_conics = @localmem SVector{3, Float32} block_size

@@ -7,20 +7,27 @@ sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
 gpu_floor(T, x) = unsafe_trunc(T, floor(x))
 gpu_ceil(T, x) = unsafe_trunc(T, ceil(x))
 
-# NOTE: ÷ uses Base.checked_sdiv_int(x, y)::Int64 which throws exception.
-# gpu_cld(x, y::T) where T = (x + y - one(T)) ÷ y
+gpu_cld(x, y::T) where T = (x + y - one(T)) ÷ y
 
-function get_rect(
+Base.@propagate_inbounds function get_rect(
     pixel::SVector{2, Float32}, max_radius::Int32,
     grid::SVector{2, Int32}, block::SVector{2, Int32},
 )
-    rblock = inv.(block)
+    rmin = SVector{2, Int32}(
+        clamp(gpu_floor(Int32, (pixel[1] - max_radius) / block[1]), 0i32, grid[1]),
+        clamp(gpu_floor(Int32, (pixel[2] - max_radius) / block[2]), 0i32, grid[2]))
+    rmax = SVector{2, Int32}(
+        clamp(gpu_floor(Int32, gpu_cld(pixel[1] + max_radius, block[1])), 0i32, grid[1]),
+        clamp(gpu_floor(Int32, gpu_cld(pixel[2] + max_radius, block[2])), 0i32, grid[2]))
 
-    rmin = gpu_floor.(Int32, (pixel .- max_radius) .* rblock)
-    rmin = clamp.(rmin, 0i32, grid)
+    # rblock = inv.(block)
 
-    rmax = gpu_ceil.(Int32, (pixel .+ max_radius) .* rblock)
-    rmax = clamp.(rmax, 0i32, grid)
+    # rmin = gpu_floor.(Int32, (pixel .- max_radius) .* rblock)
+    # rmin = clamp.(rmin, 0i32, grid)
+
+    # rmax = gpu_ceil.(Int32, (pixel .+ max_radius) .* rblock)
+    # # rmax = gpu_cld.(pixel .+ max_radius, block)
+    # rmax = clamp.(rmax, 0i32, grid)
     return rmin, rmax
 end
 
@@ -102,15 +109,15 @@ end
     # Key: [tile_id | depth], value: id of the Gaussian.
     # Sorting the values with this key yields Gaussian ids in a list,
     # such that they are first sorted by the tile and then depth.
-    depth = unsafe_trunc(UInt64, reinterpret(UInt32, depths[i]))
+    depth::UInt64 = reinterpret(UInt32, depths[i])
 
     offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
     for y in rmin[2]:(rmax[2] - 1i32), x in rmin[1]:(rmax[1] - 1i32)
-        key = unsafe_trunc(UInt64, y * grid[1] + x)
+        key::UInt64 = UInt64(y) * grid[1] + x
         key <<= 32
         key |= depth
         gaussian_keys[offset] = key
-        gaussian_values[offset] = unsafe_trunc(UInt32, i)
+        gaussian_values[offset] = i
         offset += 1
     end
 end
@@ -133,6 +140,6 @@ end
 
     mean_2D = means_2D[i]
     rect_min, rect_max = get_rect(mean_2D, radius, tile_grid, tile_size)
-    area = prod(rect_max .- rect_min)
+    area = (rect_max[1] - rect_min[1]) * (rect_max[2] - rect_min[2])
     tiles_touched[i] = area
 end
