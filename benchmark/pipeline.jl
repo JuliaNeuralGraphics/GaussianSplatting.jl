@@ -5,8 +5,8 @@ function main(dataset_path::String; scale::Int)
     @info "Using `$kab` GPU backend."
 
     dataset = GSP.ColmapDataset(kab, dataset_path; scale,
-        train_test_split=0.9, permute=false)
-    camera = dataset.test_cameras[1]
+        train_test_split=1, permute=false)
+    camera = dataset.train_cameras[1]
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
     opt_params = GSP.OptimizationParams()

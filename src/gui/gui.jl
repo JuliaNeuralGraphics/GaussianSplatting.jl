@@ -421,13 +421,10 @@ function render!(gui::GSGUI)
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]
     sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree
-
-    shs = isempty(gs.features_rest) ?
-        gs.features_dc :
-        hcat(gs.features_dc, gs.features_rest)
     rast(
         gs.points, gs.opacities, gs.scales,
-        gs.rotations, shs; camera=gui.camera, sh_degree)
+        gs.rotations, gs.features_dc, gs.features_rest;
+        camera=gui.camera, sh_degree)
 
     mode = gui.ui_state.selected_mode[]
     tex = if mode == 0 # Render color.

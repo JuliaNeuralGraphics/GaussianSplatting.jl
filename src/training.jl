@@ -118,10 +118,6 @@ function validate(trainer::Trainer)
     ssim = trainer.ssim
     dataset = trainer.dataset
 
-    shs = isempty(gs.features_rest) ?
-        gs.features_dc :
-        hcat(gs.features_dc, gs.features_rest)
-
     eval_ssim = 0f0
     eval_mse = 0f0
     eval_psnr = 0f0
@@ -130,7 +126,8 @@ function validate(trainer::Trainer)
 
         image_features = rast(
             gs.points, gs.opacities, gs.scales,
-            gs.rotations, shs; camera, sh_degree=gs.sh_degree)
+            gs.rotations, gs.features_dc, gs.features_rest;
+            camera, sh_degree=gs.sh_degree)
 
         image = if rast.mode == :rgbd
             image_features[1:3, :, :]
@@ -180,10 +177,8 @@ function step!(trainer::Trainer)
     loss, ∇ = Zygote.withgradient(
         θ...,
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
-        shs = isempty(features_rest) ?
-            features_dc : hcat(features_dc, features_rest)
         image_features = rast(
-            means_3d, opacities, scales, rotations, shs;
+            means_3d, opacities, scales, rotations, features_dc, features_rest;
             camera, sh_degree=gs.sh_degree, background)
 
         image = if rast.mode == :rgbd

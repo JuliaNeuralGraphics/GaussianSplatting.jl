@@ -51,6 +51,7 @@ struct BinningState{
     V <: AbstractVector{UInt32},
 }
     permutation::P
+    permutation_tmp::P
     gaussian_keys_unsorted::K
     gaussian_values_unsorted::V
     gaussian_keys_sorted::K
@@ -58,6 +59,7 @@ struct BinningState{
 end
 
 BinningState(kab, n::Int) = BinningState(
+    KA.zeros(kab, UInt32, n),
     KA.zeros(kab, UInt32, n),
     KA.zeros(kab, UInt64, n),
     KA.zeros(kab, UInt32, n),
@@ -68,6 +70,7 @@ Base.length(gstate::BinningState) = length(gstate.permutation)
 
 function KA.unsafe_free!(bstate::BinningState)
     KA.unsafe_free!(bstate.permutation)
+    KA.unsafe_free!(bstate.permutation_tmp)
     KA.unsafe_free!(bstate.gaussian_keys_unsorted)
     KA.unsafe_free!(bstate.gaussian_values_unsorted)
     KA.unsafe_free!(bstate.gaussian_keys_sorted)

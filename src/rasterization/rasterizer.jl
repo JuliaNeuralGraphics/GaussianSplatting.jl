@@ -12,6 +12,7 @@ mutable struct GaussianRasterizer{
     gstate::G
     bstate::B
 
+    shs::K # Temporary SH storage to avoid allocating during rendering outside of AD.
     image::K
     host_image::Array{Float32, 3}
 
@@ -48,10 +49,12 @@ function GaussianRasterizer(kab;
     gstate = GeometryState(kab, 0)
     bstate = BinningState(kab, 0)
 
+    shs = KA.allocate(kab, Float32, (3, 0, 0))
     image = KA.allocate(kab, Float32, (3, width, height))
     host_image = Array{Float32, 3}(undef, (3, width, height))
     GaussianRasterizer(
-        istate, gstate, bstate, image, host_image, grid, antialias, fused, mode)
+        istate, gstate, bstate, shs,
+        image, host_image, grid, antialias, fused, mode)
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -63,8 +66,9 @@ include("render.jl")
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
-    copyto!(r.host_image, @view(r.image[:, :, end:-1:1]))
+    copyto!(r.host_image, r.image)
     clamp01!(r.host_image)
+    reverse!(r.host_image; dims=3)
     return r.host_image
 end
 
@@ -85,10 +89,26 @@ function (rast::GaussianRasterizer)(
     opacities::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
-    shs::AbstractArray{Float32, 3};
+    sh_color::AbstractArray{Float32, 3},
+    sh_remainder::AbstractArray{Float32, 3};
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
 )
+    # If rendering outside AD, use non-allocating path.
+    shs = if NNlib.within_gradient(means_3d)
+        isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
+    else
+        if length(rast.shs) != length(sh_color) + length(sh_remainder)
+            KA.unsafe_free!(rast.shs)
+            n_features = size(sh_color, 2) + size(sh_remainder, 2)
+            sz = (3, n_features, size(sh_color, 3))
+            rast.shs = KA.allocate(get_backend(rast), Float32, sz)
+        end
+        rast.shs[:, 1:1, :] .= sh_color
+        isempty(sh_remainder) || (rast.shs[:, 2:end, :] .= sh_remainder)
+        rast.shs
+    end
+
     if rast.fused
         return rasterize(
             means_3d, shs,
@@ -136,6 +156,7 @@ function rasterize(
     kab = get_backend(rast)
     n = size(means_3d, 2)
     if length(rast.gstate) < n
+        # @info "[rast.gstate] resize: $(length(rast.gstate)) -> $n"
         KA.unsafe_free!(rast.gstate)
         rast.gstate = GeometryState(kab, n)
     end
@@ -197,6 +218,7 @@ function rasterize(
     n_rendered == 0 && return rast.image
 
     if length(rast.bstate) < n_rendered
+        # @info "[rast.bstate] resize: $(length(rast.bstate)) -> $n_rendered"
         KA.unsafe_free!(rast.bstate)
         rast.bstate = BinningState(kab, n_rendered)
     end
@@ -215,7 +237,8 @@ function rasterize(
 
     sortperm!(
         @view(rast.bstate.permutation[1:n_rendered]),
-        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
+        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
+        temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)

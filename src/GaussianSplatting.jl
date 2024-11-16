@@ -33,6 +33,7 @@ using GLFW
 import CImGui.lib as iglib
 
 import BSON
+import NNlib
 import Flux
 import ImageFiltering
 import KernelAbstractions as KA
@@ -93,12 +94,10 @@ function main(dataset_path::String; scale::Int)
         end
 
         if trainer.step % 100 == 0 || trainer.step == 1
-            shs = isempty(gaussians.features_rest) ?
-                gaussians.features_dc :
-                hcat(gaussians.features_dc, gaussians.features_rest)
             image_features = rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
-                gaussians.rotations, shs; camera, sh_degree=gaussians.sh_degree)
+                gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+                camera, sh_degree=gaussians.sh_degree)
 
             image = if rasterizer.mode == :rgbd
                 image_features[1:3, :, :]
@@ -118,7 +117,9 @@ function main(dataset_path::String; scale::Int)
             GC.gc(true)
 
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
-            @show i, loss, eval_ssim, eval_mse, eval_psnr
+            loss, eval_ssim, eval_mse, eval_psnr = round.(
+                (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
+            println("i=$i | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
 
             GC.gc(false)
             GC.gc(true)
