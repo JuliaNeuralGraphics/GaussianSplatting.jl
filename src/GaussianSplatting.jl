@@ -68,6 +68,12 @@ include("gui/gui.jl")
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
 
+record_memory(kab) = return false
+
+record_memory!(kab, v::Bool; kwargs...) = return
+
+remove_record!(kab, x) = return
+
 function main(dataset_path::String; scale::Int)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."

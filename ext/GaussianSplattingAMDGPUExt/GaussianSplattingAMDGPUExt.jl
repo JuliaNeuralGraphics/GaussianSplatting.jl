@@ -1,12 +1,20 @@
 module GaussianSplattingAMDGPUExt
 
 # using Adapt
-# using AMDGPU
+using AMDGPU
 # using KernelAbstractions
-# using GaussianSplatting
+using GaussianSplatting
 # using PrecompileTools
 # using Statistics
 # using Zygote
+
+GaussianSplatting.record_memory(::ROCBackend) = AMDGPU.record_memory()
+
+GaussianSplatting.record_memory!(::ROCBackend, v::Bool; kwargs...) =
+    AMDGPU.record_memory!(v; kwargs...)
+
+GaussianSplatting.remove_record!(::ROCBackend, x) =
+    AMDGPU.remove_record!(x)
 
 # @setup_workload let
 #     kab = GaussianSplatting.gpu_backend()

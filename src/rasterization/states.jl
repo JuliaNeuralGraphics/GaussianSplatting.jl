@@ -45,6 +45,21 @@ function KA.unsafe_free!(gstate::GeometryState)
     return
 end
 
+# function remove_record!(gstate::GeometryState)
+#     record_memory() || return
+
+#     remove_record!(gstate.depths)
+#     remove_record!(gstate.means_2d)
+#     remove_record!(gstate.∇means_2d)
+#     remove_record!(gstate.rgbs)
+#     remove_record!(gstate.clamped)
+#     remove_record!(gstate.tiles_touched)
+#     remove_record!(gstate.points_offset)
+#     remove_record!(gstate.conic_opacities)
+#     remove_record!(gstate.radii)
+#     return
+# end
+
 struct BinningState{
     P <: AbstractVector{UInt32},
     K <: AbstractVector{UInt64},
@@ -77,6 +92,18 @@ function KA.unsafe_free!(bstate::BinningState)
     KA.unsafe_free!(bstate.gaussian_values_sorted)
     return
 end
+
+# function remove_record!(bstate::BinningState)
+#     record_memory() || return
+
+#     remove_record!(bstate.permutation)
+#     remove_record!(bstate.permutation_tmp)
+#     remove_record!(bstate.gaussian_keys_unsorted)
+#     remove_record!(bstate.gaussian_values_unsorted)
+#     remove_record!(bstate.gaussian_keys_sorted)
+#     remove_record!(bstate.gaussian_values_sorted)
+#     return
+# end
 
 struct ImageState{
     R <: AbstractMatrix{UInt32},

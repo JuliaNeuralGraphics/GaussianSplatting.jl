@@ -174,6 +174,9 @@ function step!(trainer::Trainer)
         gs.points, gs.features_dc, gs.features_rest,
         gs.opacities, gs.scales, gs.rotations)
 
+    kab = get_backend(rast)
+    record_memory!(kab, true)
+
     loss, ∇ = Zygote.withgradient(
         θ...,
     ) do means_3d, features_dc, features_rest, opacities, scales, rotations
@@ -200,8 +203,9 @@ function step!(trainer::Trainer)
     for i in 1:length(θ)
         θᵢ = θ[i]
         isempty(θᵢ) && continue
-        NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=true)
+        NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=false)
     end
+    record_memory!(kab, false; sync=false)
 
     if trainer.densify && trainer.step ≤ params.densify_until_iter
         update_stats!(gs, rast.gstate.radii,
