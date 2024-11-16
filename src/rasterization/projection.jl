@@ -273,16 +273,8 @@ end
             vmean_cam[1], vmean_cam[2], vmean_cam[3] + vdepth)
     end
 
-    vR = zeros(SMatrix{3, 3, Float32, 9})
-    vt = zeros(SVector{3, Float32})
-    vmean = zeros(SVector{3, Float32})
-    vR, vt, vmean = ∇pos_world_to_cam(
-        R_w2c, t_w2c, mean,
-        vmean_cam, vR, vt, vmean)
-
-    vΣ = zeros(SMatrix{3, 3, Float32, 9})
-    vR, vΣ = ∇covar_world_to_cam(R_w2c, Σ, vΣ_cam, vR, vΣ)
-
+    vR, vt, vmean = ∇pos_world_to_cam(R_w2c, t_w2c, mean, vmean_cam)
+    vR, vΣ = ∇covar_world_to_cam(R_w2c, Σ, vΣ_cam, vR)
     vq, vscale = ∇quat_scale_to_cov(
         cov_rotation, cov_scale, unnorm_quat2rot(cov_rotation), vΣ)
 
@@ -392,16 +384,11 @@ function ∇pos_world_to_cam(
     R::SMatrix{3, 3, Float32, 9},
     t::SVector{3, Float32},
     point::SVector{3, Float32},
-    # grad out
     vpoint_cam::SVector{3, Float32},
-    # grad in
-    vR::SMatrix{3, 3, Float32, 9},
-    vt::SVector{3, Float32},
-    vpoint::SVector{3, Float32},
 )
-    vR = vR + vpoint_cam * point'
-    vt = vt + vpoint_cam
-    vpoint = vpoint + R' * vpoint_cam
+    vR = vpoint_cam * point'
+    vt = vpoint_cam
+    vpoint = R' * vpoint_cam
     return vR, vt, vpoint
 end
 
@@ -415,15 +402,12 @@ end
 function ∇covar_world_to_cam(
     R::SMatrix{3, 3, Float32, 9},
     Σ::SMatrix{3, 3, Float32, 9},
-    # grad out
-    vΣ_cam::SMatrix{3, 3, Float32, 9},
-    # grad in
-    vR::SMatrix{3, 3, Float32, 9},
-    vΣ::SMatrix{3, 3, Float32, 9},
+    vΣ_cam::SMatrix{3, 3, Float32, 9}, # grad out
+    vR::SMatrix{3, 3, Float32, 9}, # grad in
 )
     vR = vR +
         vΣ_cam  * R * Σ' +
         vΣ_cam' * R * Σ
-    vΣ = vΣ + R' * vΣ_cam * R
+    vΣ = R' * vΣ_cam * R
     return vR, vΣ
 end
