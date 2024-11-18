@@ -7,7 +7,7 @@ function spherical_harmonics(
     n = size(means_3d, 2)
 
     colors = KA.zeros(kab, Float32, (3, n))
-    spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+    spherical_harmonics!(kab)(
         # Output.
         _as_T(SVector{3, Float32}, colors),
         rast.gstate.clamped,
@@ -31,7 +31,7 @@ function ∇spherical_harmonics(
 
     vmeans_3d = KA.zeros(kab, Float32, size(means_3d))
     vshs = KA.zeros(kab, Float32, size(shs))
-    ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+    ∇spherical_harmonics!(kab)(
         # Output.
         reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
         _as_T(SVector{3, Float32}, vmeans_3d),

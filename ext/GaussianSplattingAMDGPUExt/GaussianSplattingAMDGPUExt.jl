@@ -16,6 +16,8 @@ GaussianSplatting.record_memory!(::ROCBackend, v::Bool; kwargs...) =
 GaussianSplatting.remove_record!(::ROCBackend, x) =
     AMDGPU.remove_record!(x)
 
+GaussianSplatting.use_ak(::ROCBackend) = true
+
 # @setup_workload let
 #     kab = GaussianSplatting.gpu_backend()
 

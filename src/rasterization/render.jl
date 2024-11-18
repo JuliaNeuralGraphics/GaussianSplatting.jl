@@ -16,7 +16,7 @@ function render(
     channels = size(colors, 1)
     image = KA.zeros(kab, Float32, (channels, width, height))
 
-    count_tiles_per_gaussian!(kab, Int(BLOCK_SIZE))(
+    count_tiles_per_gaussian!(kab)(
         # Output.
         rast.gstate.tiles_touched,
         # Input.
@@ -37,7 +37,7 @@ function render(
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
-    duplicate_with_keys!(kab, Int(BLOCK_SIZE))(
+    duplicate_with_keys!(kab)(
         # Output.
         rast.bstate.gaussian_keys_unsorted,
         rast.bstate.gaussian_values_unsorted,
@@ -59,7 +59,7 @@ function render(
 
     # Identify start-end of per-tile workloads in sorted keys.
     fill!(rast.istate.ranges, 0u32)
-    identify_tile_range!(kab, Int(BLOCK_SIZE))(
+    identify_tile_range!(kab)(
         rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
         ndrange=n_rendered)
 

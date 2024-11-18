@@ -74,6 +74,8 @@ record_memory!(kab, v::Bool; kwargs...) = return
 
 remove_record!(kab, x) = return
 
+use_ak(kab) = false
+
 function main(dataset_path::String; scale::Int)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."
