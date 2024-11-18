@@ -26,7 +26,7 @@ function project(
         rast.gstate = GeometryState(kab, n)
     end
 
-    project!(kab, Int(BLOCK_SIZE))(
+    project!(kab)(
         # Output.
         depths,
         rast.gstate.radii,
@@ -71,7 +71,7 @@ function ∇project(
     vrot = KA.zeros(kab, Float32, (4, n))
 
     # TODO check that vcompensations is not ZeroTangent if antialias
-    ∇project!(kab, Int(BLOCK_SIZE))(
+    ∇project!(kab)(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
         _as_T(SVector{3, Float32}, vscales),

@@ -158,7 +158,11 @@ function rasterize(
     if length(rast.gstate) < n
         # @info "[rast.gstate] resize: $(length(rast.gstate)) -> $n"
         KA.unsafe_free!(rast.gstate)
+
+        do_record = record_memory(kab)
+        do_record && record_memory!(kab, false; free=false)
         rast.gstate = GeometryState(kab, n)
+        do_record && record_memory!(kab, true)
     end
 
     (; width, height) = resolution(camera)
@@ -175,7 +179,7 @@ function rasterize(
     radius_clip = 3f0 # In pixels.
     blur_ϵ = 0.3f0
 
-    project!(kab, Int(BLOCK_SIZE))(
+    project!(kab)(
         # Output.
         rast.gstate.depths,
         rast.gstate.radii,
@@ -191,7 +195,7 @@ function rasterize(
         # Config.
         near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
 
-    spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+    spherical_harmonics!(kab)(
         # Output.
         rast.gstate.rgbs,
         rast.gstate.clamped,
@@ -202,7 +206,7 @@ function rasterize(
         reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
         Val(sh_degree); ndrange=n)
 
-    count_tiles_per_gaussian!(kab, Int(BLOCK_SIZE))(
+    count_tiles_per_gaussian!(kab)(
         # Output.
         rast.gstate.tiles_touched,
         # Input.
@@ -220,12 +224,16 @@ function rasterize(
     if length(rast.bstate) < n_rendered
         # @info "[rast.bstate] resize: $(length(rast.bstate)) -> $n_rendered"
         KA.unsafe_free!(rast.bstate)
+
+        do_record = record_memory(kab)
+        do_record && record_memory!(kab, false; free=false)
         rast.bstate = BinningState(kab, n_rendered)
+        do_record && record_memory!(kab, true)
     end
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
-    duplicate_with_keys!(kab, Int(BLOCK_SIZE))(
+    duplicate_with_keys!(kab)(
         # Output.
         rast.bstate.gaussian_keys_unsorted,
         rast.bstate.gaussian_values_unsorted,
@@ -235,16 +243,16 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    # if use_ak(kab)
-    #     sortperm!(
-    #         @view(rast.bstate.permutation[1:n_rendered]),
-    #         @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
-    #         temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
-    # else
+    if use_ak(kab)
+        sortperm!(
+            @view(rast.bstate.permutation[1:n_rendered]),
+            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
+            temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
+    else
         sortperm!(
             @view(rast.bstate.permutation[1:n_rendered]),
             @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
-    # end
+    end
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)
@@ -254,7 +262,7 @@ function rasterize(
 
     # Identify start-end of per-tile workloads in sorted keys.
     fill!(rast.istate.ranges, 0u32)
-    identify_tile_range!(kab, Int(BLOCK_SIZE))(
+    identify_tile_range!(kab)(
         rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
         ndrange=n_rendered)
 
@@ -328,7 +336,7 @@ function ∇rasterize(
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
     t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
     blur_ϵ = 0.3f0
-    ∇project!(kab, Int(BLOCK_SIZE))(
+    ∇project!(kab)(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
         _as_T(SVector{3, Float32}, vscales),
@@ -350,7 +358,7 @@ function ∇rasterize(
         # Input camera properties.
         R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal, blur_ϵ; ndrange=n)
 
-    ∇spherical_harmonics!(kab, Int(BLOCK_SIZE))(
+    ∇spherical_harmonics!(kab)(
         # Output.
         reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
         _as_T(SVector{3, Float32}, vmeans),
