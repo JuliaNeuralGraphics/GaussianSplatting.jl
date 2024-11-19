@@ -32,7 +32,11 @@ function render(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
+
+        do_record = record_memory(kab)
+        do_record && record_memory!(kab, false; free=false)
         rast.bstate = BinningState(kab, n_rendered)
+        do_record && record_memory!(kab, true)
     end
 
     # For each instance to be rendered, produce [tile | depth] key
@@ -47,9 +51,16 @@ function render(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    sortperm!(
-        @view(rast.bstate.permutation[1:n_rendered]),
-        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
+    if use_ak(kab)
+        sortperm!(
+            @view(rast.bstate.permutation[1:n_rendered]),
+            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
+            temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
+    else
+        sortperm!(
+            @view(rast.bstate.permutation[1:n_rendered]),
+            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
+    end
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)

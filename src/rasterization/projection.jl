@@ -23,7 +23,11 @@ function project(
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
+
+        do_record = record_memory(kab)
+        do_record && record_memory!(kab, false; free=false)
         rast.gstate = GeometryState(kab, n)
+        do_record && record_memory!(kab, true)
     end
 
     project!(kab)(
