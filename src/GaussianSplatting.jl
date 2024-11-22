@@ -115,6 +115,7 @@ function main(dataset_path::String; scale::Int)
             save("image-$(trainer.step).png", to_image(image))
 
             if rasterizer.mode == :rgbd
+                # TODO api
                 depth_image = permutedims(Array(image_features[4, :, :]), (2, 1))
                 depth_image ./= maximum(depth_image)
                 clamp01!(depth_image)

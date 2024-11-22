@@ -16,7 +16,7 @@ Base.@kwdef mutable struct UIState
     sh_degree::Ref{Int32} = Ref{Int32}(-1) # -1 means use value from the model
 
     selected_mode::Ref{Int32} = Ref{Int32}(0)
-    render_modes::Vector{String} = ["Color", "Depth", "Uncertainty"]
+    render_modes::Vector{String} = ["Color", "Depth"]
 
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]

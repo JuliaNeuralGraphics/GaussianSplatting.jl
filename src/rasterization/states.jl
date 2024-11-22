@@ -7,6 +7,7 @@ struct GeometryState{
     T <: AbstractVector{Int32},
     O <: AbstractVector{SVector{3, Float32}},
     I <: AbstractVector{Int32},
+    F <: Maybe{AbstractMatrix{Float32}},
 }
     depths::D
     means_2d::M
@@ -17,9 +18,10 @@ struct GeometryState{
     points_offset::T
     conic_opacities::O
     radii::I
+    color_features::F
 end
 
-GeometryState(kab, n::Int) = GeometryState(
+GeometryState(kab, n::Int; extended::Bool = false) = GeometryState(
     KA.zeros(kab, Float32, n),
     KA.zeros(kab, SVector{2, Float32}, n),
     KA.zeros(kab, SVector{2, Float32}, n),
@@ -28,7 +30,8 @@ GeometryState(kab, n::Int) = GeometryState(
     KA.zeros(kab, Int32, n),
     KA.zeros(kab, Int32, n),
     KA.zeros(kab, SVector{3, Float32}, n),
-    KA.zeros(kab, Int32, n))
+    KA.zeros(kab, Int32, n),
+    extended ? KA.zeros(kab, Float32, (4, n)) : nothing)
 
 Base.length(gstate::GeometryState) = length(gstate.depths)
 
@@ -42,6 +45,7 @@ function KA.unsafe_free!(gstate::GeometryState)
     KA.unsafe_free!(gstate.points_offset)
     KA.unsafe_free!(gstate.conic_opacities)
     KA.unsafe_free!(gstate.radii)
+    isnothing(gstate.color_features) || KA.unsafe_free!(gstate.color_features)
     return
 end
 

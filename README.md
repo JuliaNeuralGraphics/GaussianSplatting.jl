@@ -14,10 +14,10 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 ||`fused=true`|`fused=false`|
 |-|-|-|
 |RGB|+|+|
-|Depth rendering|+|+|
-|Differentiable depth|-|+|
+|Depth rendering (`mode=:rgbd`)|+|+|
+|Differentiable depth|+|+|
 |Differentiable camera pose|`in-progress`|`in-progress`|
-|Antialiasing|-|+|
+|Antialiasing|`in-progress`|+|
 
 ## FYI
 

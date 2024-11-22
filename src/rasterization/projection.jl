@@ -26,7 +26,7 @@ function project(
 
         do_record = record_memory(kab)
         do_record && record_memory!(kab, false; free=false)
-        rast.gstate = GeometryState(kab, n)
+        rast.gstate = GeometryState(kab, n; extended=rast.mode == :rgbd)
         do_record && record_memory!(kab, true)
     end
 
