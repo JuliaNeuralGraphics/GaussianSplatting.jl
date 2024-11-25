@@ -58,6 +58,7 @@ include("simd.jl")
 include("utils.jl")
 include("metrics.jl")
 include("camera.jl")
+include("camera_opt.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
