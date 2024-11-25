@@ -7,12 +7,17 @@ mutable struct GaussianRasterizer{
     G <: GeometryState,
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
+    S <: AbstractMatrix{Float32},
 }
     istate::I
     gstate::G
     bstate::B
 
-    shs::K # Temporary SH storage to avoid allocating during rendering outside of AD.
+    # Temporary storage to avoid allocating during rendering outside of AD.
+    shs::K
+    scales_act::S
+    opacities_act::S
+
     image::K
     host_image::Array{Float32, 3}
 
@@ -47,13 +52,28 @@ function GaussianRasterizer(kab;
     gstate = GeometryState(kab, 0; extended=mode == :rgbd)
     bstate = BinningState(kab, 0)
 
+    # TODO organize in a render cache/state
     shs = KA.allocate(kab, Float32, (3, 0, 0))
+    scales_act = KA.allocate(kab, Float32, (3, 0))
+    opacities_act = KA.allocate(kab, Float32, (1, 0))
+
     image = KA.allocate(kab, Float32, (mode == :rgbd ? 4 : 3, width, height))
     # TODO use pinned memory
     host_image = Array{Float32, 3}(undef, (3, width, height))
     GaussianRasterizer(
-        istate, gstate, bstate, shs,
+        istate, gstate, bstate,
+        shs, scales_act, opacities_act,
         image, host_image, grid, antialias, fused, mode)
+end
+
+function cache!(rast::GaussianRasterizer, name::Symbol, target_size)
+    x = getproperty(rast, name)
+    if size(x) != target_size
+        KA.unsafe_free!(x)
+        x = KA.allocate(get_backend(rast), eltype(x), target_size)
+        setproperty!(rast, name, x)
+    end
+    return x
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -128,23 +148,32 @@ function (rast::GaussianRasterizer)(
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
 )
     # If rendering outside AD, use non-allocating path.
-    shs = if NNlib.within_gradient(means_3d)
+    inplace = NNlib.within_gradient(means_3d)
+
+    shs = if inplace
         isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
     else
-        if length(rast.shs) != length(sh_color) + length(sh_remainder)
-            KA.unsafe_free!(rast.shs)
-            n_features = size(sh_color, 2) + size(sh_remainder, 2)
-            sz = (3, n_features, size(sh_color, 3))
-            rast.shs = KA.allocate(get_backend(rast), Float32, sz)
-        end
-        rast.shs[:, 1:1, :] .= sh_color
-        isempty(sh_remainder) || (rast.shs[:, 2:end, :] .= sh_remainder)
-        rast.shs
+        n_features = size(sh_color, 2) + size(sh_remainder, 2)
+        target_size = (3, n_features, size(sh_color, 3))
+        rshs = cache!(rast, :shs, target_size)
+        rshs[:, 1:1, :] .= sh_color
+        isempty(sh_remainder) || (rshs[:, 2:end, :] .= sh_remainder)
+        rshs
     end
 
-    # TODO if rendering outside AD, use non-allocating path.
-    opacities_act = NU.sigmoid.(opacities)
-    scales_act = exp.(scales)
+    opacities_act = if inplace
+        NU.sigmoid.(opacities)
+    else
+        ropacities = cache!(rast, :opacities_act, size(opacities))
+        ropacities .= NU.sigmoid.(opacities)
+    end
+
+    scales_act = if inplace
+        exp.(scales)
+    else
+        rscales = cache!(rast, :scales_act, size(scales))
+        rscales .= exp.(scales)
+    end
 
     if rast.fused
         return rasterize(
