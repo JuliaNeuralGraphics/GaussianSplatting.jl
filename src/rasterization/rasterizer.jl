@@ -142,16 +142,17 @@ function (rast::GaussianRasterizer)(
         rast.shs
     end
 
+    # TODO if rendering outside AD, use non-allocating path.
+    opacities_act = NU.sigmoid.(opacities)
+    scales_act = exp.(scales)
+
     if rast.fused
         return rasterize(
-            means_3d, shs,
-            NU.sigmoid.(opacities),
-            exp.(scales),
-            rotations;
+            means_3d, shs, opacities_act, scales_act, rotations;
             rast, camera, sh_degree, background)
     else
         means_2d, conics, compensations, depths = project(
-            means_3d, exp.(scales), rotations;
+            means_3d, scales_act, rotations;
             rast, camera, near_plane=0.2f0, far_plane=1000f0,
             radius_clip=3f0, blur_ϵ=0.3f0)
 
@@ -164,14 +165,14 @@ function (rast::GaussianRasterizer)(
             colors
         end
 
-        opacities_act = if rast.antialias
-            NU.sigmoid.(opacities) .* compensations
+        opacities_scaled = if rast.antialias
+            opacities_act .* compensations
         else
-            NU.sigmoid.(opacities)
+            opacities_act
         end
 
         image = render(
-            means_2d, conics, opacities_act, color_features;
+            means_2d, conics, opacities_scaled, color_features;
             rast, camera, background, depths)
         return image
     end
