@@ -34,15 +34,11 @@ function Camera(
         intrinsics.focal, intrinsics.resolution, img_name)
 end
 
-function Camera(;
-    fx::Float32, fy::Float32,
-    width::Int, height::Int,
-)
+function Camera(; fx::Float32, fy::Float32, width::Int, height::Int)
     focal = SVector{2, Float32}(fx, fy)
     principal = SVector{2, Float32}(0.5f0, 0.5f0)
     resolution = SVector{2, UInt32}(width, height)
     intrinsics = NU.CameraIntrinsics(nothing, focal, principal, resolution)
-
     Camera(
         SMatrix{3, 3, Float32, 9}(I), zeros(SVector{3, Float32});
         intrinsics, img_name="")
@@ -121,63 +117,10 @@ function _update_from_intrinsics!(c::Camera)
     return
 end
 
-"""
-ρ - translational δ.
-θ - rotational δ.
-ϵ - convergence threshold, if norm(τ) < ϵ - optimization converged.
-"""
-function update!(c::Camera; ρ, θ, ϵ::Float32 = 1f-4)
-    τ = cat(ρ, θ; dims=1)
-    converged = norm(τ) < ϵ
-
-    new_w2c = SE3_exp(τ) * c.w2c
-    new_c2w = inv(new_w2c)
-    set_c2w!(c, new_c2w)
-    return converged
+function rotation_6d_to_matrix(a1, a2)
+    b1 = normalize(a1)
+    b2 = a2 .- b1 .* sum(b1 .* a2)
+    b3 = normalize(b2)
+    b4 = b1 × b3
+    return transpose(hcat(b1, b3, b4))
 end
-
-function SE3_exp(τ)
-    ρ, θ = τ[1:3], τ[4:6]
-    R = SO3_exp(θ)
-    t = V(θ) * ρ
-
-    T = MMatrix{4, 4, Float32}(I)
-    T[1:3, 1:3] .= R
-    T[1:3, 4] .= t
-    return T
-end
-
-function SO3_exp(θ)
-    W = skew_sym_mat(θ)
-    W² = W * W
-
-    angle = norm(θ)
-    ID = SMatrix{3, 3, Float32, 9}(I)
-    if angle < 1f-5
-        ID .+ W .+ 0.5f0 .* W²
-    else
-        ID .+
-            W .* (sin(angle) / angle) .+
-            W² .* ((1f0 - cos(angle)) / angle^2)
-    end
-end
-
-function V(θ)
-    W = skew_sym_mat(θ)
-    W² = W * W
-
-    angle = norm(θ)
-    ID = SMatrix{3, 3, Float32, 9}(I)
-    if angle < 1f-5
-        ID .+ 0.5f0 .* W .+ (1f0 / 6f0) .* W²
-    else
-        ID .+
-            W .* ((1f0 - cos(angle)) / angle^2) .+
-            W² .* ((angle - sin(angle)) / angle^3)
-    end
-end
-
-skew_sym_mat(x) = SMatrix{3, 3, Float32, 9}(
-    0f0, x[3], -x[2],
-    -x[3], 0f0, x[1],
-    x[2], -x[1], 0f0)

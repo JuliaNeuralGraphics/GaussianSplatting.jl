@@ -143,7 +143,8 @@ function (rast::GaussianRasterizer)(
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
     sh_color::AbstractArray{Float32, 3},
-    sh_remainder::AbstractArray{Float32, 3};
+    sh_remainder::AbstractArray{Float32, 3},
+    R_w2c = nothing, t_w2c = nothing;
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
 )
@@ -177,7 +178,7 @@ function (rast::GaussianRasterizer)(
 
     if rast.fused
         return rasterize(
-            means_3d, shs, opacities_act, scales_act, rotations;
+            means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
             rast, camera, sh_degree, background)
     else
         means_2d, conics, compensations, depths = project(
@@ -212,7 +213,8 @@ function rasterize(
     shs::AbstractArray{Float32, 3},
     opacities::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
-    rotations::AbstractMatrix{Float32};
+    rotations::AbstractMatrix{Float32},
+    R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
@@ -237,8 +239,12 @@ function rasterize(
     fill!(rast.image, 0f0)
 
     K = camera.intrinsics
-    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
-    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    R = R_w2c ≡ nothing ?
+        SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3]) :
+        R_w2c
+    t = t_w2c ≡ nothing ?
+        SVector{3, Float32}(camera.w2c[1:3, 4]) :
+        t_w2c
 
     # TODO make configurable.
     near_plane, far_plane = 0.2f0, 1000f0
@@ -257,7 +263,7 @@ function rasterize(
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
         # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal,
+        R, t, K.focal, Int32.(K.resolution), K.principal,
         # Config.
         near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
 
@@ -363,7 +369,8 @@ function ∇rasterize(
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
-    radii::AbstractVector{Int32};
+    radii::AbstractVector{Int32},
+    R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
@@ -422,14 +429,23 @@ function ∇rasterize(
         vcolor_features, nothing
     end
 
-    R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
-    t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+    R, t, vR, vt = if R_w2c ≡ nothing
+        tmp_R = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+        tmp_t = SVector{3, Float32}(camera.w2c[1:3, 4])
+        tmp_R, tmp_t, nothing, nothing
+    else
+        tmp_vR = KA.allocate(kab, Float32, 3, 3)
+        tmp_vt = KA.allocate(kab, Float32, 3)
+        R, t, tmp_vR, tmp_vt
+    end
+
     blur_ϵ = 0.3f0
     ∇project!(kab)(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
         _as_T(SVector{3, Float32}, vscales),
         _as_T(SVector{4, Float32}, vrot),
+        vR, vt,
 
         # Input grad outputs.
         rast.gstate.∇means_2d,
@@ -445,7 +461,7 @@ function ∇rasterize(
         _as_T(SVector{4, Float32}, rotations),
         nothing, # compensations
         # Input camera properties.
-        R_w2c, t_w2c, K.focal, Int32.(K.resolution), K.principal, blur_ϵ; ndrange=n)
+        R, t, K.focal, Int32.(K.resolution), K.principal, blur_ϵ; ndrange=n)
 
     ∇spherical_harmonics!(kab)(
         # Output.
@@ -465,16 +481,17 @@ function ∇rasterize(
     KA.unsafe_free!(vrgbs)
     isnothing(vdepths) || KA.unsafe_free!(vdepths)
 
-    return vmeans, vshs, vopacities, vscales, vrot
+    return vmeans, vshs, vopacities, vscales, vrot, vR, vt
 end
 
 function ChainRulesCore.rrule(::typeof(rasterize),
-    means_3d, shs, opacities, scales, rotations;
+    means_3d, shs, opacities, scales, rotations,
+    R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
     image = rasterize(
-        means_3d, shs, opacities, scales, rotations;
+        means_3d, shs, opacities, scales, rotations, R_w2c, t_w2c;
         rast, camera, sh_degree, background)
 
     function _pullback(vpixels)
