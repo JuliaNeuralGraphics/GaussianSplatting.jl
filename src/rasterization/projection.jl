@@ -300,9 +300,15 @@ end
     if RG != Nothing
         @unroll for rr in 1:3
             @unroll for rc in 1:3
-                @inbounds @atomic vR_out[rr, rc] += vR[rr, rc]
+                v = vR[rr, rc]
+                if abs(v) > 1f-7 # For numerical stability.
+                    @atomic vR_out[rr, rc] += v
+                end
             end
-            @inbounds @atomic vt_out[rr] += vt[rr]
+            v = vt[rr]
+            if abs(v) > 1f-7 # For numerical stability.
+                @atomic vt_out[rr] += v
+            end
         end
     end
 end

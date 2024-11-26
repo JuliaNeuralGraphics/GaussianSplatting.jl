@@ -434,9 +434,9 @@ function ∇rasterize(
         tmp_t = SVector{3, Float32}(camera.w2c[1:3, 4])
         tmp_R, tmp_t, nothing, nothing
     else
-        tmp_vR = KA.allocate(kab, Float32, 3, 3)
-        tmp_vt = KA.allocate(kab, Float32, 3)
-        R, t, tmp_vR, tmp_vt
+        tmp_vR = KA.zeros(kab, Float32, 3, 3)
+        tmp_vt = KA.zeros(kab, Float32, 3)
+        R_w2c, t_w2c, tmp_vR, tmp_vt
     end
 
     blur_ϵ = 0.3f0
@@ -497,7 +497,7 @@ function ChainRulesCore.rrule(::typeof(rasterize),
     function _pullback(vpixels)
         ∇ = ∇rasterize(
             vpixels, means_3d, shs, scales, rotations, opacities,
-            rast.gstate.radii; rast, camera, sh_degree, background)
+            rast.gstate.radii, R_w2c, t_w2c; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end
     return image, _pullback

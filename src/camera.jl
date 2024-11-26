@@ -117,7 +117,8 @@ function _update_from_intrinsics!(c::Camera)
     return
 end
 
-function rotation_6d_to_matrix(a1, a2)
+function rotation_6d_to_matrix(θ)
+    a1, a2 = θ[1:3], θ[4:6]
     b1 = normalize(a1)
     b2 = a2 .- b1 .* sum(b1 .* a2)
     b3 = normalize(b2)
