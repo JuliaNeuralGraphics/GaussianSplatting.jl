@@ -143,8 +143,7 @@ end
     cov_rotations::AbstractVector{SVector{4, Float32}},
 
     # Input camera properties.
-    R_w2c::SMatrix{3, 3, Float32, 9},
-    t_w2c::SVector{3, Float32},
+    R_w2c::RM, t_w2c,
     focal::SVector{2, Float32},
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
@@ -154,11 +153,17 @@ end
     far_plane::Float32,
     radius_clip::Float32,
     blur_ϵ::Float32,
-) where {C <: Maybe{AbstractMatrix{Float32}}}
+) where {C <: Maybe{AbstractMatrix{Float32}}, RM}
     i = @index(Global)
 
+    R, t = if RM <: StaticArray
+        R_w2c, t_w2c
+    else
+        smat3f0(R_w2c), svec3f0(t_w2c)
+    end
+
     mean = means[i]
-    mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
+    mean_cam = pos_world_to_cam(R, t, mean)
     if !(near_plane < mean_cam[3] < far_plane)
         radii[i] = 0i32
         return
@@ -167,7 +172,7 @@ end
     # Project Gaussian onto image plane.
     cov_rotation = vload(pointer(cov_rotations, i)) # SIMD load
     Σ = quat_scale_to_cov(cov_rotation, cov_scales[i])
-    Σ_cam = covar_world_to_cam(R_w2c, Σ)
+    Σ_cam = covar_world_to_cam(R, Σ)
     Σ_2D, mean_2D = perspective_projection(
         mean_cam, Σ_cam, focal, resolution, principal)
 
@@ -212,6 +217,7 @@ end
     vmeans::AbstractVector{SVector{3, Float32}},
     vcov_scales::AbstractVector{SVector{3, Float32}},
     vcov_rotations::AbstractVector{SVector{4, Float32}},
+    vR_out::RG, vt_out,
 
     # Input grad outputs.
     vmeans_2d::AbstractVector{SVector{2, Float32}},
@@ -229,13 +235,12 @@ end
     compensations::C,
 
     # Input camera properties.
-    R_w2c::SMatrix{3, 3, Float32, 9},
-    t_w2c::SVector{3, Float32},
+    R_w2c::RM, t_w2c,
     focal::SVector{2, Float32},
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
     ϵ::Float32,
-) where {C <: Maybe{AbstractMatrix{Float32}}, VC, VD}
+) where {C <: Maybe{AbstractMatrix{Float32}}, VC, VD, RM, RG}
     i = @index(Global)
 
     conic = conics[i]
@@ -256,13 +261,19 @@ end
         vΣ_2D = vΣ_2D + ∇add_blur(compensation, vcompensation, Σ_2D_inv, ϵ)
     end
 
+    R, t = if RM <: StaticArray
+        R_w2c, t_w2c
+    else
+        smat3f0(R_w2c), svec3f0(t_w2c)
+    end
+
     mean = means[i]
-    mean_cam = pos_world_to_cam(R_w2c, t_w2c, mean)
+    mean_cam = pos_world_to_cam(R, t, mean)
 
     cov_rotation = vload(pointer(cov_rotations, i))
     cov_scale = cov_scales[i]
     Σ = quat_scale_to_cov(cov_rotation, cov_scale)
-    Σ_cam = covar_world_to_cam(R_w2c, Σ)
+    Σ_cam = covar_world_to_cam(R, Σ)
 
     vmean_2d = vmeans_2d[i]
     vΣ_cam, vmean_cam = ∇perspective_projection(
@@ -277,8 +288,8 @@ end
             vmean_cam[1], vmean_cam[2], vmean_cam[3] + vdepth)
     end
 
-    vR, vt, vmean = ∇pos_world_to_cam(R_w2c, t_w2c, mean, vmean_cam)
-    vR, vΣ = ∇covar_world_to_cam(R_w2c, Σ, vΣ_cam, vR)
+    vR, vt, vmean = ∇pos_world_to_cam(R, t, mean, vmean_cam)
+    vR, vΣ = ∇covar_world_to_cam(R, Σ, vΣ_cam, vR)
     vq, vscale = ∇quat_scale_to_cov(
         cov_rotation, cov_scale, unnorm_quat2rot(cov_rotation), vΣ)
 
@@ -286,7 +297,20 @@ end
     vcov_scales[i] = vscale
     vstore!(pointer(vcov_rotations, i), vq) # SIMD store
 
-    # TODO write grad for vR & vt (for diff camera pose)
+    if RG != Nothing
+        @unroll for rr in 1:3
+            @unroll for rc in 1:3
+                v = vR[rr, rc]
+                if abs(v) > 1f-7 # For numerical stability.
+                    @atomic vR_out[rr, rc] += v
+                end
+            end
+            v = vt[rr]
+            if abs(v) > 1f-7 # For numerical stability.
+                @atomic vt_out[rr] += v
+            end
+        end
+    end
 end
 
 @inbounds function perspective_projection(

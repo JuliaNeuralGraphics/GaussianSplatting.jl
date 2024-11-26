@@ -58,6 +58,7 @@ include("simd.jl")
 include("utils.jl")
 include("metrics.jl")
 include("camera.jl")
+include("camera_opt.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
@@ -76,7 +77,7 @@ remove_record!(kab, x) = return
 
 use_ak(kab) = false
 
-function main(dataset_path::String; scale::Int)
+function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."
 
@@ -122,22 +123,19 @@ function main(dataset_path::String; scale::Int)
                 save("depth-$(trainer.step).png", colorview(Gray, depth_image))
             end
 
-            GC.gc(false)
-            GC.gc(true)
-
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
             loss, eval_ssim, eval_mse, eval_psnr = round.(
                 (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
             println("i=$i | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
-
-            GC.gc(false)
-            GC.gc(true)
         end
     end
     t2 = time()
     println("Time took: $((t2 - t1) / 60) minutes.")
 
-    # save_state(trainer, "../state.bson")
+    if save_path ≢ nothing
+        save_state(trainer, save_path)
+        @info "Saved at: `$save_path`."
+    end
     return
 end
 

@@ -4,6 +4,13 @@ sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
     0f0, y, 0f0,
     0f0, 0f0, z)
 
+@inbounds smat3f0(x) = SMatrix{3, 3, Float32, 9}(
+    x[1, 1], x[2, 1], x[3, 1],
+    x[1, 2], x[2, 2], x[3, 2],
+    x[1, 3], x[2, 3], x[3, 3])
+
+@inbounds svec3f0(x) = SVector{3, Float32}(x[1], x[2], x[3])
+
 gpu_floor(T, x) = unsafe_trunc(T, floor(x))
 gpu_ceil(T, x) = unsafe_trunc(T, ceil(x))
 

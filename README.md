@@ -16,7 +16,7 @@ https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl/assets/17990405/0b77
 |RGB|+|+|
 |Depth rendering (`mode=:rgbd`)|+|+|
 |Differentiable depth|+|+|
-|Differentiable camera pose|`in-progress`|`in-progress`|
+|Differentiable camera pose|+|+|
 |Antialiasing|`in-progress`|+|
 
 ## FYI
@@ -72,6 +72,12 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 
   julia> Flux.gpu_backend!("CUDA")
   ```
+
+## Camera pose optimization
+
+https://github.com/user-attachments/assets/07735cdb-d8b3-49a5-8d91-173c5304ae94
+
+See `examples/pos_opt.jl` for simple demo of camera pose optimization.
 
 ## Datasets
 
