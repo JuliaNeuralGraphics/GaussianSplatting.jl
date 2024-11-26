@@ -297,6 +297,7 @@ end
     vcov_scales[i] = vscale
     vstore!(pointer(vcov_rotations, i), vq) # SIMD store
 
+    # TODO reduce within warp/workgroup to decrease number of atomic ops.
     if RG != Nothing
         @unroll for rr in 1:3
             @unroll for rc in 1:3
