@@ -77,7 +77,8 @@ julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
 
 https://github.com/user-attachments/assets/07735cdb-d8b3-49a5-8d91-173c5304ae94
 
-See `examples/pos_opt.jl` for simple demo of camera pose optimization.
+See `examples/pos_opt.jl` for a simple demo of camera pose optimization
+(move camera to a location, given image taken from that location).
 
 ## Datasets
 
