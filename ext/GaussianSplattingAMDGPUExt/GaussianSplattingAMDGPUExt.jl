@@ -18,6 +18,15 @@ GaussianSplatting.remove_record!(::ROCBackend, x) =
 
 GaussianSplatting.use_ak(::ROCBackend) = true
 
+function GaussianSplatting.allocate_pinned(kab, ::Type{T}, shape) where T
+    x = Array{T}(undef, shape)
+    xd = unsafe_wrap(ROCArray, pointer(x), size(x))
+    return x, xd
+end
+
+# Unregistered automatically in the array dtor.
+GaussianSplatting.unpin_memory(::ROCArray) = return
+
 # @setup_workload let
 #     kab = GaussianSplatting.gpu_backend()
 

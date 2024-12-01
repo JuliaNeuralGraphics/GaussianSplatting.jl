@@ -169,7 +169,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgb)
+    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -433,7 +433,6 @@ function render!(gui::GSGUI)
     elseif mode == 1 # Render depth.
         gl_depth(rast)
     end
-
     NGL.set_data!(gui.render_state.surface, tex)
     return
 end

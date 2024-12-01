@@ -75,6 +75,10 @@ record_memory!(kab, v::Bool; kwargs...) = return
 
 remove_record!(kab, x) = return
 
+allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
+
+unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
+
 use_ak(kab) = false
 
 function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
@@ -108,17 +112,13 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
                 gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
                 camera, sh_degree=gaussians.sh_degree)
 
-            image = if rasterizer.mode == :rgbd
-                image_features[1:3, :, :]
-            else
-                image_features
-            end
-            save("image-$(trainer.step).png", to_image(image))
+            host_image_features = Array(image_features)
+            save("image-$(trainer.step).png",
+                to_image(@view(host_image_features[1:3, :, :])))
 
             if rasterizer.mode == :rgbd
-                # TODO api
-                depth_image = permutedims(Array(image_features[4, :, :]), (2, 1))
-                depth_image ./= maximum(depth_image)
+                depth_image = permutedims(host_image_features[4, :, :], (2, 1))
+                depth_image ./= 50f0 # maximum(depth_image)
                 clamp01!(depth_image)
                 save("depth-$(trainer.step).png", colorview(Gray, depth_image))
             end

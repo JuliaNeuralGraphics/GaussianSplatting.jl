@@ -7,6 +7,7 @@ mutable struct GaussianRasterizer{
     G <: GeometryState,
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
+    P <: AbstractArray{Float32, 3},
     S <: AbstractMatrix{Float32},
 }
     istate::I
@@ -19,6 +20,7 @@ mutable struct GaussianRasterizer{
     opacities_act::S
 
     image::K
+    pinned_image::P
     host_image::Array{Float32, 3}
 
     grid::SVector{2, Int32}
@@ -58,12 +60,17 @@ function GaussianRasterizer(kab;
     opacities_act = KA.allocate(kab, Float32, (1, 0))
 
     image = KA.allocate(kab, Float32, (mode == :rgbd ? 4 : 3, width, height))
-    # TODO use pinned memory
-    host_image = Array{Float32, 3}(undef, (3, width, height))
-    GaussianRasterizer(
+    host_image, pinned_image = allocate_pinned(kab, Float32, (3, width, height))
+
+    rast = GaussianRasterizer(
         istate, gstate, bstate,
         shs, scales_act, opacities_act,
-        image, host_image, grid, antialias, fused, mode)
+        image, pinned_image, host_image,
+        grid, antialias, fused, mode)
+    finalizer(rast) do rast
+        unpin_memory(rast.pinned_image)
+    end
+    return rast
 end
 
 function cache!(rast::GaussianRasterizer, name::Symbol, target_size)
@@ -82,41 +89,26 @@ include("projection.jl")
 include("spherical_harmonics.jl")
 include("render.jl")
 
-function raw_image!(host_image, image)
-    if size(image, 1) == 4 # mode == :rgbd
-        # TODO preallocate `tmp` in rasterizer.
-        tmp = image[1:3, :, :]
-        copyto!(host_image, tmp)
-        KA.unsafe_free!(tmp)
-    else
-        copyto!(host_image, image)
-    end
-end
-
-function raw_depth!(host_depth, image)
-    @assert size(image, 1) == 4
-    tmp = image[[4], :, :]
-    copyto!(host_depth, tmp)
-    KA.unsafe_free!(tmp)
-end
-
 # OpenGL convertions.
 
 function gl_texture(r::GaussianRasterizer)
-    raw_image!(r.host_image, r.image)
+    r.pinned_image .= @view(r.image[1:3, :, :])
+    KA.synchronize(get_backend(r))
     clamp01!(r.host_image)
     reverse!(r.host_image; dims=3)
     return r.host_image
 end
 
 function gl_depth(r::GaussianRasterizer)
-    tmp = Array{Float32, 3}(undef, 1, size(r.image)[2:3]...)
-    raw_depth!(tmp, r.image)
-    # Normalization value was chosen based on the visual output.
-    tmp .*= 1f0 ./ 50f0 #maximum(tmp)
-    clamp01!(tmp)
+    # Copying just 1 single element is 5x slower, so we copy 3.
+    r.pinned_image .= @view(r.image[2:4, :, :])
+    KA.synchronize(get_backend(r))
 
-    r.host_image .= tmp
+    r.host_image[1:2, :, :] .= @view(r.host_image[[3], :, :])
+
+    # Normalization value was chosen based on the visual output.
+    r.host_image .*= 1f0 / 50f0
+    clamp01!(r.host_image)
     reverse!(r.host_image; dims=3)
     return r.host_image
 end
@@ -124,18 +116,11 @@ end
 # Image conversions.
 
 function to_image(r::GaussianRasterizer)
-    host_image = Array{Float32}(undef, 3, size(r.image)[2:3]...)
-    raw_image!(host_image, r.image)
-    clamp01!(host_image)
+    host_image = clamp01!(@view(Array(r.image)[1:3, :, :]))
     return colorview(RGB, permutedims(host_image, (1, 3, 2)))
 end
 
-function to_image(image)
-    host_image = Array{Float32}(undef, 3, size(image)[2:3]...)
-    raw_image!(host_image, image)
-    clamp01!(host_image)
-    return colorview(RGB, permutedims(host_image, (1, 3, 2)))
-end
+to_image(x) = colorview(RGB, permutedims(clamp01!(x), (1, 3, 2)))
 
 function (rast::GaussianRasterizer)(
     means_3d::AbstractMatrix{Float32},
