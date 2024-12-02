@@ -2,3 +2,5 @@
 *.mp4
 Manifest.toml
 imgui.ini
+
+docs/build/
