@@ -23,8 +23,11 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Install dependencies
         uses: coactions/setup-xvfb@v1
+      - name: Build and deploy
         with:
-          run: julia --project=docs/ docs/make.jl
+          run: |
+            julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+            julia --project=docs/ docs/make.jl
         env:
           DISPLAY: :0
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # If authenticating with GitHub Actions token
