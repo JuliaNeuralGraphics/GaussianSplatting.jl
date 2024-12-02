@@ -21,6 +21,7 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+      - uses: coactions/setup-xvfb@v1
       - name: Install dependencies
         run: julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Build and deploy
