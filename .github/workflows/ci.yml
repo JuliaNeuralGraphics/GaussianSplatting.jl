@@ -21,10 +21,11 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
-      - uses: coactions/setup-xvfb@v1
       - name: Install dependencies
+        uses: coactions/setup-xvfb@v1
         run: julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Build and deploy
+        uses: coactions/setup-xvfb@v1
         env:
           DISPLAY: :0
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # If authenticating with GitHub Actions token
