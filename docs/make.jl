@@ -16,8 +16,8 @@ function main()
         warnonly=[:missing_docs],
         pages=[
             "Home" => "index.md",
-            "Examples" => "examples.md",
             "API" => "api.md",
+            "Examples" => "examples.md",
         ],
     )
     if ci

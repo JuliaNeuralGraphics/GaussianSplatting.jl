@@ -1,1 +1,89 @@
 # API
+
+### Loading COLMAP dataset
+
+GaussianSplatting.jl supports datasets in **binary** COLMAP format.
+To load it, you specify which GPU backend to use and a path to the dataset root directory.
+
+```julia
+import GaussianSplatting as GPS
+
+kab = GSP.gpu_backend()
+dataset_path = "<path-to-colmap-dataset>"
+dataset = GSP.ColmapDataset(kab, dataset_path;
+    scale=4, train_test_split=0.9, permute=true)
+```
+
+- `scale::Int = 1` controls the scale of images to load (usually between `1` an `8`).
+- `train_test_split::Real = 0.8` train/test ratio split.
+    E.g. `0.8` will select `80%` of the data for training and `20%` for testing.
+- `permute::Bool = true` whether to shuffle data in a random order.
+
+Dataset directory should have the following structure:
+```
+- sparse/0/cameras.bin
+- sparse/0/images.bin
+- sparse/0/points3D.bin
+- images/
+```
+
+Additionally, if setting `scale > 1`, following directories should exist:
+```
+- images_<scale>/
+```
+
+### Initializing Gaussians from dataset
+
+Once you load the dataset, you can initialize Gaussian model from it by
+providing an array of `points` (means), their `colors` and `scales`.
+
+```julia
+gaussians = GSP.GaussianModel(
+    dataset.points, dataset.colors, dataset.scales;
+    max_sh_degree=3)
+```
+
+- `max_sh_degree::Int = 3` set the **maximum** allowed spherical-harmonics degree.
+    For a given degree `d`, each gaussian will have `(d + 1)^2` color features.
+    Set `0` to disable it. This will be used by during training to limit
+    current spherical-harmonics degree.
+
+### Rendering Gaussians
+
+To render Gaussians, we first need to initialize rasterizer on the given GPU backend:
+
+```julia
+kab = GSP.gpu_backend()
+rasterizer = GSP.GaussianRasterizer(kab; width=1280, height=720, mode=:rgb)
+```
+
+- `width::Int` and `height::Int` control the rendering resolution of the
+    rasterizer.
+- `mode::Symbol = :rgb` set the rendering mode.
+    Either `:rgb` or `:rgbd` (RGB + depth) is supported for now.
+
+Once constructed, we can rasterize gaussians onto the image plane given `camera`
+that determines the position from which to render:
+
+```julia
+image_features = rasterizer(
+    gaussians.points, gaussians.opacities, gaussians.scales,
+    gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+    camera, gaussians.sh_degree)
+```
+
+Depending on the `mode`, `image_features` will be either in `3xWxH` shape (`:rgb` mode)
+or in `4xWxH` (`:rgbd` mode).
+
+We can save it to disk (first transferring it from GPU to host):
+
+```julia
+using FileIO, ImageIO
+
+host_image_features = Array(image_features)
+save("image.png", GSP.to_image(@view(host_image_features[1:3, :, :])))
+```
+
+Example of rendering newly initialized gaussians (bicycle dataset):
+
+![](res/init.png)

@@ -2,41 +2,41 @@
 
 Gaussian Splatting algorithm in pure Julia.
 
+![](res/bicycle.gif)
+
 ## Requirements
 
 - Julia 1.10 or higher.
 - AMD ([AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl)) or
   Nvidia ([CUDA.jl](https://github.com/JuliaGPU/CUDA.jl)) capable machine.
 
-## Usage
+## Install
 
-1. Install GaussianSplatting.jl package:
+Add GaussianSplatting.jl package:
 
 ```julia
 ] add https://github.com/JuliaNeuralGraphics/GaussianSplatting.jl.git
 ```
 
-### For AMD GPU
+## Usage
 
-2. Add necessary packages: `] add AMDGPU`
+GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
 
-3. Run:
-```julia
-julia> using AMDGPU, GaussianSplatting
+1. Add necessary packages:
+   ```julia
+   ] add AMDGPU      # for AMD GPU
+   ] add CUDA, cuDNN # for Nvidia GPU
+   ] add Flux
+   ```
 
-julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
-```
+2. Run:
+   ```julia
+   julia> using AMDGPU      # for AMD GPU
+   julia> using CUDA, cuDNN # for Nvidia GPU
+   julia> using Flux, GaussianSplatting
 
-### For Nvidia GPU
-
-2. Add necessary packages: `] add CUDA, cuDNN`
-
-3. Run:
-```julia
-julia> using CUDA, cuDNN, GaussianSplatting
-
-julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
-```
+   julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
+   ```
 
 ## GPU selection
 
@@ -45,15 +45,11 @@ After selecting GPU backend, restart Julia REPL.
 
 - AMD GPU:
   ```julia
-  julia> using Flux
-
   julia> Flux.gpu_backend!("AMDGPU")
   ```
 
 - Nvidia GPU:
   ```julia
-  julia> using Flux
-
   julia> Flux.gpu_backend!("CUDA")
   ```
 

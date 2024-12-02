@@ -89,15 +89,21 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
         scale, train_test_split=0.9, permute=false)
     camera = dataset.test_cameras[1]
 
-    opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
         antialias=false, fused=true, mode=:rgb)
+
+    opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
     @info "N train images: $(length(dataset.train_cameras))"
     @info "N test images: $(length(dataset.test_cameras))"
+
+    # res = resolution(camera)
+    # writer = open_video_out(
+    #     "./out.mp4", zeros(RGB{N0f8}, res.height, res.width);
+    #     framerate=60, target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
 
     t1 = time()
     for i in 1:7000
@@ -115,6 +121,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             host_image_features = Array(image_features)
             save("image-$(trainer.step).png",
                 to_image(@view(host_image_features[1:3, :, :])))
+            # write(writer, RGB{N0f8}.(to_image(@view(host_image_features[1:3, :, :]))))
 
             if rasterizer.mode == :rgbd
                 depth_image = permutedims(host_image_features[4, :, :], (2, 1))
@@ -131,6 +138,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
     end
     t2 = time()
     println("Time took: $((t2 - t1) / 60) minutes.")
+    # close_video_out!(writer)
 
     if save_path ≢ nothing
         save_state(trainer, save_path)

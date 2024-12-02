@@ -37,9 +37,9 @@ end
 
 function GaussianRasterizer(kab;
     width::Int, height::Int,
-    antialias::Bool = false,
     fused::Bool = true,
     mode::Symbol = :rgb,
+    antialias::Bool = false,
 )
     @assert width % 16 == 0 && height % 16 == 0
     antialias && fused && error(
@@ -67,9 +67,7 @@ function GaussianRasterizer(kab;
         shs, scales_act, opacities_act,
         image, pinned_image, host_image,
         grid, antialias, fused, mode)
-    finalizer(rast) do rast
-        unpin_memory(rast.pinned_image)
-    end
+    finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
 end
 
