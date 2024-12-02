@@ -17,7 +17,7 @@ function main()
         pages=[
             "Home" => "index.md",
             "API" => "api.md",
-            "Examples" => "examples.md",
+            # "Examples" => "examples.md",
         ],
     )
     if ci

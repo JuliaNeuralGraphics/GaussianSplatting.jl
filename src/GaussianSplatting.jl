@@ -87,11 +87,12 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
 
     dataset = ColmapDataset(kab, dataset_path;
         scale, train_test_split=0.9, permute=false)
-    camera = dataset.test_cameras[1]
+    # camera = dataset.test_cameras[1]
+    camera = dataset.train_cameras[1]
 
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgb)
+        antialias=false, fused=true, mode=:rgbd)
 
     opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)

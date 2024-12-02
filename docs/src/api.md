@@ -1,6 +1,6 @@
 # API
 
-### Loading COLMAP dataset
+## Loading COLMAP dataset
 
 GaussianSplatting.jl supports datasets in **binary** COLMAP format.
 To load it, you specify which GPU backend to use and a path to the dataset root directory.
@@ -32,7 +32,7 @@ Additionally, if setting `scale > 1`, following directories should exist:
 - images_<scale>/
 ```
 
-### Initializing Gaussians from dataset
+## Initializing Gaussians from dataset
 
 Once you load the dataset, you can initialize Gaussian model from it by
 providing an array of `points` (means), their `colors` and `scales`.
@@ -48,7 +48,7 @@ gaussians = GSP.GaussianModel(
     Set `0` to disable it. This will be used by during training to limit
     current spherical-harmonics degree.
 
-### Rendering Gaussians
+## Rendering Gaussians
 
 To render Gaussians, we first need to initialize rasterizer on the given GPU backend:
 
@@ -84,6 +84,47 @@ host_image_features = Array(image_features)
 save("image.png", GSP.to_image(@view(host_image_features[1:3, :, :])))
 ```
 
-Example of rendering newly initialized gaussians (bicycle dataset):
+If the rasterizer is in `:rgbd` mode, we can also save the resulting depth map:
+```julia
+if rasterizer.mode == :rgbd
+    depth_image = permutedims(@view(host_image_features[4, :, :]), (2, 1))
+    depth_image ./= 50f0 # maximum(depth_image)
+    clamp01!(depth_image)
+    save("depth.png", colorview(Gray, depth_image))
+end
+```
 
-![](res/init.png)
+Example of rendering gaussians (bicycle dataset after 400 training steps):
+
+|RGB|Depth|
+|:---:|:---:|
+|![](res/bicycle-400.png)|![](res/bicycle-depth-400.png)|
+
+## Training Gaussians
+
+GaussianSplatting.jl implements a `Trainer` that handles training routines
+such as loss computation, gradient update, model densification/pruning.
+
+To construct a trainer pass:
+- `gaussians::GaussianModel` that you want to train,
+- `rasterizer::GaussianRasterizer` which it will use for rendering,
+- `dataset::ColmapDataset` on which to train,
+- `opt_params::OptimizationParams` that control learning rate (and its decay),
+  densification and SSIM loss weighting.
+
+```julia
+opt_params = GSP.OptimizationParams() # Use default parameters.
+trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
+```
+
+To perform a single optimization step, just call `step!` on a trainer.
+```julia
+loss = step!(trainer)
+```
+
+If the dataset contains test data (e.g. `train_test_split < 1`),
+you can call `validate` to obtain validation metrics (SSIM, MSE, PSNR)
+accross test data:
+```julia
+(; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
+```
