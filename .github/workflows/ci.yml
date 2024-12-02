@@ -16,19 +16,16 @@ jobs:
       statuses: write
     runs-on: ubuntu-latest
     steps:
+      - uses: coactions/setup-xvfb@v1
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1'
       - uses: julia-actions/cache@v2
       - name: Install dependencies
-        uses: coactions/setup-xvfb@v1
-        with:
-          run: julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+        run: julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
       - name: Build and deploy
-        uses: coactions/setup-xvfb@v1
-        with:
-          run: julia --project=docs/ docs/make.jl
+        run: julia --project=docs/ docs/make.jl
         env:
           DISPLAY: :0
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # If authenticating with GitHub Actions token
