@@ -28,4 +28,5 @@ function main()
         )
     end
 end
+
 isinteractive() || main()
