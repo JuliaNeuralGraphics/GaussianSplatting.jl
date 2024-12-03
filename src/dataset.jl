@@ -23,9 +23,9 @@ function ColmapDataset(kab,
     dataset_dir::String; scale::Int = 1, train_test_split::Real = 0.8,
     permute::Bool = true,
 )
-    cameras_file = joinpath(dataset_dir, "sparse/0/cameras.bin")
-    images_file = joinpath(dataset_dir, "sparse/0/images.bin")
-    points_file = joinpath(dataset_dir, "sparse/0/points3D.bin")
+    cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
+    images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
+    points_file = joinpath(dataset_dir, "sparse", "0", "points3D.bin")
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(kab;
         cameras_file, images_file, points_file,
