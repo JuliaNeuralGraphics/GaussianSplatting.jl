@@ -69,11 +69,11 @@ include("gui/gui.jl")
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
 
-record_memory(kab) = return false
+with_caching_allocator(f, kab, alloc_name::Symbol, args...; kwargs...) = f(args...)
 
-record_memory!(kab, v::Bool; kwargs...) = return
+with_no_caching(f, kab) = f()
 
-remove_record!(kab, x) = return
+invalidate_caching_allocator!(kab, alloc_name::Symbol) = return
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 

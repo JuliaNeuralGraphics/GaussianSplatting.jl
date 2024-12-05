@@ -32,11 +32,9 @@ function render(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
-
-        do_record = record_memory(kab)
-        do_record && record_memory!(kab, false; free=false)
-        rast.bstate = BinningState(kab, n_rendered)
-        do_record && record_memory!(kab, true)
+        rast.bstate = with_no_caching(kab) do
+            BinningState(kab, n_rendered)
+        end
     end
 
     # For each instance to be rendered, produce [tile | depth] key

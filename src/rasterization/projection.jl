@@ -23,11 +23,9 @@ function project(
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-
-        do_record = record_memory(kab)
-        do_record && record_memory!(kab, false; free=false)
-        rast.gstate = GeometryState(kab, n; extended=rast.mode == :rgbd)
-        do_record && record_memory!(kab, true)
+        rast.gstate = with_no_caching(kab) do
+            GeometryState(kab, n; extended=rast.mode == :rgbd)
+        end
     end
 
     project!(kab)(

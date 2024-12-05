@@ -175,37 +175,37 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     kab = get_backend(rast)
-    record_memory!(kab, true)
+    loss = with_caching_allocator(kab, :train_step, θ, trainer.optimizers) do θ, optimizers
+        loss, ∇ = Zygote.withgradient(
+            θ...,
+        ) do means_3d, features_dc, features_rest, opacities, scales, rotations
+            image_features = rast(
+                means_3d, opacities, scales, rotations, features_dc, features_rest;
+                camera, sh_degree=gs.sh_degree, background)
 
-    loss, ∇ = Zygote.withgradient(
-        θ...,
-    ) do means_3d, features_dc, features_rest, opacities, scales, rotations
-        image_features = rast(
-            means_3d, opacities, scales, rotations, features_dc, features_rest;
-            camera, sh_degree=gs.sh_degree, background)
+            image = if rast.mode == :rgbd
+                image_features[1:3, :, :]
+            else
+                image_features
+            end
 
-        image = if rast.mode == :rgbd
-            image_features[1:3, :, :]
-        else
-            image_features
+            # From (c, w, h) to (w, h, c, 1) for SSIM.
+            image_tmp = permutedims(image, (2, 3, 1))
+            image_eval = reshape(image_tmp, size(image_tmp)..., 1)
+
+            l1 = mean(abs.(image_eval .- target_image))
+            s = 1f0 - ssim(image_eval, target_image)
+            (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
         end
 
-        # From (c, w, h) to (w, h, c, 1) for SSIM.
-        image_tmp = permutedims(image, (2, 3, 1))
-        image_eval = reshape(image_tmp, size(image_tmp)..., 1)
-
-        l1 = mean(abs.(image_eval .- target_image))
-        s = 1f0 - ssim(image_eval, target_image)
-        (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+        # Apply gradients.
+        for i in 1:length(θ)
+            θᵢ = θ[i]
+            isempty(θᵢ) && continue
+            NU.step!(optimizers[i], θᵢ, ∇[i]; dispose=false)
+        end
+        return loss
     end
-
-    # Apply gradients.
-    for i in 1:length(θ)
-        θᵢ = θ[i]
-        isempty(θᵢ) && continue
-        NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=false)
-    end
-    record_memory!(kab, false; sync=false)
 
     if trainer.densify && trainer.step ≤ params.densify_until_iter
         update_stats!(gs, rast.gstate.radii,
@@ -214,6 +214,8 @@ function step!(trainer::Trainer)
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0
         if do_densify
+            invalidate_caching_allocator!(kab, :train_step)
+
             max_screen_size::Int32 =
                 trainer.step > params.opacity_reset_interval ? 20 : 0
             densify_and_prune!(gs, trainer.optimizers;
@@ -226,7 +228,6 @@ function step!(trainer::Trainer)
             reset_opacity!(trainer)
         end
     end
-
     return loss
 end
 
