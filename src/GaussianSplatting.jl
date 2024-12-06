@@ -62,6 +62,7 @@ include("camera_opt.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
+include("densification.jl")
 include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
@@ -133,7 +134,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
             loss, eval_ssim, eval_mse, eval_psnr = round.(
                 (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
-            println("i=$i | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
+            println("i=$i | gaussians=$(length(gaussians)) | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
         end
     end
     t2 = time()
