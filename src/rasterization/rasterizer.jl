@@ -207,13 +207,10 @@ function rasterize(
     kab = get_backend(rast)
     n = size(means_3d, 2)
     if length(rast.gstate) < n
-        # @info "[rast.gstate] resize: $(length(rast.gstate)) -> $n"
         KA.unsafe_free!(rast.gstate)
-
-        do_record = record_memory(kab)
-        do_record && record_memory!(kab, false; free=false)
-        rast.gstate = GeometryState(kab, n; extended=render_depth)
-        do_record && record_memory!(kab, true)
+        rast.gstate = with_no_caching(kab) do
+            GeometryState(kab, n; extended=render_depth)
+        end
     end
 
     (; width, height) = resolution(camera)
@@ -277,13 +274,10 @@ function rasterize(
     n_rendered == 0 && return rast.image
 
     if length(rast.bstate) < n_rendered
-        # @info "[rast.bstate] resize: $(length(rast.bstate)) -> $n_rendered"
         KA.unsafe_free!(rast.bstate)
-
-        do_record = record_memory(kab)
-        do_record && record_memory!(kab, false; free=false)
-        rast.bstate = BinningState(kab, n_rendered)
-        do_record && record_memory!(kab, true)
+        rast.bstate = with_no_caching(kab) do
+            BinningState(kab, n_rendered)
+        end
     end
 
     # For each instance to be rendered, produce [tile | depth] key

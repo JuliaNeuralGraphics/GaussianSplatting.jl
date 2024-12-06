@@ -62,6 +62,7 @@ include("camera_opt.jl")
 include("dataset.jl")
 
 include("gaussians.jl")
+include("densification.jl")
 include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
@@ -69,11 +70,11 @@ include("gui/gui.jl")
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
 
-record_memory(kab) = return false
+with_caching_allocator(f, kab, alloc_name::Symbol, args...; kwargs...) = f(args...)
 
-record_memory!(kab, v::Bool; kwargs...) = return
+with_no_caching(f, kab) = f()
 
-remove_record!(kab, x) = return
+invalidate_caching_allocator!(kab, alloc_name::Symbol) = return
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
@@ -87,8 +88,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
 
     dataset = ColmapDataset(kab, dataset_path;
         scale, train_test_split=0.9, permute=false)
-    # camera = dataset.test_cameras[1]
-    camera = dataset.train_cameras[1]
+    camera = dataset.test_cameras[1]
 
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -134,7 +134,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
             loss, eval_ssim, eval_mse, eval_psnr = round.(
                 (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
-            println("i=$i | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
+            println("i=$i | gaussians=$(length(gaussians)) | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
         end
     end
     t2 = time()
