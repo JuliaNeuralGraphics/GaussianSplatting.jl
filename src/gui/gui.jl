@@ -334,7 +334,7 @@ function handle_ui!(gui::GSGUI; frame_time)
                 CImGui.EndTabItem()
             end
 
-            if CImGui.BeginTabItem("Save/Load")
+            if gui.trainer ≢ nothing && CImGui.BeginTabItem("Save/Load")
                 CImGui.Text("Path to Save Directory:")
 
                 CImGui.PushItemWidth(-1)
@@ -347,7 +347,7 @@ function handle_ui!(gui::GSGUI; frame_time)
                     isdir(save_dir) || mkpath(save_dir)
 
                     tstmp = now()
-                    fmt = "timestamp-$(month(tstmp))-$(day(tstmp))-$(hour(tstmp)):$(minute(tstmp))"
+                    fmt = "timestamp-$(month(tstmp))M-$(day(tstmp))D-$(hour(tstmp)):$(minute(tstmp))"
                     save_file = joinpath(save_dir, "state-(step-$(gui.trainer.step))-($fmt).bson")
                     save_state(gui.trainer, save_file)
                 end

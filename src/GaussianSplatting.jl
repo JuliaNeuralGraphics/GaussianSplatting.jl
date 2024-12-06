@@ -6,7 +6,6 @@ using ChainRulesCore
 using Dates
 using Distributions
 using GPUArraysCore: @allowscalar
-using GPUCompiler: @device_code
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using KernelAbstractions.Extras: @unroll
@@ -134,7 +133,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
             loss, eval_ssim, eval_mse, eval_psnr = round.(
                 (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
-            println("i=$i | gaussians=$(length(gaussians)) | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
+            println("i=$i | N Gaussians: $(length(gaussians)) | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
         end
     end
     t2 = time()
@@ -148,28 +147,30 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
     return
 end
 
-function gui(
-    dataset_path::String; scale::Int, fullscreen::Bool = false,
-)
+function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false)
+    ispath(path) || error("Path does not exist: `$path`.")
+
+    viewer_mode = endswith(path, ".bson")
+    !viewer_mode && !isdir(path) && error(
+        "`path` must be either a `.bson` model checkpoint or " *
+        "a directory with COLMAP dataset, instead: `$path`.")
+    !viewer_mode && scale ≡ nothing && error(
+        "`scale` keyword argument must be specified if `path` is a COLMAP dataset.")
+
     width, height, resizable = fullscreen ?
         (-1, -1, false) :
         (1024, 1024, true)
 
-    gui = GSGUI(dataset_path, scale; width, height, fullscreen, resizable)
-    gui |> launch!
-    return
-end
+    gui = if viewer_mode
+        θ = BSON.load(path)
+        gaussians = GaussianModel(gpu_backend())
+        set_from_bson!(gaussians, θ[:gaussians])
+        camera = θ[:camera]
 
-function gui(model_path::String, camera::Camera; fullscreen::Bool = false)
-    width, height, resizable = fullscreen ?
-        (-1, -1, false) :
-        (1024, 1024, true)
-
-    gaussians = GaussianModel(gpu_backend())
-    θ = BSON.load(model_path)
-    set_from_bson!(gaussians, θ[:gaussians])
-
-    gui = GSGUI(gaussians, camera; width, height, fullscreen, resizable)
+        GSGUI(gaussians, camera; width, height, fullscreen, resizable)
+    else
+        GSGUI(path, scale; width, height, fullscreen, resizable)
+    end
     gui |> launch!
     return
 end

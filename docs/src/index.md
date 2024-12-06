@@ -38,6 +38,18 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
    julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
    ```
 
+## Viewer mode
+
+Once you've trained a model and saved it to `.bson` file you can open it
+in a viewer-only mode by providing its path.
+
+```julia
+julia> GaussianSplatting.gui("path-to-checkpoint.bson")
+```
+
+Alternative, you can load a checkpoint
+in a training mode (see **Usage** section) using "Save/Load" tab.
+
 ## GPU selection
 
 This is required only the first time per the environment.

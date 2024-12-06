@@ -75,10 +75,12 @@ function save_state(trainer::Trainer, filename::String)
         scales=bson_params(trainer.optimizers.scales),
         rotations=bson_params(trainer.optimizers.rotations))
 
+    camera = trainer.dataset.train_cameras[1]
     BSON.bson(filename, Dict(
         :gaussians => bson_params(trainer.gaussians),
         :optimizers => optimizers,
         :step => trainer.step,
+        :camera => camera,
     ))
     return
 end
