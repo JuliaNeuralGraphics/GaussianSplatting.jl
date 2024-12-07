@@ -118,7 +118,21 @@ function to_image(r::GaussianRasterizer)
     return colorview(RGB, permutedims(host_image, (1, 3, 2)))
 end
 
+function to_depth(r::GaussianRasterizer)
+    depth_image = transpose(Array(r.image)[4, :, :])
+    depth_image .*= 1f0 / 50f0
+    clamp01!(depth_image)
+    return colorview(Gray, depth_image)
+end
+
 to_image(x) = colorview(RGB, permutedims(clamp01!(x), (1, 3, 2)))
+
+function to_depth(x)
+    depth_image = transpose(x)
+    depth_image .*= 1f0 / 50f0
+    clamp01!(depth_image)
+    return colorview(Gray, depth_image)
+end
 
 function (rast::GaussianRasterizer)(
     means_3d::AbstractMatrix{Float32},

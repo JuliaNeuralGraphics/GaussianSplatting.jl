@@ -175,9 +175,7 @@ function loop!(capture_mode::CaptureMode; gui)
         frame = if mode == 0 # Render color.
             to_image(gui.rasterizer)
         elseif mode == 1 # Render depth.
-            to_depth(gui.rasterizer; normalize=true)
-        elseif mode == 2 # Render uncertainty.
-            to_uncertainty(gui.rasterizer)
+            to_depth(gui.rasterizer)
         end .|> RGB{N0f8}
 
         save_dir = unsafe_string(pointer(capture_mode.save_dir))

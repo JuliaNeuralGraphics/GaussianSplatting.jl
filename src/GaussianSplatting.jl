@@ -124,10 +124,8 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             # write(writer, RGB{N0f8}.(to_image(@view(host_image_features[1:3, :, :]))))
 
             if rasterizer.mode == :rgbd
-                depth_image = permutedims(host_image_features[4, :, :], (2, 1))
-                depth_image ./= 50f0 # maximum(depth_image)
-                clamp01!(depth_image)
-                save("depth-$(trainer.step).png", colorview(Gray, depth_image))
+                depth_image = to_depth(host_image_features[4, :, :])
+                save("depth-$(trainer.step).png", depth_image)
             end
 
             (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
