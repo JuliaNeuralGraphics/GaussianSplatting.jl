@@ -52,7 +52,7 @@ GaussianSplattingAMDGPUExt = "AMDGPU"
 GaussianSplattingCUDAExt = ["CUDA", "cuDNN"]
 
 [compat]
-AMDGPU = "1.1.4"
+AMDGPU = "1.1.5"
 Adapt = "4"
 Atomix = "0.1.0"
 BSON = "0.3"
