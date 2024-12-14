@@ -32,9 +32,7 @@ function render(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
-        rast.bstate = with_no_caching(kab) do
-            BinningState(kab, n_rendered)
-        end
+        rast.bstate = GPUArrays.@no_cache_scope kab BinningState(kab, n_rendered)
     end
 
     # For each instance to be rendered, produce [tile | depth] key

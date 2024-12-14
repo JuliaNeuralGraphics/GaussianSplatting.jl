@@ -6,6 +6,7 @@ using ChainRulesCore
 using Dates
 using Distributions
 using GPUArraysCore: @allowscalar
+using GPUArrays
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using KernelAbstractions.Extras: @unroll
@@ -68,12 +69,6 @@ include("gui/gui.jl")
 
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
-
-with_caching_allocator(f, kab, alloc_name::Symbol, args...; kwargs...) = f(args...)
-
-with_no_caching(f, kab) = f()
-
-invalidate_caching_allocator!(kab, alloc_name::Symbol) = return
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 

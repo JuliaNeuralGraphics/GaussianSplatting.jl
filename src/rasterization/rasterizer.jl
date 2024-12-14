@@ -222,9 +222,7 @@ function rasterize(
     n = size(means_3d, 2)
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = with_no_caching(kab) do
-            GeometryState(kab, n; extended=render_depth)
-        end
+        rast.gstate = GPUArrays.@no_cache_scope kab GeometryState(kab, n; extended=render_depth)
     end
 
     (; width, height) = resolution(camera)
@@ -289,9 +287,7 @@ function rasterize(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
-        rast.bstate = with_no_caching(kab) do
-            BinningState(kab, n_rendered)
-        end
+        rast.bstate = GPUArrays.@no_cache_scope kab BinningState(kab, n_rendered)
     end
 
     # For each instance to be rendered, produce [tile | depth] key
