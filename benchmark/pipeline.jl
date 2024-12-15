@@ -1,3 +1,5 @@
+using AMDGPU
+using GaussianSplatting.GPUArrays
 import GaussianSplatting as GSP
 
 function main(dataset_path::String; scale::Int)
@@ -23,7 +25,11 @@ function main(dataset_path::String; scale::Int)
     println("Warmup for `$warmup_steps` steps:")
     @time for i in 1:warmup_steps
         GSP.step!(trainer)
+        cache_sz = sizeof(GPUArrays.cache_allocator(kab), AMDGPU.device(), :train_step)
+        @show Base.format_bytes(cache_sz)
+        break
     end
+    return
 
     println("Benchmark for `$n_steps` steps:")
     @time for i in 1:n_steps
