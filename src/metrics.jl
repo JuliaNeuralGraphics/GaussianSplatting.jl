@@ -26,15 +26,30 @@ end
 
 # Inputs are in (W, H, C, B) format.
 function (ssim::SSIM)(x::T, ref::T) where T
-    μ₁, μ₂ = ssim.window(x), ssim.window(ref)
+    w, cdims = ssim.window.weight, Flux.conv_dims(ssim.window, x)
+    μ₁, μ₂ = conv_no_weight(x, w, cdims), conv_no_weight(ref, w, cdims)
     μ₁², μ₂² = μ₁.^2, μ₂.^2
     μ₁₂ = μ₁ .* μ₂
 
-    σ₁² = ssim.window(x.^2) .- μ₁²
-    σ₂² = ssim.window(ref.^2) .- μ₂²
-    σ₁₂ = ssim.window(x .* ref) .- μ₁₂
+    σ₁² = conv_no_weight(x.^2, w, cdims) .- μ₁²
+    σ₂² = conv_no_weight(ref.^2, w, cdims) .- μ₂²
+    σ₁₂ = conv_no_weight(x .* ref, w, cdims) .- μ₁₂
 
     l = ((2f0 .* μ₁₂ .+ ssim.c1) .* (2f0 .* σ₁₂ .+ ssim.c2)) ./
         ((μ₁² .+ μ₂² .+ ssim.c1) .* (σ₁² .+ σ₂² .+ ssim.c2))
     return mean(l)
+end
+
+# Define wrapper function around `Flux.conv` and `rrule` for it
+# to avoid computing gradient w.r.t. conv's weight, since it is not trainable.
+# This is because Zygote eventually unthunks all thunks :(
+# https://github.com/FluxML/Zygote.jl/blob/9b6dd0803441a874f6afdbdfa61e27c2b9b1b097/src/compiler/chainrules.jl#L110
+conv_no_weight(x, w, cdims; kwargs...) = Flux.conv(x, w, cdims; kwargs...)
+
+function ChainRulesCore.rrule(::typeof(conv_no_weight), x, w, cdims; kwargs...)
+    function _pullback(Δ)
+        ∇x = Flux.∇conv_data(ChainRulesCore.unthunk(Δ), w, cdims, kwargs...)
+        return (NoTangent(), ∇x, NoTangent(), NoTangent())
+    end
+    return conv_no_weight(x, w, cdims; kwargs...), _pullback
 end
