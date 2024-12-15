@@ -1,5 +1,3 @@
-using AMDGPU
-using GaussianSplatting.GPUArrays
 import GaussianSplatting as GSP
 
 function main(dataset_path::String; scale::Int)
