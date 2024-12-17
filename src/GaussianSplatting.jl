@@ -6,6 +6,7 @@ using ChainRulesCore
 using Dates
 using Distributions
 using GPUArraysCore: @allowscalar
+using GPUArrays
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using KernelAbstractions.Extras: @unroll
@@ -68,12 +69,6 @@ include("gui/gui.jl")
 
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
-
-with_caching_allocator(f, kab, alloc_name::Symbol, args...; kwargs...) = f(args...)
-
-with_no_caching(f, kab) = f()
-
-invalidate_caching_allocator!(kab, alloc_name::Symbol) = return
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
@@ -170,6 +165,23 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
         GSGUI(path, scale; width, height, fullscreen, resizable)
     end
     gui |> launch!
+    return
+end
+
+function tt()
+    kab = gpu_backend()
+    @info "Using `$kab` GPU backend."
+
+    c = adapt(kab, Flux.Conv((11, 11), 3 => 3;
+        pad=(11 ÷ 2, 11 ÷ 2), groups=3, bias=false))
+    x = adapt(kab, rand(Float32, 1248, 832, 3, 1))
+
+    w = c.weight
+    cdims = Flux.conv_dims(c, x)
+    Zygote.gradient(x) do x
+        sum(Flux.conv(x, w, cdims)) # FIXME allocates a lot in ∇conv_weight!!!
+        # sum(conv_no_weight(x, w, cdims))
+    end
     return
 end
 
