@@ -215,8 +215,7 @@ function step!(trainer::Trainer)
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0
         if do_densify
-            GPUArrays.invalidate_cache_allocator!(
-                GPUArrays.cache_allocator(kab), :train_step)
+            GPUArrays.invalidate_cache_allocator!(kab, :train_step)
 
             max_screen_size::Int32 =
                 trainer.step > params.opacity_reset_interval ? 20 : 0
