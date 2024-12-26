@@ -114,7 +114,7 @@ function ChainRulesCore.rrule(::typeof(project),
         radius_clip, blur_ϵ)
 
     function _project_pullback(Ω)
-        vmeans_2d, vconics, vcompensations, vdepths = Ω
+        vmeans_2d, vconics, vcompensations, vdepths = unthunk(Ω)
         ∇ = ∇project(
             vmeans_2d, vconics, vcompensations, vdepths,
             means_3d, scales, rotations, compensations, conics;

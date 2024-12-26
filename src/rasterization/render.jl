@@ -151,7 +151,7 @@ function ChainRulesCore.rrule(::typeof(render),
         rast, camera, background, depths)
     function _render_pullback(vpixels)
         ∇ = ∇render(
-            vpixels, means_2d, conics, opacities, colors;
+            unthunk(vpixels), means_2d, conics, opacities, colors;
             rast, camera, background)
         return (NoTangent, ∇...)
     end

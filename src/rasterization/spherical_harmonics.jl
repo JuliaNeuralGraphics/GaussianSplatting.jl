@@ -51,7 +51,7 @@ function ChainRulesCore.rrule(::typeof(spherical_harmonics),
 )
     colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
     function _spherical_harmonics_pullback(vcolors)
-        ∇ = ∇spherical_harmonics(vcolors, means_3d, shs; rast, camera, sh_degree)
+        ∇ = ∇spherical_harmonics(unthunk(vcolors), means_3d, shs; rast, camera, sh_degree)
         return (NoTangent(), ∇...)
     end
     return colors, _spherical_harmonics_pullback

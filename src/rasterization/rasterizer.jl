@@ -483,7 +483,8 @@ function ChainRulesCore.rrule(::typeof(rasterize),
 
     function _pullback(vpixels)
         ∇ = ∇rasterize(
-            vpixels, means_3d, shs, scales, rotations, opacities,
+            unthunk(vpixels),
+            means_3d, shs, scales, rotations, opacities,
             rast.gstate.radii, R_w2c, t_w2c; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end
