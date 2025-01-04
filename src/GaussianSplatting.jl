@@ -168,21 +168,4 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
     return
 end
 
-function tt()
-    kab = gpu_backend()
-    @info "Using `$kab` GPU backend."
-
-    c = adapt(kab, Flux.Conv((11, 11), 3 => 3;
-        pad=(11 ÷ 2, 11 ÷ 2), groups=3, bias=false))
-    x = adapt(kab, rand(Float32, 1248, 832, 3, 1))
-
-    w = c.weight
-    cdims = Flux.conv_dims(c, x)
-    Zygote.gradient(x) do x
-        sum(Flux.conv(x, w, cdims)) # FIXME allocates a lot in ∇conv_weight!!!
-        # sum(conv_no_weight(x, w, cdims))
-    end
-    return
-end
-
 end
