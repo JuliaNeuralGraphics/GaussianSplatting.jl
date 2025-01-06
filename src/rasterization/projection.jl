@@ -23,7 +23,7 @@ function project(
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = GPUArrays.@no_cache_scope GeometryState(kab, n; extended=rast.mode == :rgbd)
+        rast.gstate = GPUArrays.AllocCache.@disable GeometryState(kab, n; extended=rast.mode == :rgbd)
     end
 
     project!(kab)(

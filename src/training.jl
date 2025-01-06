@@ -177,7 +177,9 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     kab = get_backend(rast)
-    GPUArrays.@cache_scope kab :train_step begin
+    AT = typeof(gs.points)
+
+    GPUArrays.AllocCache.@enable AT :train_step begin
         loss, ∇ = Zygote.withgradient(
             θ...,
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations
@@ -215,7 +217,7 @@ function step!(trainer::Trainer)
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0
         if do_densify
-            GPUArrays.invalidate_cache_allocator!(kab, :train_step)
+            GPUArrays.AllocCache.invalidate!(AT, :train_step)
 
             max_screen_size::Int32 =
                 trainer.step > params.opacity_reset_interval ? 20 : 0
