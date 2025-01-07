@@ -25,6 +25,10 @@ function Trainer(
     rast::GaussianRasterizer, gs::GaussianModel,
     dataset::ColmapDataset, opt_params::OptimizationParams;
 )
+    # If we are going to use trainer, invalidate its alloc cache.
+    AT = typeof(gs.points)
+    GPUArrays.AllocCache.invalidate!(AT, :train_step)
+
     ϵ = 1f-15
     kab = get_backend(gs)
     camera_extent = dataset.camera_extent

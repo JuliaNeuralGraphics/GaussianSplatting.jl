@@ -6,6 +6,9 @@ function render(
     rast::GaussianRasterizer, camera::Camera, background::SVector{3, Float32},
     # Used only for sorting.
     depths::AbstractVector{Float32},
+
+    covisibilities::Maybe{AbstractVector{Bool}} = nothing,
+    uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     kab = get_backend(rast)
     n = size(means_2d, 2)
@@ -78,6 +81,7 @@ function render(
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
         image, rast.istate.n_contrib, rast.istate.accum_α,
+        covisibilities, uncertainties,
         # Inputs.
         rast.bstate.gaussian_values_sorted,
         _as_T(SVector{2, Float32}, means_2d),
@@ -145,10 +149,13 @@ function ChainRulesCore.rrule(::typeof(render),
     colors::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera, background::SVector{3, Float32},
     depths::AbstractVector{Float32},
+
+    covisibilities::Maybe{AbstractVector{Bool}} = nothing,
+    uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     image = render(
         means_2d, conics, opacities, colors;
-        rast, camera, background, depths)
+        rast, camera, background, depths, covisibilities, uncertainties)
     function _render_pullback(vpixels)
         ∇ = ∇render(
             unthunk(vpixels), means_2d, conics, opacities, colors;
@@ -163,6 +170,9 @@ end
     out_color::AbstractArray{Float32, 3},
     n_contrib::AbstractMatrix{UInt32},
     accum_α::AbstractMatrix{Float32},
+
+    covisibilities::C,
+    uncertainties::U,
     # Input.
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
@@ -175,7 +185,11 @@ end
     background::SVector{channels, Float32},
     block::SVector{2, Int32},
     ::Val{block_size},
-) where {block_size, channels}
+) where {
+    block_size, channels,
+    C <: Maybe{AbstractVector{Bool}},
+    U <: Maybe{AbstractMatrix{Float32}},
+}
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
     ridx = @index(Local)         # ≡ thread_rank
@@ -215,6 +229,7 @@ end
     last_contributor = 0u32
 
     color = zeros(MVector{channels, Float32})
+    uncertainty = 0f0 # Computed if `uncertainties ≢ nothing`.
     for round in 0i32:(rounds - 1i32)
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
@@ -258,6 +273,11 @@ end
                 color[c] += feature[c] * α * T
             end
 
+            U !== Nothing && (uncertainty += α * T)
+            # Since we are processing Gaussians front-to-back,
+            # mark visible only until cummulative opacity is > 0.5.
+            C !== Nothing && T > 0.5f0 && (covisibilities[gaussian_id] = true)
+
             # Keep track of last range entry to update this pixel.
             T = T_tmp
             last_contributor = contributor
@@ -272,6 +292,7 @@ end
         @unroll for c in 1i32:channels
             out_color[c, px, py] = color[c] + T * background[c]
         end
+        U !== Nothing && (uncertainties[px, py] = uncertainty)
     end
 end
 

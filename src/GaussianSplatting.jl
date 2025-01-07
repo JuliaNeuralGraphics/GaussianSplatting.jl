@@ -86,7 +86,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
 
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgbd)
+        antialias=false, fused=false, mode=:rgbd)
 
     opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
@@ -94,6 +94,9 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
     @info "N train images: $(length(dataset.train_cameras))"
     @info "N test images: $(length(dataset.test_cameras))"
+
+    width, height = camera.intrinsics.resolution
+    uncertainties = adapt(kab, zeros(Float32, width, height))
 
     # res = resolution(camera)
     # writer = open_video_out(
@@ -111,7 +114,12 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             image_features = rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
-                camera, sh_degree=gaussians.sh_degree)
+                camera, sh_degree=gaussians.sh_degree, uncertainties)
+
+            uncertainties_h = Array(uncertainties)
+            uncertainties_image = colorview(Gray, clamp01!(transpose(uncertainties_h)))
+            save("uncertainties-$(trainer.step).png", uncertainties_image)
+            fill!(uncertainties, 0f0)
 
             host_image_features = Array(image_features)
             save("image-$(trainer.step).png",

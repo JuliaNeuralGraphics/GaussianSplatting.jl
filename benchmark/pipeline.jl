@@ -31,4 +31,4 @@ function main(dataset_path::String; scale::Int)
     end
     return
 end
-main("/home/pxl-th/Downloads/360_v2/bicycle"; scale=4)
+main("/home/pxlth/Downloads/360_v2/bicycle"; scale=4)
