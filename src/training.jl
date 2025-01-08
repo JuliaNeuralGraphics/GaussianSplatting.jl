@@ -4,6 +4,7 @@ mutable struct Trainer{
     G <: GaussianModel,
     D <: ColmapDataset,
     S <: SSIM,
+    C <: GPUArrays.AllocCache,
     F,
     O,
 }
@@ -12,6 +13,8 @@ mutable struct Trainer{
     dataset::D
     optimizers::O
     ssim::S
+
+    cache::C
 
     points_lr_scheduler::F
     opt_params::OptimizationParams
@@ -25,13 +28,11 @@ function Trainer(
     rast::GaussianRasterizer, gs::GaussianModel,
     dataset::ColmapDataset, opt_params::OptimizationParams;
 )
-    # If we are going to use trainer, invalidate its alloc cache.
-    AT = typeof(gs.points)
-    GPUArrays.AllocCache.invalidate!(AT, :train_step)
-
     ϵ = 1f-15
     kab = get_backend(gs)
     camera_extent = dataset.camera_extent
+
+    cache = GPUArrays.AllocCache(base_array_type(kab))
 
     optimizers = (;
         points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * camera_extent, ϵ),
@@ -51,7 +52,7 @@ function Trainer(
     densify = true
     step = 0
     Trainer(
-        rast, gs, dataset, optimizers, ssim,
+        rast, gs, dataset, optimizers, ssim, cache,
         points_lr_scheduler, opt_params, densify, step, ids)
 end
 
@@ -181,9 +182,7 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     kab = get_backend(rast)
-    AT = typeof(gs.points)
-
-    GPUArrays.AllocCache.@enable AT :train_step begin
+    GPUArrays.@enable trainer.cache begin
         loss, ∇ = Zygote.withgradient(
             θ...,
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations
@@ -221,7 +220,7 @@ function step!(trainer::Trainer)
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0
         if do_densify
-            GPUArrays.AllocCache.invalidate!(AT, :train_step)
+            GPUArrays.unsafe_free!(trainer.cache)
 
             max_screen_size::Int32 =
                 trainer.step > params.opacity_reset_interval ? 20 : 0

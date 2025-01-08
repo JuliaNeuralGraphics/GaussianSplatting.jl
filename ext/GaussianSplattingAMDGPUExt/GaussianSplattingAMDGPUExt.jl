@@ -8,6 +8,8 @@ using GaussianSplatting
 # using Statistics
 # using Zygote
 
+GaussianSplatting.base_array_type(::ROCBackend) = ROCArray
+
 GaussianSplatting.use_ak(::ROCBackend) = true
 
 function GaussianSplatting.allocate_pinned(kab, ::Type{T}, shape) where T

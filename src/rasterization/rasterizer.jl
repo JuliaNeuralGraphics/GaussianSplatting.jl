@@ -226,7 +226,7 @@ function rasterize(
     n = size(means_3d, 2)
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = GPUArrays.AllocCache.@disable GeometryState(kab, n; extended=render_depth)
+        rast.gstate = GPUArrays.@disable GeometryState(kab, n; extended=render_depth)
     end
 
     (; width, height) = resolution(camera)
@@ -291,7 +291,7 @@ function rasterize(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
-        rast.bstate = GPUArrays.AllocCache.@disable BinningState(kab, n_rendered)
+        rast.bstate = GPUArrays.@disable BinningState(kab, n_rendered)
     end
 
     # For each instance to be rendered, produce [tile | depth] key

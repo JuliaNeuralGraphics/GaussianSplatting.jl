@@ -9,6 +9,8 @@ using GaussianSplatting
 # using Statistics
 # using Zygote
 
+GaussianSplatting.base_array_type(::CUDABackend) = CuArray
+
 function GaussianSplatting.allocate_pinned(::CUDABackend, ::Type{T}, shape) where T
     x = Array{T}(undef, shape)
     buf = CUDA.register(CUDA.HostMemory, pointer(x), sizeof(x),

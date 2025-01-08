@@ -70,6 +70,8 @@ include("gui/gui.jl")
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
 
+base_array_type(backend) = error("Not implemented for backend: `$backend`.")
+
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
 unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
