@@ -31,8 +31,7 @@ function Trainer(
     ϵ = 1f-15
     kab = get_backend(gs)
     camera_extent = dataset.camera_extent
-
-    cache = GPUArrays.AllocCache(base_array_type(kab))
+    cache = GPUArrays.AllocCache()
 
     optimizers = (;
         points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * camera_extent, ϵ),
