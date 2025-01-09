@@ -182,7 +182,7 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     kab = get_backend(rast)
-    GPUArrays.@enable trainer.cache begin
+    GPUArrays.@cached trainer.cache begin
         loss, ∇ = Zygote.withgradient(
             θ...,
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations
