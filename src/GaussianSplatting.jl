@@ -86,9 +86,10 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
         scale, train_test_split=0.9, permute=false)
     camera = dataset.test_cameras[1]
 
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+        max_sh_degree=3, isotropic=false)
     rasterizer = GaussianRasterizer(kab, camera;
-        antialias=false, fused=false, mode=:rgbd)
+        antialias=false, fused=true, mode=:rgbd)
 
     opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)

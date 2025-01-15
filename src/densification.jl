@@ -14,12 +14,12 @@ function densify_and_prune!(gs::GaussianModel, optimizers;
 
     # Prune points that are too transparent, occupy too much space in image space
     # and have high scale in world space.
-    valid_mask = reshape(opacity_activation.(gs.opacities) .> min_opacity, :)
+    valid_mask = reshape(NU.sigmoid.(gs.opacities) .> min_opacity, :)
     if max_screen_size > 0
         γ = 0.1f0 * extent
         valid_mask .&=
             (gs.max_radii .< max_screen_size) .&&
-            reshape(maximum(scales_activation.(gs.scales); dims=1) .< γ, :)
+            reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)
     end
     prune_points!(gs, optimizers, valid_mask)
     return
@@ -33,7 +33,7 @@ function densify_clone!(gs::GaussianModel, optimizers;
     γ = extent * dense_percent
     mask =
         ∇means_2d .> grad_threshold .&&
-        reshape(maximum(scales_activation.(gs.scales); dims=1) .< γ, :)
+        reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)
 
     new_points = gs.points[:, mask]
     new_features_dc = gs.features_dc[:, :, mask]
@@ -75,14 +75,14 @@ function densify_split!(gs::GaussianModel, optimizers;
     γ = extent * dense_percent
     mask =
         padded_grad .≥ grad_threshold .&&
-        reshape(maximum(scales_activation.(gs.scales); dims=1) .> γ, :)
-    stds = repeat(scales_activation.(gs.scales)[:, mask], 1, n_split)
+        reshape(maximum(exp.(gs.scales); dims=1) .> γ, :)
+    stds = repeat(exp.(gs.scales)[:, mask], 1, n_split)
 
     new_points = repeat(gs.points[:, mask], 1, n_split)
     new_features_rest = isempty(gs.features_rest) ?
         gs.features_rest : repeat(gs.features_rest[:, :, mask], 1, 1, n_split)
     new_features_dc = repeat(gs.features_dc[:, :, mask], 1, 1, n_split)
-    new_scales = scales_inv_activation.(stds ./ (0.8f0 * n_split))
+    new_scales = log.(stds ./ (0.8f0 * n_split))
     new_rotations = repeat(gs.rotations[:, mask], 1, n_split)
     new_opacities = repeat(gs.opacities[:, mask], 1, n_split)
 
@@ -90,10 +90,12 @@ function densify_split!(gs::GaussianModel, optimizers;
 
     n_new_points = size(new_points, 2)
     if n_new_points > 0
+        isotropic = size(gs.scales, 1) == 1
         _add_split_noise!(kab)(
             reinterpret(SVector{3, Float32}, new_points),
             reinterpret(SVector{4, Float32}, new_rotations),
-            reinterpret(SVector{3, Float32}, stds); ndrange=n_new_points)
+            isotropic ? stds : reinterpret(SVector{3, Float32}, stds);
+            ndrange=n_new_points)
     end
     KA.unsafe_free!(stds)
 
@@ -120,10 +122,11 @@ end
 @kernel cpu=false inbounds=true function _add_split_noise!(points, rots, stds)
     i = @index(Global)
     σ = stds[i]
-    ξ = SVector{3, Float32}(
-        randn(Float32) * σ[1],
-        randn(Float32) * σ[2],
-        randn(Float32) * σ[3])
+    # ξ = SVector{3, Float32}(
+    #     randn(Float32) * σ[1],
+    #     randn(Float32) * σ[2],
+    #     randn(Float32) * σ[3])
+    ξ = σ .* SVector{3, Float32}(randn(Float32), randn(Float32), randn(Float32))
 
     q = rots[i]
     R = unnorm_quat2rot(q)

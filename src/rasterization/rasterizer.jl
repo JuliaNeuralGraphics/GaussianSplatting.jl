@@ -149,9 +149,9 @@ function (rast::GaussianRasterizer)(
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     # If rendering outside AD, use non-allocating path.
-    inplace = NNlib.within_gradient(means_3d)
+    within_AD = NNlib.within_gradient(means_3d)
 
-    shs = if inplace
+    shs = if within_AD
         isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
     else
         n_features = size(sh_color, 2) + size(sh_remainder, 2)
@@ -162,18 +162,26 @@ function (rast::GaussianRasterizer)(
         rshs
     end
 
-    opacities_act = if inplace
+    opacities_act = if within_AD
         NU.sigmoid.(opacities)
     else
         ropacities = cache!(rast, :opacities_act, size(opacities))
         ropacities .= NU.sigmoid.(opacities)
     end
 
-    scales_act = if inplace
-        exp.(scales)
+    isotropic = size(scales, 1) == 1
+    scales_act = if within_AD
+        exp.(isotropic ? vcat(scales, scales, scales) : scales)
     else
-        rscales = cache!(rast, :scales_act, size(scales))
-        rscales .= exp.(scales)
+        rscales = cache!(rast, :scales_act, (3, size(scales, 2)))
+        if isotropic
+            rscales[[1], :] .= exp.(scales)
+            rscales[2, :] .= rscales[1, :]
+            rscales[3, :] .= rscales[1, :]
+            rscales
+        else
+            rscales .= exp.(scales)
+        end
     end
 
     if rast.fused

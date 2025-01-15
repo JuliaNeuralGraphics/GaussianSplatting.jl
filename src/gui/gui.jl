@@ -160,7 +160,8 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams()
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales)
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+        isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
@@ -271,8 +272,8 @@ function handle_ui!(gui::GSGUI; frame_time)
                 )
 
                 CImGui.PushItemWidth(-100)
-                max_sh_degree = gui.gaussians.sh_degree
-                if CImGui.SliderInt(
+                max_sh_degree = gui.gaussians.max_sh_degree
+                if max_sh_degree > 0 && CImGui.SliderInt(
                     "SH degree", gui.ui_state.sh_degree,
                     -1, max_sh_degree, "%d / $max_sh_degree",
                 )

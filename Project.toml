@@ -52,7 +52,7 @@ GaussianSplattingAMDGPUExt = "AMDGPU"
 GaussianSplattingCUDAExt = ["CUDA", "cuDNN"]
 
 [compat]
-AMDGPU = "1.2.1"
+AMDGPU = "1.2.2"
 Adapt = "4"
 BSON = "0.3"
 BenchmarkTools = "1"
@@ -63,7 +63,7 @@ Distributions = "0.25"
 FileIO = "1.16"
 Flux = "0.16.1"
 GPUArraysCore = "0.2"
-GPUArrays = "11.2"
+GPUArrays = "11.2.1"
 ImageCore = "0.10"
 ImageFiltering = "0.7"
 ImageIO = "0.6"

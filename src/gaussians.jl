@@ -17,7 +17,6 @@ mutable struct GaussianModel{
     accum_∇means_2d::G
     denom::G
 
-    # Remove ids.
     ids::I
 
     sh_degree::Int
@@ -27,7 +26,7 @@ end
 function GaussianModel(
     points::AbstractMatrix{Float32}, colors::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32};
-    max_sh_degree::Int = 3,
+    max_sh_degree::Int = 3, isotropic::Bool = false, use_ids::Bool = false,
 )
     0 ≤ max_sh_degree ≤ 3 || throw(ArgumentError(
         "`max_sh_degree=$max_sh_degree` must be in `[0, 3]` range."))
@@ -51,35 +50,23 @@ function GaussianModel(
     max_radii = KA.zeros(kab, Int32, n)
     accum_∇means_2d = KA.zeros(kab, Float32, n)
     denom = KA.zeros(kab, Float32, n)
+
+    ids = use_ids ? KA.zeros(kab, Int32, n) : nothing
+
     GaussianModel(
         points, features_dc, features_rest,
-        scales, rotations, opacities,
-        max_radii, accum_∇means_2d, denom, nothing,
+        isotropic ? mean(scales; dims=1) : scales,
+        rotations, opacities,
+        max_radii, accum_∇means_2d, denom, ids,
         sh_degree, max_sh_degree)
 end
 
-function GaussianModel(kab)
+function GaussianModel(kab; kwargs...)
     points = KA.allocate(kab, Float32, (3, 0))
-    features_dc = KA.allocate(kab, Float32, (3, 1, 0))
-    features_rest = KA.allocate(kab, Float32, (3, 1, 0))
     scales = KA.allocate(kab, Float32, (3, 0))
-    rotations = KA.allocate(kab, Float32, (4, 0))
-    opacities = KA.allocate(kab, Float32, (1, 0))
-
-    max_radii = KA.zeros(kab, Int32, 0)
-    ids = KA.zeros(kab, Int32, 0)
-
-    accum_∇means_2d = KA.zeros(kab, Float32, 0)
-    denom = KA.zeros(kab, Float32, 0)
-    GaussianModel(
-        points, features_dc, features_rest,
-        scales, rotations, opacities,
-        max_radii, accum_∇means_2d, denom, ids, 0, 0)
+    colors = KA.allocate(kab, Float32, (3, 0))
+    GaussianModel(points, colors, scales; kwargs...)
 end
-
-scales_activation = exp
-scales_inv_activation = log
-opacity_activation = NU.sigmoid
 
 KernelAbstractions.get_backend(gs::GaussianModel) = get_backend(gs.points)
 

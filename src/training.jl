@@ -30,7 +30,7 @@ function Trainer(
 )
     ϵ = 1f-15
     kab = get_backend(gs)
-    camera_extent = dataset.camera_extent
+    camera_extent = min(dataset.camera_extent, 4f0) # TODO squeeze scene into unit box
     cache = GPUArrays.AllocCache()
 
     optimizers = (;
