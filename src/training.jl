@@ -30,11 +30,10 @@ function Trainer(
 )
     ϵ = 1f-15
     kab = get_backend(gs)
-    camera_extent = min(dataset.camera_extent, 4f0) # TODO squeeze scene into unit box
     cache = GPUArrays.AllocCache()
 
     optimizers = (;
-        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * camera_extent, ϵ),
+        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * dataset.camera_extent, ϵ),
         features_dc=NU.Adam(kab, gs.features_dc; lr=opt_params.lr_feature, ϵ),
         features_rest=NU.Adam(kab, gs.features_rest; lr=opt_params.lr_feature / 20f0, ϵ),
         opacities=NU.Adam(kab, gs.opacities; lr=opt_params.lr_opacities, ϵ),
@@ -43,8 +42,8 @@ function Trainer(
     ssim = SSIM(kab)
 
     points_lr_scheduler = lr_exp_scheduler(
-        opt_params.lr_points_start * camera_extent,
-        opt_params.lr_points_end * camera_extent,
+        opt_params.lr_points_start * dataset.camera_extent,
+        opt_params.lr_points_end * dataset.camera_extent,
         opt_params.lr_points_steps)
 
     ids = collect(1:length(dataset))
