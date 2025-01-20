@@ -1,5 +1,5 @@
 function densify_and_prune!(gs::GaussianModel, optimizers;
-    extent::Float32,
+    extent::Float32, pruning_extent::Float32,
     grad_threshold::Float32, min_opacity::Float32,
     max_screen_size::Int32, dense_percent::Float32,
 )
@@ -16,7 +16,7 @@ function densify_and_prune!(gs::GaussianModel, optimizers;
     # and have high scale in world space.
     valid_mask = reshape(NU.sigmoid.(gs.opacities) .> min_opacity, :)
     if max_screen_size > 0
-        γ = 0.1f0 * extent
+        γ = 0.1f0 * pruning_extent
         valid_mask .&=
             (gs.max_radii .< max_screen_size) .&&
             reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)

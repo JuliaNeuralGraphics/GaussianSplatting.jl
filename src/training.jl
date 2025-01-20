@@ -224,6 +224,7 @@ function step!(trainer::Trainer)
                 trainer.step > params.opacity_reset_interval ? 20 : 0
             densify_and_prune!(gs, trainer.optimizers;
                 extent=trainer.dataset.camera_extent,
+                pruning_extent=trainer.dataset.camera_extent,
                 grad_threshold=params.densify_grad_threshold,
                 min_opacity=0.05f0, max_screen_size, params.dense_percent)
         end
