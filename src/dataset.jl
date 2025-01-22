@@ -88,7 +88,8 @@ function ColmapDataset(kab;
     # and densification.
     scene_center = sum(camera_centers) ./ length(camera_centers)
     scene_diagonal = maximum(map(c -> norm(c - scene_center), camera_centers))
-    camera_extent::Float32 = scene_diagonal * 1.1f0
+    # TODO resize scene into unit box?
+    camera_extent::Float32 = min(4f0, scene_diagonal * 1.1f0)
 
     scales = compute_scales(points.points_3d)
 

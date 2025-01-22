@@ -6,6 +6,7 @@ using ChainRulesCore
 using Dates
 using Distributions
 using GPUArraysCore: @allowscalar
+using GPUArrays
 using KernelAbstractions
 using KernelAbstractions: @atomic
 using KernelAbstractions.Extras: @unroll
@@ -69,11 +70,7 @@ include("gui/gui.jl")
 # Hacky way to get KA.Backend.
 gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
 
-with_caching_allocator(f, kab, alloc_name::Symbol, args...; kwargs...) = f(args...)
-
-with_no_caching(f, kab) = f()
-
-invalidate_caching_allocator!(kab, alloc_name::Symbol) = return
+base_array_type(backend) = error("Not implemented for backend: `$backend`.")
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
@@ -89,7 +86,8 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
         scale, train_test_split=0.9, permute=false)
     camera = dataset.test_cameras[1]
 
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales; max_sh_degree=3)
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+        max_sh_degree=3, isotropic=false)
     rasterizer = GaussianRasterizer(kab, camera;
         antialias=false, fused=true, mode=:rgbd)
 
@@ -99,6 +97,9 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
     @info "N train images: $(length(dataset.train_cameras))"
     @info "N test images: $(length(dataset.test_cameras))"
+
+    width, height = camera.intrinsics.resolution
+    uncertainties = adapt(kab, zeros(Float32, width, height))
 
     # res = resolution(camera)
     # writer = open_video_out(
@@ -116,7 +117,12 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
             image_features = rasterizer(
                 gaussians.points, gaussians.opacities, gaussians.scales,
                 gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
-                camera, sh_degree=gaussians.sh_degree)
+                camera, sh_degree=gaussians.sh_degree, uncertainties)
+
+            uncertainties_h = Array(uncertainties)
+            uncertainties_image = colorview(Gray, clamp01!(transpose(uncertainties_h)))
+            save("uncertainties-$(trainer.step).png", uncertainties_image)
+            fill!(uncertainties, 0f0)
 
             host_image_features = Array(image_features)
             save("image-$(trainer.step).png",

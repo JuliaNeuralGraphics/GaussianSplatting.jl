@@ -24,7 +24,6 @@ function SSIM(kab; channels::Int = 3, σ::Float32 = 1.5f0, window_size::Int = 11
     SSIM(kab != CPU() ? Flux.gpu(conv) : conv, 0.01f0^2, 0.03f0^2)
 end
 
-# Inputs are in (W, H, C, B) format.
 function (ssim::SSIM)(x::T, ref::T) where T
     μ₁, μ₂ = ssim.window(x), ssim.window(ref)
     μ₁², μ₂² = μ₁.^2, μ₂.^2

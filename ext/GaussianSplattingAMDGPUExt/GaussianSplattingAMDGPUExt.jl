@@ -8,16 +8,7 @@ using GaussianSplatting
 # using Statistics
 # using Zygote
 
-function GaussianSplatting.with_caching_allocator(
-    f, ::ROCBackend, alloc_name::Symbol, args...,
-)
-    AMDGPU.with_caching_allocator(f, alloc_name, args...)
-end
-
-GaussianSplatting.with_no_caching(f, ::ROCBackend) = AMDGPU.with_no_caching(f)
-
-GaussianSplatting.invalidate_caching_allocator!(::ROCBackend, alloc_name::Symbol) =
-    AMDGPU.invalidate_caching_allocator!(alloc_name)
+GaussianSplatting.base_array_type(::ROCBackend) = ROCArray
 
 GaussianSplatting.use_ak(::ROCBackend) = true
 

@@ -23,9 +23,7 @@ function project(
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = with_no_caching(kab) do
-            GeometryState(kab, n; extended=rast.mode == :rgbd)
-        end
+        rast.gstate = GPUArrays.@uncached GeometryState(kab, n; extended=rast.mode == :rgbd)
     end
 
     project!(kab)(
@@ -79,11 +77,15 @@ function ∇project(
         _as_T(SVector{3, Float32}, vscales),
         _as_T(SVector{4, Float32}, vrot),
 
+        # TODO support pose optimization
+        nothing,
+        nothing,
+
         # Input grad outputs.
         _as_T(SVector{2, Float32}, vmeans_2d),
         _as_T(SVector{3, Float32}, vconics),
-        vcompensations,
-        vdepths,
+        vcompensations isa ZeroTangent ? nothing : vcompensations,
+        vdepths isa ZeroTangent ? nothing : vdepths,
 
         _as_T(SVector{3, Float32}, conics),
         rast.gstate.radii,
@@ -116,7 +118,7 @@ function ChainRulesCore.rrule(::typeof(project),
         radius_clip, blur_ϵ)
 
     function _project_pullback(Ω)
-        vmeans_2d, vconics, vcompensations, vdepths = Ω
+        vmeans_2d, vconics, vcompensations, vdepths = unthunk(Ω)
         ∇ = ∇project(
             vmeans_2d, vconics, vcompensations, vdepths,
             means_3d, scales, rotations, compensations, conics;
@@ -215,12 +217,13 @@ end
     vmeans::AbstractVector{SVector{3, Float32}},
     vcov_scales::AbstractVector{SVector{3, Float32}},
     vcov_rotations::AbstractVector{SVector{4, Float32}},
-    vR_out::RG, vt_out,
+    vR_out::RG,
+    vt_out,
 
     # Input grad outputs.
     vmeans_2d::AbstractVector{SVector{2, Float32}},
     vconics::AbstractArray{SVector{3, Float32}},
-    vcompensations::VC, #::AbstractVector{Float32},
+    vcompensations::VC,
     vdepths::VD,
 
     conics::AbstractVector{SVector{3, Float32}},
@@ -238,7 +241,13 @@ end
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
     ϵ::Float32,
-) where {C <: Maybe{AbstractMatrix{Float32}}, VC, VD, RM, RG}
+) where {
+    C <: Maybe{AbstractMatrix{Float32}},
+    VC <: Maybe{AbstractVector{Float32}},
+    VD <: Maybe{AbstractVector{Float32}},
+    RM,
+    RG <: Maybe{AbstractMatrix{Float32}},
+}
     i = @index(Global)
 
     conic = conics[i]

@@ -4,6 +4,7 @@ mutable struct Trainer{
     G <: GaussianModel,
     D <: ColmapDataset,
     S <: SSIM,
+    C <: GPUArrays.AllocCache,
     F,
     O,
 }
@@ -12,6 +13,8 @@ mutable struct Trainer{
     dataset::D
     optimizers::O
     ssim::S
+
+    cache::C
 
     points_lr_scheduler::F
     opt_params::OptimizationParams
@@ -27,10 +30,10 @@ function Trainer(
 )
     ϵ = 1f-15
     kab = get_backend(gs)
-    camera_extent = dataset.camera_extent
+    cache = GPUArrays.AllocCache()
 
     optimizers = (;
-        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * camera_extent, ϵ),
+        points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * dataset.camera_extent, ϵ),
         features_dc=NU.Adam(kab, gs.features_dc; lr=opt_params.lr_feature, ϵ),
         features_rest=NU.Adam(kab, gs.features_rest; lr=opt_params.lr_feature / 20f0, ϵ),
         opacities=NU.Adam(kab, gs.opacities; lr=opt_params.lr_opacities, ϵ),
@@ -39,15 +42,15 @@ function Trainer(
     ssim = SSIM(kab)
 
     points_lr_scheduler = lr_exp_scheduler(
-        opt_params.lr_points_start * camera_extent,
-        opt_params.lr_points_end * camera_extent,
+        opt_params.lr_points_start * dataset.camera_extent,
+        opt_params.lr_points_end * dataset.camera_extent,
         opt_params.lr_points_steps)
 
     ids = collect(1:length(dataset))
     densify = true
     step = 0
     Trainer(
-        rast, gs, dataset, optimizers, ssim,
+        rast, gs, dataset, optimizers, ssim, cache,
         points_lr_scheduler, opt_params, densify, step, ids)
 end
 
@@ -177,7 +180,7 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     kab = get_backend(rast)
-    loss = with_caching_allocator(kab, :train_step, θ, trainer.optimizers) do θ, optimizers
+    GPUArrays.@cached trainer.cache begin
         loss, ∇ = Zygote.withgradient(
             θ...,
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations
@@ -204,9 +207,8 @@ function step!(trainer::Trainer)
         for i in 1:length(θ)
             θᵢ = θ[i]
             isempty(θᵢ) && continue
-            NU.step!(optimizers[i], θᵢ, ∇[i]; dispose=false)
+            NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=false)
         end
-        return loss
     end
 
     if trainer.densify && trainer.step ≤ params.densify_until_iter
@@ -216,12 +218,13 @@ function step!(trainer::Trainer)
             trainer.step ≥ params.densify_from_iter &&
             trainer.step % params.densification_interval == 0
         if do_densify
-            invalidate_caching_allocator!(kab, :train_step)
+            GPUArrays.unsafe_free!(trainer.cache)
 
             max_screen_size::Int32 =
                 trainer.step > params.opacity_reset_interval ? 20 : 0
             densify_and_prune!(gs, trainer.optimizers;
                 extent=trainer.dataset.camera_extent,
+                pruning_extent=trainer.dataset.camera_extent,
                 grad_threshold=params.densify_grad_threshold,
                 min_opacity=0.05f0, max_screen_size, params.dense_percent)
         end

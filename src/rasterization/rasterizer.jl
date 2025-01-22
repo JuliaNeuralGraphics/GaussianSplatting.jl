@@ -144,11 +144,14 @@ function (rast::GaussianRasterizer)(
     R_w2c = nothing, t_w2c = nothing;
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
+
+    covisibilities::Maybe{AbstractVector{Bool}} = nothing,
+    uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     # If rendering outside AD, use non-allocating path.
-    inplace = NNlib.within_gradient(means_3d)
+    within_AD = NNlib.within_gradient(means_3d)
 
-    shs = if inplace
+    shs = if within_AD
         isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
     else
         n_features = size(sh_color, 2) + size(sh_remainder, 2)
@@ -159,24 +162,32 @@ function (rast::GaussianRasterizer)(
         rshs
     end
 
-    opacities_act = if inplace
+    opacities_act = if within_AD
         NU.sigmoid.(opacities)
     else
         ropacities = cache!(rast, :opacities_act, size(opacities))
         ropacities .= NU.sigmoid.(opacities)
     end
 
-    scales_act = if inplace
-        exp.(scales)
+    isotropic = size(scales, 1) == 1
+    scales_act = if within_AD
+        exp.(isotropic ? vcat(scales, scales, scales) : scales)
     else
-        rscales = cache!(rast, :scales_act, size(scales))
-        rscales .= exp.(scales)
+        rscales = cache!(rast, :scales_act, (3, size(scales, 2)))
+        if isotropic
+            rscales[[1], :] .= exp.(scales)
+            rscales[2, :] .= rscales[1, :]
+            rscales[3, :] .= rscales[1, :]
+            rscales
+        else
+            rscales .= exp.(scales)
+        end
     end
 
     if rast.fused
         return rasterize(
             means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
-            rast, camera, sh_degree, background)
+            rast, camera, sh_degree, background, covisibilities, uncertainties)
     else
         means_2d, conics, compensations, depths = project(
             means_3d, scales_act, rotations;
@@ -185,7 +196,6 @@ function (rast::GaussianRasterizer)(
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
-        # TODO handle :d mode
         color_features = if rast.mode == :rgbd
             vcat(colors, reshape(depths, 1, :))
         else
@@ -198,10 +208,9 @@ function (rast::GaussianRasterizer)(
             opacities_act
         end
 
-        image = render(
+        return render(
             means_2d, conics, opacities_scaled, color_features;
-            rast, camera, background, depths)
-        return image
+            rast, camera, background, depths, covisibilities, uncertainties)
     end
 end
 
@@ -214,6 +223,9 @@ function rasterize(
     R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
+
+    covisibilities::Maybe{AbstractVector{Bool}} = nothing,
+    uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     render_depth = rast.mode == :rgbd
     render_depth && @assert rast.gstate.color_features ≢ nothing
@@ -222,9 +234,7 @@ function rasterize(
     n = size(means_3d, 2)
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = with_no_caching(kab) do
-            GeometryState(kab, n; extended=render_depth)
-        end
+        rast.gstate = GPUArrays.@uncached GeometryState(kab, n; extended=render_depth)
     end
 
     (; width, height) = resolution(camera)
@@ -289,9 +299,7 @@ function rasterize(
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
-        rast.bstate = with_no_caching(kab) do
-            BinningState(kab, n_rendered)
-        end
+        rast.bstate = GPUArrays.@uncached BinningState(kab, n_rendered)
     end
 
     # For each instance to be rendered, produce [tile | depth] key
@@ -340,6 +348,7 @@ function rasterize(
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
         rast.image, rast.istate.n_contrib, rast.istate.accum_α,
+        covisibilities, uncertainties,
         # Inputs.
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
@@ -480,14 +489,18 @@ function ChainRulesCore.rrule(::typeof(rasterize),
     R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
+
+    covisibilities::Maybe{AbstractVector{Bool}} = nothing,
+    uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     image = rasterize(
         means_3d, shs, opacities, scales, rotations, R_w2c, t_w2c;
-        rast, camera, sh_degree, background)
+        rast, camera, sh_degree, background, covisibilities, uncertainties)
 
     function _pullback(vpixels)
         ∇ = ∇rasterize(
-            vpixels, means_3d, shs, scales, rotations, opacities,
+            unthunk(vpixels),
+            means_3d, shs, scales, rotations, opacities,
             rast.gstate.radii, R_w2c, t_w2c; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end
