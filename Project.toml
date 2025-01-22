@@ -1,7 +1,7 @@
 name = "GaussianSplatting"
 uuid = "991e6b22-92f0-46ac-8b70-8a93e7beee5d"
 authors = ["Anton Smirnov <tonysmn97@gmail.com>"]
-version = "0.1.0"
+version = "1.0.0"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
