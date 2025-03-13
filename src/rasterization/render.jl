@@ -165,7 +165,7 @@ function ChainRulesCore.rrule(::typeof(render),
     return image, _render_pullback
 end
 
-@kernel cpu=false inbounds=true function render!(
+@kernel unsafe_indices=true cpu=false inbounds=true function render!(
     # Output.
     out_color::AbstractArray{Float32, 3},
     n_contrib::AbstractMatrix{UInt32},
@@ -296,7 +296,7 @@ end
     end
 end
 
-@kernel cpu=false inbounds=true function ∇render!(
+@kernel unsafe_indices=true cpu=false inbounds=true function ∇render!(
     # Outputs.
     vcolors::AbstractMatrix{Float32},
     vopacities::AbstractMatrix{Float32},
