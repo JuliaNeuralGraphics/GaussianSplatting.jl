@@ -62,7 +62,7 @@ end
 
 - `t::Float32`: Time value in `[0, 1]` range. Goes through all keyframes.
 """
-function eval(p::CameraPath)
+function current_pose(p::CameraPath)
     t = p.current_time
     t = t * (length(p) - 1)
     idx = floor(Int, t) + 1

@@ -16,7 +16,7 @@ function advance!(v::CaptureMode, gui)
         v.is_rendering = false
         v.writer ≢ nothing && close_video_out!(v.writer)
     else
-        k = eval(v.camera_path)
+        k = current_pose(v.camera_path)
         set_c2w!(gui.camera, NU.get_rotation(k), k.t)
     end
     advance!(v.camera_path, get_time_step(v.camera_path, v.steps_ref[]))
