@@ -12,7 +12,7 @@ steps:
       rocmgpu: "*"
     if: build.message !~ /\[skip tests\]/
     command: |
-      sudo apt-get update && sudo apt-get install -y xvfb
+      apt-get update && apt-get install -y xvfb
       Xvfb :99 -screen 0 1280x1024x24 &
       export DISPLAY=:99
       julia --project -e 'using Pkg; Pkg.update()'
@@ -33,7 +33,7 @@ steps:
       cuda: "*"
     if: build.message !~ /\[skip tests\]/
     command: |
-      sudo apt-get update && sudo apt-get install -y xvfb
+      apt-get update && apt-get install -y xvfb
       Xvfb :99 -screen 0 1280x1024x24 &
       export DISPLAY=:99
       julia --project -e 'using Pkg; Pkg.update()'
