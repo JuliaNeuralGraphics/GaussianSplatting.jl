@@ -19,9 +19,9 @@ struct ColmapDataset{
     camera_extent::Float32
 end
 
-function ColmapDataset(kab,
-    dataset_dir::String; scale::Int = 1, train_test_split::Real = 0.8,
-    permute::Bool = true,
+function ColmapDataset(kab, dataset_dir::String;
+    scale::Int = 1, train_test_split::Real = 0.8, permute::Bool = true,
+    verbose::Bool = true,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -29,13 +29,13 @@ function ColmapDataset(kab,
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(kab;
         cameras_file, images_file, points_file,
-        scale, images_dir, train_test_split, permute)
+        scale, images_dir, train_test_split, permute, verbose)
 end
 
 function ColmapDataset(kab;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, train_test_split::Real = 0.8,
-    permute::Bool = true,
+    permute::Bool = true, verbose::Bool = true,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
 
@@ -65,17 +65,22 @@ function ColmapDataset(kab;
     image_filenames = String[]
     images_list = Array{UInt8, 3}[]
     for (id, img) in images
+        image_path = joinpath(images_dir, img.name)
+        if !isfile(image_path)
+            verbose && @info "Image files does not exist, skipping: `$image_path`."
+            continue
+        end
+
         R = SMatrix{3, 3, Float32, 9}(QuatRotation(img.q...))
         t = SVector{3, Float32}(img.t...)
         cam = Camera(R, t; intrinsics, img_name=img.name)
 
         push!(camera_centers, cam.camera_center)
         push!(cameras, cam)
-
         push!(image_filenames, img.name)
 
-        image = load(joinpath(images_dir, img.name))
         # Round resolution to a multiple of 16, just like with cameras.
+        image = load(image_path)
         image = imresize(image, reverse((Int.(new_resolution)...,)))
 
         raw = floor.(UInt8, Float32.(channelview(image)) .* 255f0)

@@ -20,10 +20,10 @@ Base.@propagate_inbounds function get_rect(
     pixel::SVector{2, Float32}, max_radius::Int32,
     grid::SVector{2, Int32}, block::SVector{2, Int32},
 )
-    rmin = SVector{2, Int32}(
+    @inbounds rmin = SVector{2, Int32}(
         clamp(gpu_floor(Int32, (pixel[1] - max_radius) / block[1]), 0i32, grid[1]),
         clamp(gpu_floor(Int32, (pixel[2] - max_radius) / block[2]), 0i32, grid[2]))
-    rmax = SVector{2, Int32}(
+    @inbounds rmax = SVector{2, Int32}(
         clamp(gpu_floor(Int32, gpu_cld(pixel[1] + max_radius, block[1])), 0i32, grid[1]),
         clamp(gpu_floor(Int32, gpu_cld(pixel[2] + max_radius, block[2])), 0i32, grid[2]))
 

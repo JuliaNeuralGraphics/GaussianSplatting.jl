@@ -97,7 +97,7 @@ end
 end
 
 # Convert spherical harmonics coefficients of each Gaussian to a RGB color.
-Base.@propagate_inbounds function compute_colors_from_sh(
+@inbounds function compute_colors_from_sh(
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
     shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
 ) where degree
@@ -132,7 +132,7 @@ Base.@propagate_inbounds function compute_colors_from_sh(
     return max.(0f0, res), (res .< 0f0)
 end
 
-Base.@propagate_inbounds function ∇color_from_sh!(
+@inbounds function ∇color_from_sh!(
     # Outputs.
     ∂L∂shs::AbstractVector{SVector{3, Float32}},
     # Inputs.
@@ -230,7 +230,7 @@ Base.@propagate_inbounds function ∇color_from_sh!(
     return ∇normalize(dir_orig, vdir)
 end
 
-Base.@propagate_inbounds function ∇normalize(dir::SVector{3, Float32}, vdir::SVector{3, Float32})
+@inbounds function ∇normalize(dir::SVector{3, Float32}, vdir::SVector{3, Float32})
     s² = sum(abs2, dir)
     inv_s = 1f0 / √(s²^3)
     @inbounds SVector{3, Float32}(
