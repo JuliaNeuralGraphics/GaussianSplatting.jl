@@ -354,6 +354,17 @@ function handle_ui!(gui::GSGUI; frame_time)
                 end
                 CImGui.Separator()
 
+                if CImGui.Button("Export PLY", CImGui.ImVec2(-1, 0))
+                    save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
+                    isdir(save_dir) || mkpath(save_dir)
+
+                    tstmp = now()
+                    fmt = "timestamp-$(month(tstmp))M-$(day(tstmp))D-$(hour(tstmp)):$(minute(tstmp))"
+                    save_file = joinpath(save_dir, "state-(step-$(gui.trainer.step))-($fmt).ply")
+                    export_ply(gui.gaussians, save_file)
+                end
+                CImGui.Separator()
+
                 CImGui.Text("Path to State File (.bson):")
                 CImGui.PushItemWidth(-1)
                 CImGui.InputText(

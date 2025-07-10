@@ -157,7 +157,7 @@ sh_2_rgb(x) = x * SH0 + 0.5f0
 
 inverse_sigmoid(x) = log(x / (1f0 - x))
 
-function export_ply!(g::GaussianModel, filename::String)
+function export_ply(g::GaussianModel, filename::String)
     ply = PlyIO.Ply()
 
     n = size(g.points, 2)
@@ -174,16 +174,16 @@ function export_ply!(g::GaussianModel, filename::String)
         PlyIO.ArrayProperty("y", xyz[2, :]),
         PlyIO.ArrayProperty("z", xyz[3, :]),
 
-        [PlyIO.ArrayProperty("f_dc_$i", features_dc[i, :]) for i in 1:size(features_dc, 1)]...,
-        [PlyIO.ArrayProperty("f_rest_$i", features_rest[i, :]) for i in 1:size(features_rest, 1)]...,
-        [PlyIO.ArrayProperty("scale_$i", scales[i, :]) for i in 1:size(scales, 1)]...,
-        [PlyIO.ArrayProperty("rot_$i", rotations[i, :]) for i in 1:size(rotations, 1)]...,
+        [PlyIO.ArrayProperty("f_dc_$(i - 1)", features_dc[i, :]) for i in 1:size(features_dc, 1)]...,
+        [PlyIO.ArrayProperty("f_rest_$(i - 1)", features_rest[i, :]) for i in 1:size(features_rest, 1)]...,
+        [PlyIO.ArrayProperty("scale_$(i - 1)", scales[i, :]) for i in 1:size(scales, 1)]...,
+        [PlyIO.ArrayProperty("rot_$(i - 1)", rotations[i, :]) for i in 1:size(rotations, 1)]...,
 
         PlyIO.ArrayProperty("opacity", opacities),
     )
     push!(ply, vertex)
 
-    PlyIO.save_ply(ply, filename)
+    PlyIO.save_ply(ply, filename; ascii=false)
     return
 end
 
@@ -196,14 +196,14 @@ function import_ply(filename::String, kab)
 
     n = length(vertex["x"])
     xyz = vcat([reshape(vertex[i], 1, n) for i in ("x", "y", "z")]...)
-    scales = vcat([reshape(vertex["scale_$i"], 1, n) for i in 1:3]...)
-    rotations = vcat([reshape(vertex["rot_$i"], 1, n) for i in 1:4]...)
+    scales = vcat([reshape(vertex["scale_$(i - 1)"], 1, n) for i in 1:3]...)
+    rotations = vcat([reshape(vertex["rot_$(i - 1)"], 1, n) for i in 1:4]...)
     opacities = reshape(Array(vertex["opacity"]), 1, n)
 
-    features_dc = vcat([reshape(vertex["f_dc_$i"], 1, 1, n) for i in 1:3]...)
+    features_dc = vcat([reshape(vertex["f_dc_$(i - 1)"], 1, 1, n) for i in 1:3]...)
     features_rest = if n_frest > 0
         reshape(
-            vcat([reshape(vertex["f_rest_$i"], 1, n) for i in 1:n_frest]...),
+            vcat([reshape(vertex["f_rest_$(i - 1)"], 1, n) for i in 1:n_frest]...),
             3, :, n)
     else
         Array{Float32}(undef, 3, 0, n)

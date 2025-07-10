@@ -154,9 +154,9 @@ end
 function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false)
     ispath(path) || error("Path does not exist: `$path`.")
 
-    viewer_mode = endswith(path, ".bson")
+    viewer_mode = endswith(path, ".bson") || endswith(path, ".ply")
     !viewer_mode && !isdir(path) && error(
-        "`path` must be either a `.bson` model checkpoint or " *
+        "`path` must be either a [`.bson`, '.ply'] model checkpoint or " *
         "a directory with COLMAP dataset, instead: `$path`.")
     !viewer_mode && scale ≡ nothing && error(
         "`scale` keyword argument must be specified if `path` is a COLMAP dataset.")
@@ -166,10 +166,18 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
         (1024, 1024, true)
 
     gui = if viewer_mode
-        θ = BSON.load(path)
-        gaussians = GaussianModel(gpu_backend())
-        set_from_bson!(gaussians, θ[:gaussians])
-        camera = θ[:camera]
+        kab = gpu_backend()
+        if endswith(path, ".bson")
+            θ = BSON.load(path)
+            gaussians = GaussianModel(kab)
+            set_from_bson!(gaussians, θ[:gaussians])
+            camera = θ[:camera]
+        else
+            gaussians = import_ply(path, kab)
+            width = 1024
+            fov = NU.fov2focal(1024, 45f0)
+            camera = Camera(; fx=fov, fy=fov, width, height=width)
+        end
 
         GSGUI(gaussians, camera; width, height, fullscreen, resizable)
     else
