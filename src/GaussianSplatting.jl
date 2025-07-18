@@ -173,7 +173,7 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
             set_from_bson!(gaussians, θ[:gaussians])
             camera = θ[:camera]
         else
-            gaussians = import_ply(path, kab)
+            (; gaussians) = import_ply(path, kab)
             width = 1024
             fov = NU.fov2focal(1024, 45f0)
             camera = Camera(; fx=fov, fy=fov, width, height=width)

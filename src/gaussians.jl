@@ -216,9 +216,11 @@ function import_ply(filename::String, kab)
     accum_∇means_2d = KA.zeros(kab, Float32, n)
     denom = KA.zeros(kab, Float32, n)
 
-    return GaussianModel(
+    gaussians = GaussianModel(
         adapt(kab, xyz), adapt(kab, features_dc), adapt(kab, features_rest),
         adapt(kab, scales), adapt(kab, rotations), adapt(kab, opacities),
         max_radii, accum_∇means_2d, denom,
         nothing, sh_degree, max_sh_degree)
+
+    return (; gaussians, vertex)
 end
