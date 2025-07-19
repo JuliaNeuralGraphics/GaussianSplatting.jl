@@ -69,7 +69,7 @@ end
 end
 
 mutable struct GSGUI{
-    G <: GaussianModel,
+    G <: AbstractGaussianModel,
     T <: Maybe{Trainer},
     R <: GaussianRasterizer,
 }
@@ -262,7 +262,7 @@ function handle_ui!(gui::GSGUI; frame_time)
             if CImGui.BeginTabItem("Controls")
                 (; width, height) = resolution(gui.camera)
                 CImGui.Text("Render Resolution: $width x $height")
-                CImGui.Text("N Gaussians: $(size(gui.gaussians.points, 2))")
+                CImGui.Text("N Gaussians: $(size(get_points(gui.gaussians), 2))")
 
                 CImGui.Checkbox("Render", gui.ui_state.render)
 
@@ -433,10 +433,10 @@ function render!(gui::GSGUI)
     rast = gui.rasterizer
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]
-    sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree
+    sh_degree = ui_sh_degree == -1 ? get_sh_degree(gs) : ui_sh_degree
     rast(
-        gs.points, gs.opacities, gs.scales,
-        gs.rotations, gs.features_dc, gs.features_rest;
+        get_points(gs), get_opacities(gs), get_scales(gs),
+        get_rotations(gs), get_features(gs)...;
         camera=gui.camera, sh_degree)
 
     mode = gui.ui_state.selected_mode[]

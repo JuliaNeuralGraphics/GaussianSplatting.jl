@@ -78,6 +78,11 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
+# TODO
+# - normalize rotations
+# - option to NOT activate scales, rotations, etc within rasterizer.
+# - specialize `render!` on gaussians type and compute activations there
+
 function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."

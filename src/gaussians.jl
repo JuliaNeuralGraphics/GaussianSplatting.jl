@@ -1,11 +1,13 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+abstract type AbstractGaussianModel end
+
 mutable struct GaussianModel{
     P <: AbstractMatrix{Float32},
     R <: AbstractVector{Int32},
     D <: AbstractArray{Float32, 3},
     G <: AbstractVector{Float32},
     I <: Maybe{AbstractVector{Int32}},
-}
+} <: AbstractGaussianModel
     points::P
     features_dc::D
     features_rest::D
@@ -224,3 +226,13 @@ function import_ply(filename::String, kab)
 
     return (; gaussians, vertex)
 end
+
+# GUI interface.
+
+get_points(gs::GaussianModel) = gs.points
+get_opacities(gs::GaussianModel) = gs.opacities
+get_scales(gs::GaussianModel) = gs.scales
+get_rotations(gs::GaussianModel) = gs.rotations
+get_features(gs::GaussianModel) = (gs.features_dc, gs.features_rest)
+get_sh_degree(gs::GaussianModel) = gs.sh_degree
+get_max_sh_degree(gs::GaussianModel) = gs.max_sh_degree
