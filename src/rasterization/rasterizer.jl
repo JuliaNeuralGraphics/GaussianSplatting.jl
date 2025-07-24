@@ -8,16 +8,10 @@ mutable struct GaussianRasterizer{
     B <: BinningState,
     K <: AbstractArray{Float32, 3},
     P <: AbstractArray{Float32, 3},
-    S <: AbstractMatrix{Float32},
 }
     istate::I
     gstate::G
     bstate::B
-
-    # Temporary storage to avoid allocating during rendering outside of AD.
-    shs::K
-    scales_act::S
-    opacities_act::S
 
     image::K
     pinned_image::P
@@ -45,7 +39,6 @@ function GaussianRasterizer(kab;
     antialias && fused && error(
         "`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
-    # TODO support :d
     modes = (:rgb, :rgbd)
     mode in modes || error("Invalid render: $mode ∉ $modes")
 
@@ -54,31 +47,15 @@ function GaussianRasterizer(kab;
     gstate = GeometryState(kab, 0; extended=mode == :rgbd)
     bstate = BinningState(kab, 0)
 
-    # TODO organize in a render cache/state
-    shs = KA.allocate(kab, Float32, (3, 0, 0))
-    scales_act = KA.allocate(kab, Float32, (3, 0))
-    opacities_act = KA.allocate(kab, Float32, (1, 0))
-
     image = KA.allocate(kab, Float32, (mode == :rgbd ? 4 : 3, width, height))
     host_image, pinned_image = allocate_pinned(kab, Float32, (3, width, height))
 
     rast = GaussianRasterizer(
         istate, gstate, bstate,
-        shs, scales_act, opacities_act,
         image, pinned_image, host_image,
         grid, antialias, fused, mode)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
-end
-
-function cache!(rast::GaussianRasterizer, name::Symbol, target_size)
-    x = getproperty(rast, name)
-    if size(x) != target_size
-        KA.unsafe_free!(x)
-        x = KA.allocate(get_backend(rast), eltype(x), target_size)
-        setproperty!(rast, name, x)
-    end
-    return x
 end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
@@ -87,7 +64,7 @@ include("projection.jl")
 include("spherical_harmonics.jl")
 include("render.jl")
 
-# OpenGL convertions.
+# OpenGL conversions.
 
 function gl_texture(r::GaussianRasterizer)
     r.pinned_image .= @view(r.image[1:3, :, :])
@@ -125,22 +102,34 @@ function to_depth(r::GaussianRasterizer)
     return colorview(Gray, depth_image)
 end
 
-to_image(x) = colorview(RGB, permutedims(clamp01!(x), (1, 3, 2)))
+to_image(x::AbstractArray{Float32, 3}) = colorview(RGB, permutedims(clamp01!(x), (1, 3, 2)))
 
-function to_depth(x)
+function to_depth(x::AbstractMatrix{Float32})
     depth_image = transpose(x)
     depth_image .*= 1f0 / 50f0
     clamp01!(depth_image)
     return colorview(Gray, depth_image)
 end
 
+function compute_activations(sh_color, sh_remainder, opacities, scales)
+    isotropic = size(scales, 1) == 1
+    shs = isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
+    opacities_act = NU.sigmoid.(opacities)
+    scales_act = if isotropic
+        tmp = exp.(scales)
+        vcat(tmp, tmp, tmp)
+    else
+        exp.(scales)
+    end
+    return shs, opacities_act, scales_act
+end
+
 function (rast::GaussianRasterizer)(
     means_3d::AbstractMatrix{Float32},
-    opacities::AbstractMatrix{Float32},
-    scales::AbstractMatrix{Float32},
+    opacities_act::AbstractMatrix{Float32},
+    scales_act::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
-    sh_color::AbstractArray{Float32, 3},
-    sh_remainder::AbstractArray{Float32, 3},
+    shs::AbstractArray{Float32, 3},
     R_w2c = nothing, t_w2c = nothing;
     camera::Camera, sh_degree::Int,
     background::SVector{3, Float32} = zeros(SVector{3, Float32}),
@@ -148,44 +137,8 @@ function (rast::GaussianRasterizer)(
     covisibilities::Maybe{AbstractVector{Bool}} = nothing,
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
-    # If rendering outside AD, use non-allocating path.
-    within_AD = NNlib.within_gradient(means_3d)
-
-    shs = if within_AD
-        isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
-    else
-        n_features = size(sh_color, 2) + size(sh_remainder, 2)
-        target_size = (3, n_features, size(sh_color, 3))
-        rshs = cache!(rast, :shs, target_size)
-        rshs[:, 1:1, :] .= sh_color
-        isempty(sh_remainder) || (rshs[:, 2:end, :] .= sh_remainder)
-        rshs
-    end
-
-    opacities_act = if within_AD
-        NU.sigmoid.(opacities)
-    else
-        ropacities = cache!(rast, :opacities_act, size(opacities))
-        ropacities .= NU.sigmoid.(opacities)
-    end
-
-    isotropic = size(scales, 1) == 1
-    scales_act = if within_AD
-        exp.(isotropic ? vcat(scales, scales, scales) : scales)
-    else
-        rscales = cache!(rast, :scales_act, (3, size(scales, 2)))
-        if isotropic
-            rscales[[1], :] .= exp.(scales)
-            rscales[2, :] .= rscales[1, :]
-            rscales[3, :] .= rscales[1, :]
-            rscales
-        else
-            rscales .= exp.(scales)
-        end
-    end
-
-    if rast.fused
-        return rasterize(
+    res = if rast.fused
+        rasterize(
             means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
             rast, camera, sh_degree, background, covisibilities, uncertainties)
     else
@@ -196,22 +149,19 @@ function (rast::GaussianRasterizer)(
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
-        color_features = if rast.mode == :rgbd
-            vcat(colors, reshape(depths, 1, :))
-        else
+        color_features = rast.mode == :rgbd ?
+            vcat(colors, reshape(depths, 1, :)) :
             colors
-        end
 
-        opacities_scaled = if rast.antialias
-            opacities_act .* compensations
-        else
+        opacities_scaled = rast.antialias ?
+            opacities_act .* compensations :
             opacities_act
-        end
 
-        return render(
+        render(
             means_2d, conics, opacities_scaled, color_features;
             rast, camera, background, depths, covisibilities, uncertainties)
     end
+    return res
 end
 
 function rasterize(

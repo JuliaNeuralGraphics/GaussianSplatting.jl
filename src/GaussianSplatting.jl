@@ -78,11 +78,6 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
-# TODO
-# - normalize rotations
-# - option to NOT activate scales, rotations, etc within rasterizer.
-# - specialize `render!` on gaussians type and compute activations there
-
 function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
     kab = gpu_backend()
     @info "Using `$kab` GPU backend."
@@ -105,6 +100,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
 
     width, height = camera.intrinsics.resolution
     uncertainties = adapt(kab, zeros(Float32, width, height))
+    cache = GPUArrays.AllocCache()
 
     # res = resolution(camera)
     # writer = open_video_out(
@@ -119,10 +115,21 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
         end
 
         if trainer.step % 100 == 0 || trainer.step == 1
+            old_size = sizeof(cache)
+            GPUArrays.@cached cache begin
+                shs, opacities_act, scales_act = compute_activations(
+                    gaussians.features_dc, gaussians.features_rest,
+                    gaussians.opacities, gaussians.scales,
+                )
+            end
+            new_size = sizeof(cache)
+            invalidate_cache = old_size > 0 && new_size > old_size
+
             image_features = rasterizer(
-                gaussians.points, gaussians.opacities, gaussians.scales,
-                gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
-                camera, sh_degree=gaussians.sh_degree, uncertainties)
+                gaussians.points, opacities_act, scales_act, gaussians.rotations, shs;
+                camera, gaussians.sh_degree, uncertainties)
+
+            invalidate_cache && GPUArrays.unsafe_free!(cache)
 
             uncertainties_h = Array(uncertainties)
             uncertainties_image = colorview(Gray, clamp01!(transpose(uncertainties_h)))

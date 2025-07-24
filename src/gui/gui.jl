@@ -72,6 +72,7 @@ mutable struct GSGUI{
     G <: AbstractGaussianModel,
     T <: Maybe{Trainer},
     R <: GaussianRasterizer,
+    C <: GPUArrays.AllocCache,
 }
     context::NGL.Context
     screen::Screen
@@ -86,6 +87,7 @@ mutable struct GSGUI{
     gaussians::G
     rasterizer::R
     trainer::T
+    cache::C
 end
 
 const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
@@ -126,6 +128,7 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
+    cache = GPUArrays.AllocCache()
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -139,7 +142,7 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, rasterizer, trainer)
+        gaussians, rasterizer, trainer, cache)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -171,6 +174,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+    cache = GPUArrays.AllocCache()
 
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
@@ -183,7 +187,7 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, gui_rasterizer, trainer)
+        gaussians, gui_rasterizer, trainer, cache)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -434,10 +438,20 @@ function render!(gui::GSGUI)
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]
     sh_degree = ui_sh_degree == -1 ? get_sh_degree(gs) : ui_sh_degree
+
+    old_size = sizeof(gui.cache)
+    GPUArrays.@cached gui.cache begin
+        shs, opacities_act, scales_act = compute_activations(
+            get_features(gs)..., get_opacities(gs), get_scales(gs))
+    end
+    new_size = sizeof(gui.cache)
+    invalidate_cache = old_size > 0 && new_size > old_size
+
     rast(
-        get_points(gs), get_opacities(gs), get_scales(gs),
-        get_rotations(gs), get_features(gs)...;
-        camera=gui.camera, sh_degree)
+        get_points(gs), opacities_act, scales_act,
+        get_rotations(gs), shs; gui.camera, sh_degree)
+
+    invalidate_cache && GPUArrays.unsafe_free!(gui.cache)
 
     mode = gui.ui_state.selected_mode[]
     tex = if mode == 0 # Render color.
