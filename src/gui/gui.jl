@@ -111,10 +111,7 @@ function resize_callback(_, width, height)
     return
 end
 
-# Viewer-only mode.
-function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
-    kab = gpu_backend()
-
+function ngl_init(; gl_kwargs...)
     NGL.init(3, 0)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -122,51 +119,42 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
     fonts = unsafe_load(CImGui.GetIO().Fonts)
     CImGui.AddFontFromFileTTF(fonts, font_file, 16)
+    return context
+end
+
+# Viewer-only mode.
+function GSGUI(gaussians::AbstractGaussianModel, camera::Camera; gl_kwargs...)
+    context = ngl_init(; gl_kwargs...)
 
     # Set up renderer.
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    rasterizer = GaussianRasterizer(kab, camera; fused=true)
-    cache = GPUArrays.AllocCache()
-
+    rasterizer = GaussianRasterizer(gpu_backend(), camera; fused=true)
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
         resolution(camera)...))
-    control_settings = ControlSettings()
-    ui_state = UIState()
 
-    capture_mode = CaptureMode()
-
-    trainer = nothing
     gsgui = GSGUI(
-        context, MainScreen, NGL.Frustum(), render_state, ui_state,
-        control_settings, capture_mode, camera,
-        gaussians, rasterizer, trainer, cache)
+        context, MainScreen, NGL.Frustum(), render_state, UIState(),
+        ControlSettings(), CaptureMode(), camera,
+        gaussians, rasterizer, nothing, GPUArrays.AllocCache())
     GSGUI_REF[] = gsgui
     return gsgui
 end
 
 # Training mode.
 function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
+    context = ngl_init(; gl_kwargs...)
+
     kab = gpu_backend()
-
-    NGL.init(3, 0)
-    context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
-    NGL.set_resize_callback!(context, resize_callback)
-
-    font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
-    fonts = unsafe_load(CImGui.GetIO().Fonts)
-    CImGui.AddFontFromFileTTF(fonts, font_file, 16)
-
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams()
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
-    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+    trainer = Trainer(rasterizer, gaussians, dataset, OptimizationParams())
 
     # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(camera)
@@ -174,20 +162,14 @@ function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
-    cache = GPUArrays.AllocCache()
-
     render_state = RenderState(; surface=NGL.RenderSurface(;
         internal_format=GL_RGB32F, data_type=GL_FLOAT,
         resolution(camera)...))
-    control_settings = ControlSettings()
-    ui_state = UIState()
-
-    capture_mode = CaptureMode()
 
     gsgui = GSGUI(
-        context, MainScreen, NGL.Frustum(), render_state, ui_state,
-        control_settings, capture_mode, camera,
-        gaussians, gui_rasterizer, trainer, cache)
+        context, MainScreen, NGL.Frustum(), render_state, UIState(),
+        ControlSettings(), CaptureMode(), camera,
+        gaussians, gui_rasterizer, trainer, GPUArrays.AllocCache())
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -266,7 +248,7 @@ function handle_ui!(gui::GSGUI; frame_time)
             if CImGui.BeginTabItem("Controls")
                 (; width, height) = resolution(gui.camera)
                 CImGui.Text("Render Resolution: $width x $height")
-                CImGui.Text("N Gaussians: $(size(get_points(gui.gaussians), 2))")
+                CImGui.Text("N Gaussians: $(n_points(gui.gaussians))")
 
                 CImGui.Checkbox("Render", gui.ui_state.render)
 
@@ -276,7 +258,7 @@ function handle_ui!(gui::GSGUI; frame_time)
                 )
 
                 CImGui.PushItemWidth(-100)
-                max_sh_degree = gui.gaussians.max_sh_degree
+                max_sh_degree = get_max_sh_degree(gui.gaussians)
                 if max_sh_degree > 0 && CImGui.SliderInt(
                     "SH degree", gui.ui_state.sh_degree,
                     -1, max_sh_degree, "%d / $max_sh_degree",
@@ -436,21 +418,18 @@ function render!(gui::GSGUI)
     gs = gui.gaussians
     rast = gui.rasterizer
 
-    ui_sh_degree::Int = gui.ui_state.sh_degree[]
-    sh_degree = ui_sh_degree == -1 ? get_sh_degree(gs) : ui_sh_degree
-
     old_size = sizeof(gui.cache)
     GPUArrays.@cached gui.cache begin
-        shs, opacities_act, scales_act = compute_activations(
+        shs, opacities, scales = compute_activations(
             get_features(gs)..., get_opacities(gs), get_scales(gs))
     end
     new_size = sizeof(gui.cache)
+
+    ui_sh_degree::Int = gui.ui_state.sh_degree[]
+    sh_degree = ui_sh_degree == -1 ? get_sh_degree(gs) : ui_sh_degree
+    rast(get_points(gs), opacities, scales, get_rotations(gs), shs; gui.camera, sh_degree)
+
     invalidate_cache = old_size > 0 && new_size > old_size
-
-    rast(
-        get_points(gs), opacities_act, scales_act,
-        get_rotations(gs), shs; gui.camera, sh_degree)
-
     invalidate_cache && GPUArrays.unsafe_free!(gui.cache)
 
     mode = gui.ui_state.selected_mode[]

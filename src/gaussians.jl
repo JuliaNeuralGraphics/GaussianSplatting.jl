@@ -229,6 +229,7 @@ end
 
 # GUI interface.
 
+n_points(gs::GaussianModel) = size(gs.points, 2)
 get_points(gs::GaussianModel) = gs.points
 get_opacities(gs::GaussianModel) = gs.opacities
 get_scales(gs::GaussianModel) = gs.scales
