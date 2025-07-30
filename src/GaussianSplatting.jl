@@ -32,6 +32,7 @@ using GLFW
 
 import CImGui.lib as iglib
 
+import AcceleratedKernels as AK
 import BSON
 import NNlib
 import Flux
@@ -75,8 +76,6 @@ base_array_type(backend) = error("Not implemented for backend: `$backend`.")
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
 unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
-
-use_ak(kab) = false
 
 function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
     kab = gpu_backend()

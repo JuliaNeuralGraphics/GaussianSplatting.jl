@@ -264,16 +264,10 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    if use_ak(kab)
-        sortperm!(
-            @view(rast.bstate.permutation[1:n_rendered]),
-            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
-            temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
-    else
-        sortperm!(
-            @view(rast.bstate.permutation[1:n_rendered]),
-            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
-    end
+    AK.sortperm!(
+        @view(rast.bstate.permutation[1:n_rendered]),
+        @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
+        temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
     _permute!(kab)(
         rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
         rast.bstate.permutation; ndrange=n_rendered)
