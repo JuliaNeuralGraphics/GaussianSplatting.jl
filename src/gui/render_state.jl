@@ -5,7 +5,7 @@ Base.@kwdef mutable struct RenderState
     last_frame_time::Float64 = time()
 end
 
-function update_time!(s::RenderState)
+function update_time!(s::RenderState)::Float64
     now = time()
     frame_time = now - s.last_frame_time
     s.last_frame_time = now
@@ -103,7 +103,7 @@ function fpv_mouse_controller(
     if NeuralGraphicsGL.is_key_down(iglib.ImGuiKey_R) # roll
         R = AngleAxis(δy, view_dir(camera)...)
     else
-        R = AngleAxis(δx, control_settings.up_vec...) *
+        R = AngleAxis(δx, -view_up(camera)...) *
             AngleAxis(δy, view_side(camera)...)
     end
 

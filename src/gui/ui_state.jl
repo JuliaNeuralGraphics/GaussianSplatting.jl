@@ -1,5 +1,7 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-Base.@kwdef mutable struct UIState
+abstract type AbstractUIState end
+
+Base.@kwdef mutable struct UIState <: AbstractUIState
     train::Ref{Bool} = Ref(false)
     render::Ref{Bool} = Ref(true)
     densify::Ref{Bool} = Ref(true)

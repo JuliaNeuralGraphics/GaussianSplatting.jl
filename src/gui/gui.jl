@@ -70,6 +70,7 @@ end
 
 mutable struct GSGUI{
     G <: AbstractGaussianModel,
+    U <: AbstractUIState,
     T <: Maybe{Trainer},
     R <: GaussianRasterizer,
     C <: GPUArrays.AllocCache,
@@ -78,7 +79,7 @@ mutable struct GSGUI{
     screen::Screen
     frustum::NGL.Frustum
     render_state::RenderState
-    ui_state::UIState
+    ui_state::U
     control_settings::ControlSettings
 
     capture_mode::CaptureMode
@@ -123,7 +124,12 @@ function ngl_init(; gl_kwargs...)
 end
 
 # Viewer-only mode.
-function GSGUI(gaussians::AbstractGaussianModel, camera::Camera; gl_kwargs...)
+function GSGUI(
+    gaussians::AbstractGaussianModel,
+    camera::Camera;
+    ui_state::AbstractUIState = UIState(),
+    gl_kwargs...,
+)
     context = ngl_init(; gl_kwargs...)
 
     # Set up renderer.
@@ -136,7 +142,7 @@ function GSGUI(gaussians::AbstractGaussianModel, camera::Camera; gl_kwargs...)
         resolution(camera)...))
 
     gsgui = GSGUI(
-        context, MainScreen, NGL.Frustum(), render_state, UIState(),
+        context, MainScreen, NGL.Frustum(), render_state, ui_state,
         ControlSettings(), CaptureMode(), camera,
         gaussians, rasterizer, nothing, GPUArrays.AllocCache())
     GSGUI_REF[] = gsgui
@@ -222,11 +228,11 @@ function loop!(gui::GSGUI)
 
     # Draw other OpenGL objects.
 
-    P = NeuralGraphicsGL.perspective(gui.camera)
-    L = NeuralGraphicsGL.look_at(gui.camera)
-
     if !viewer_only(gui) && gui.ui_state.draw_cameras[]
+        P = NeuralGraphicsGL.perspective(gui.camera)
+        L = NeuralGraphicsGL.look_at(gui.camera)
         dataset = gui.trainer.dataset
+
         for view_id in 1:length(dataset)
             camera = dataset.train_cameras[view_id]
             camera_perspective =
@@ -242,7 +248,7 @@ function loop!(gui::GSGUI)
     return
 end
 
-function handle_ui!(gui::GSGUI; frame_time)
+function handle_ui!(gui::GSGUI; frame_time::Float64)
     if CImGui.Begin("GaussianSplatting")
         if CImGui.BeginTabBar("bar")
             if CImGui.BeginTabItem("Controls")
