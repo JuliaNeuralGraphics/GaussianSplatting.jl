@@ -110,9 +110,7 @@ function resize_callback(_, width, height)
 end
 
 # Viewer-only mode.
-function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
-    kab = gpu_backend()
-
+function GSGUI(kab, gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     NGL.init(3, 0)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -145,9 +143,7 @@ function GSGUI(gaussians::GaussianModel, camera::Camera; gl_kwargs...)
 end
 
 # Training mode.
-function GSGUI(dataset_path::String, scale::Int; gl_kwargs...)
-    kab = gpu_backend()
-
+function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
     NGL.init(3, 0)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)

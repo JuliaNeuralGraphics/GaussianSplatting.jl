@@ -11,10 +11,9 @@ if get(ENV, "GSP_TEST_AMDGPU", "false") == "true"
     Pkg.develop("AMDGPU")
     using AMDGPU
 elseif get(ENV, "GSP_TEST_CUDA", "false") == "true"
-    @info "`GSP_TEST_CUDA` is `true`, importing CUDA.jl & cuDNN.jl."
+    @info "`GSP_TEST_CUDA` is `true`, importing CUDA.jl."
     Pkg.add("CUDA")
-    Pkg.add("cuDNN")
-    using CUDA, cuDNN
+    using CUDA
 else
     error("No GPU backend was specified.")
 end
