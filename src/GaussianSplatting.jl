@@ -33,6 +33,7 @@ using GLFW
 import CImGui.lib as iglib
 
 import BSON
+import ChainRulesCore as CRC
 import NNlib
 import Flux
 import ImageFiltering
@@ -56,7 +57,7 @@ _as_T(T, x) = reinterpret(T, reshape(x, :))
 
 include("simd.jl")
 include("utils.jl")
-include("metrics.jl")
+include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
 include("dataset.jl")
