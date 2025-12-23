@@ -3,7 +3,6 @@ mutable struct Trainer{
     R <: GaussianRasterizer,
     G <: GaussianModel,
     D <: ColmapDataset,
-    S <: SSIM,
     C <: GPUArrays.AllocCache,
     F,
     O,
@@ -12,7 +11,6 @@ mutable struct Trainer{
     gaussians::G
     dataset::D
     optimizers::O
-    ssim::S
 
     cache::C
 
@@ -39,7 +37,6 @@ function Trainer(
         opacities=NU.Adam(kab, gs.opacities; lr=opt_params.lr_opacities, ϵ),
         scales=NU.Adam(kab, gs.scales; lr=opt_params.lr_scales, ϵ),
         rotations=NU.Adam(kab, gs.rotations; lr=opt_params.lr_rotations, ϵ))
-    ssim = SSIM(kab)
 
     points_lr_scheduler = lr_exp_scheduler(
         opt_params.lr_points_start * dataset.camera_extent,
@@ -50,7 +47,7 @@ function Trainer(
     densify = true
     step = 0
     Trainer(
-        rast, gs, dataset, optimizers, ssim, cache,
+        rast, gs, dataset, optimizers, cache,
         points_lr_scheduler, opt_params, densify, step, ids)
 end
 
@@ -120,7 +117,6 @@ end
 function validate(trainer::Trainer)
     gs = trainer.gaussians
     rast = trainer.rast
-    ssim = trainer.ssim
     dataset = trainer.dataset
 
     eval_ssim = 0f0
@@ -144,7 +140,7 @@ function validate(trainer::Trainer)
         image_tmp = permutedims(image, (2, 3, 1))
         image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
-        eval_ssim += ssim(image_eval, target_image)
+        eval_ssim += mean(fused_ssim(image_eval; ref=target_image))
         eval_mse += mse(image_eval, target_image)
         eval_psnr += psnr(image_eval, target_image)
     end
@@ -160,7 +156,6 @@ function step!(trainer::Trainer)
 
     gs = trainer.gaussians
     rast = trainer.rast
-    ssim = trainer.ssim
     params = trainer.opt_params
 
     if trainer.step % 1000 == 0 && gs.sh_degree < gs.max_sh_degree
@@ -199,7 +194,7 @@ function step!(trainer::Trainer)
             image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
             l1 = mean(abs.(image_eval .- target_image))
-            s = 1f0 - ssim(image_eval, target_image)
+            s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
             (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
         end
 

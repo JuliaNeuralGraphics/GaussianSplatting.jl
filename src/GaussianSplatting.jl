@@ -17,7 +17,6 @@ using Random
 using Rotations
 using StaticArrays
 using Statistics
-using Preferences
 using ImageCore
 using ImageIO
 using ImageTransformations
@@ -33,8 +32,8 @@ using GLFW
 import CImGui.lib as iglib
 
 import BSON
+import ChainRulesCore as CRC
 import NNlib
-import Flux
 import ImageFiltering
 import KernelAbstractions as KA
 import NerfUtils as NU
@@ -56,7 +55,7 @@ _as_T(T, x) = reinterpret(T, reshape(x, :))
 
 include("simd.jl")
 include("utils.jl")
-include("metrics.jl")
+include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
 include("dataset.jl")
@@ -67,9 +66,6 @@ include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
 
-# Hacky way to get KA.Backend.
-gpu_backend() = get_backend(Flux.gpu(Array{Int}(undef, 0)))
-
 base_array_type(backend) = error("Not implemented for backend: `$backend`.")
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
@@ -78,8 +74,7 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
-function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
-    kab = gpu_backend()
+function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
     @info "Using `$kab` GPU backend."
 
     dataset = ColmapDataset(kab, dataset_path;
@@ -151,7 +146,7 @@ function main(dataset_path::String; scale::Int, save_path::Maybe{String} = nothi
     return
 end
 
-function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false)
+function gui(kab, path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false)
     ispath(path) || error("Path does not exist: `$path`.")
 
     viewer_mode = endswith(path, ".bson") || endswith(path, ".ply")
@@ -166,7 +161,6 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
         (1024, 1024, true)
 
     gui = if viewer_mode
-        kab = gpu_backend()
         if endswith(path, ".bson")
             θ = BSON.load(path)
             gaussians = GaussianModel(kab)
@@ -179,9 +173,9 @@ function gui(path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false
             camera = Camera(; fx=fov, fy=fov, width, height=width)
         end
 
-        GSGUI(gaussians, camera; width, height, fullscreen, resizable)
+        GSGUI(kab, gaussians, camera; width, height, fullscreen, resizable)
     else
-        GSGUI(path, scale; width, height, fullscreen, resizable)
+        GSGUI(kab, path, scale; width, height, fullscreen, resizable)
     end
     gui |> launch!
     return

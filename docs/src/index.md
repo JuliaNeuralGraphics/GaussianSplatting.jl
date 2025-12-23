@@ -25,17 +25,14 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
 1. Add necessary packages:
    ```julia
    ] add AMDGPU      # for AMD GPU
-   ] add CUDA, cuDNN # for Nvidia GPU
-   ] add Flux
+   ] add CUDA # for Nvidia GPU
    ```
 
 2. Run:
    ```julia
-   julia> using AMDGPU      # for AMD GPU
-   julia> using CUDA, cuDNN # for Nvidia GPU
-   julia> using Flux, GaussianSplatting
-
-   julia> GaussianSplatting.gui("path-to-colmap-dataset-directory"; scale=1)
+   julia> using AMDGPU; kab = ROCBackend() # for AMD GPU
+   julia> using CUDA; kab = CUDABackend()  # for Nvidia GPU
+   julia> GaussianSplatting.gui(kab, "path-to-colmap-dataset-directory"; scale=1)
    ```
 
 ## Viewer mode
@@ -44,26 +41,11 @@ Once you've trained a model and saved it to `.bson` file you can open it
 in a viewer-only mode by providing its path.
 
 ```julia
-julia> GaussianSplatting.gui("path-to-checkpoint.bson")
+julia> GaussianSplatting.gui(kab, "path-to-checkpoint.bson")
 ```
 
 Alternative, you can load a checkpoint
 in a training mode (see **Usage** section) using "Save/Load" tab.
-
-## GPU selection
-
-This is required only the first time per the environment.
-After selecting GPU backend, restart Julia REPL.
-
-- AMD GPU:
-  ```julia
-  julia> Flux.gpu_backend!("AMDGPU")
-  ```
-
-- Nvidia GPU:
-  ```julia
-  julia> Flux.gpu_backend!("CUDA")
-  ```
 
 ## References
 

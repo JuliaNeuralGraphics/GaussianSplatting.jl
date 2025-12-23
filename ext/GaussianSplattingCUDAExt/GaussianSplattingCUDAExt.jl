@@ -2,7 +2,6 @@ module GaussianSplattingCUDAExt
 
 # using Adapt
 using CUDA
-# using cuDNN
 # using KernelAbstractions
 using GaussianSplatting
 # using PrecompileTools

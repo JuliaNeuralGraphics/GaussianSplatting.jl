@@ -30,3 +30,10 @@ function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)
     end
     return _scheduler
 end
+
+mse(x, y) = mean((x .- y).^2)
+
+psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))
+
+within_gradient(x) = false
+CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
