@@ -17,7 +17,6 @@ using Random
 using Rotations
 using StaticArrays
 using Statistics
-using Preferences
 using ImageCore
 using ImageIO
 using ImageTransformations
