@@ -1,7 +1,6 @@
 import GaussianSplatting as GSP
 
-function main(dataset_path::String; scale::Int)
-    kab = GSP.gpu_backend()
+function benchmark(kab, dataset_path::String; scale::Int)
     @info "Using `$kab` GPU backend."
 
     dataset = GSP.ColmapDataset(kab, dataset_path; scale,
@@ -31,4 +30,5 @@ function main(dataset_path::String; scale::Int)
     end
     return
 end
-main("/home/pxlth/Downloads/360_v2/bicycle"; scale=4)
+benchmark(ROCBackend(), "/home/pxlth/Downloads/360_v2/bicycle"; scale=4)
+# benchmark(CUDABackend(), "/home/pxl-th/Downloads/360_v2/bicycle"; scale=4)

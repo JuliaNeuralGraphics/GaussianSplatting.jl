@@ -149,7 +149,7 @@ function (rast::GaussianRasterizer)(
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     # If rendering outside AD, use non-allocating path.
-    within_AD = NNlib.within_gradient(means_3d)
+    within_AD = within_gradient(means_3d)
 
     shs = if within_AD
         isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
