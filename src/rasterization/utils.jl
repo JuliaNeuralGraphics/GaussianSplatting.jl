@@ -13,8 +13,7 @@ sdiagm(x, y, z) = SMatrix{3, 3, Float32, 9}(
 
 gpu_floor(T, x) = unsafe_trunc(T, floor(x))
 gpu_ceil(T, x) = unsafe_trunc(T, ceil(x))
-
-gpu_cld(x, y::T) where T = (x + y - one(T)) ÷ y
+gpu_cld(x::X, y::T) where {X, T} = unsafe_trunc(T, floor(Float32(x + y - one(X)) / Float32(y)))
 
 Base.@propagate_inbounds function get_rect(
     pixel::SVector{2, Float32}, max_radius::Int32,
@@ -26,15 +25,6 @@ Base.@propagate_inbounds function get_rect(
     @inbounds rmax = SVector{2, Int32}(
         clamp(gpu_floor(Int32, gpu_cld(pixel[1] + max_radius, block[1])), 0i32, grid[1]),
         clamp(gpu_floor(Int32, gpu_cld(pixel[2] + max_radius, block[2])), 0i32, grid[2]))
-
-    # rblock = inv.(block)
-
-    # rmin = gpu_floor.(Int32, (pixel .- max_radius) .* rblock)
-    # rmin = clamp.(rmin, 0i32, grid)
-
-    # rmax = gpu_ceil.(Int32, (pixel .+ max_radius) .* rblock)
-    # # rmax = gpu_cld.(pixel .+ max_radius, block)
-    # rmax = clamp.(rmax, 0i32, grid)
     return rmin, rmax
 end
 

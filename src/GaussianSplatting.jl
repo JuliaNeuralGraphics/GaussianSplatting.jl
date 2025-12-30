@@ -31,6 +31,7 @@ using GLFW
 
 import CImGui.lib as iglib
 
+import AcceleratedKernels as AK
 import BSON
 import ChainRulesCore as CRC
 import ImageFiltering

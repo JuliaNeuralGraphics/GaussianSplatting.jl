@@ -192,7 +192,7 @@ function (rast::GaussianRasterizer)(
         means_2d, conics, compensations, depths = project(
             means_3d, scales_act, rotations;
             rast, camera, near_plane=0.2f0, far_plane=1000f0,
-            radius_clip=3f0, blur_ϵ=0.3f0)
+            radius_clip=Int32(3), blur_ϵ=0.3f0)
 
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
@@ -252,7 +252,7 @@ function rasterize(
 
     # TODO make configurable.
     near_plane, far_plane = 0.2f0, 1000f0
-    radius_clip = 3f0 # In pixels.
+    radius_clip = Int32(3) # In pixels.
     blur_ϵ = 0.3f0
 
     project!(kab)(
@@ -315,7 +315,7 @@ function rasterize(
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
     if use_ak(kab)
-        sortperm!(
+        AK.sortperm!(
             @view(rast.bstate.permutation[1:n_rendered]),
             @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
             temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))

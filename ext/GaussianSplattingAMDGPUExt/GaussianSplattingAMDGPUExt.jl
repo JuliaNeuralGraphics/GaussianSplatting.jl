@@ -12,7 +12,7 @@ GaussianSplatting.base_array_type(::ROCBackend) = ROCArray
 
 GaussianSplatting.use_ak(::ROCBackend) = true
 
-function GaussianSplatting.allocate_pinned(kab, ::Type{T}, shape) where T
+function GaussianSplatting.allocate_pinned(::ROCBackend, ::Type{T}, shape) where T
     x = Array{T}(undef, shape)
     xd = unsafe_wrap(ROCArray, pointer(x), size(x))
     return x, xd
