@@ -7,8 +7,9 @@ Gaussian Splatting algorithm in pure Julia.
 ## Requirements
 
 - Julia 1.10 or higher.
-- AMD ([AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl)) or
-  Nvidia ([CUDA.jl](https://github.com/JuliaGPU/CUDA.jl)) capable machine.
+- [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl) or
+  [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl) or
+  [Metal.jl](https://github.com/JuliaGPU/Metal.jl) capable machine.
 
 ## Install
 
@@ -24,14 +25,16 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
 
 1. Add necessary packages:
    ```julia
-   ] add AMDGPU      # for AMD GPU
-   ] add CUDA # for Nvidia GPU
+   ] add AMDGPU # for AMD GPU
+   ] add CUDA   # for Nvidia GPU
+   ] add Metal  # for Apple GPU
    ```
 
 2. Run:
    ```julia
-   julia> using AMDGPU; kab = ROCBackend() # for AMD GPU
-   julia> using CUDA; kab = CUDABackend()  # for Nvidia GPU
+   julia> using AMDGPU; kab = ROCBackend()  # for AMD GPU
+   julia> using CUDA; kab = CUDABackend()   # for Nvidia GPU
+   julia> using Metal; kab = MetalBackend() # for Apple GPU
    julia> GaussianSplatting.gui(kab, "path-to-colmap-dataset-directory"; scale=1)
    ```
 
