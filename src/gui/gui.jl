@@ -111,7 +111,7 @@ end
 
 # Viewer-only mode.
 function GSGUI(kab, gaussians::GaussianModel, camera::Camera; gl_kwargs...)
-    NGL.init(3, 0)
+    NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
 
@@ -144,7 +144,7 @@ end
 
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
-    NGL.init(3, 0)
+    NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
 

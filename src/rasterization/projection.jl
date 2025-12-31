@@ -4,7 +4,7 @@ function project(
     rotations::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera,
     near_plane::Float32, far_plane::Float32,
-    radius_clip::Float32, blur_ϵ::Float32,
+    radius_clip::Int32, blur_ϵ::Float32,
 )
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
@@ -57,7 +57,7 @@ function ∇project(
     conics::AbstractMatrix{Float32};
     rast::GaussianRasterizer, camera::Camera,
     near_plane::Float32, far_plane::Float32,
-    radius_clip::Float32, blur_ϵ::Float32,
+    radius_clip::Int32, blur_ϵ::Float32,
 )
     K = camera.intrinsics
     R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
@@ -110,7 +110,7 @@ function ChainRulesCore.rrule(::typeof(project),
 
     rast::GaussianRasterizer, camera::Camera,
     near_plane::Float32, far_plane::Float32,
-    radius_clip::Float32, blur_ϵ::Float32,
+    radius_clip::Int32, blur_ϵ::Float32,
 )
     means_2d, conics, compensations, depths = project(
         means_3d, scales, rotations;
@@ -151,7 +151,7 @@ end
     # Config.
     near_plane::Float32,
     far_plane::Float32,
-    radius_clip::Float32,
+    radius_clip::Int32,
     blur_ϵ::Float32,
 ) where {C <: Maybe{AbstractMatrix{Float32}}, RM}
     i = @index(Global)
@@ -194,10 +194,10 @@ end
 
     # Discard Gaussians outside of image plane.
     if (
-        (mean_2D[1] + radius) ≤ 0 ||
-        (mean_2D[1] - radius) ≥ resolution[1] ||
-        (mean_2D[2] + radius) ≤ 0 ||
-        (mean_2D[2] - radius) ≥ resolution[2]
+        (mean_2D[1] + radius) ≤ 0f0 ||
+        (mean_2D[1] - radius) ≥ Float32(resolution[1]) ||
+        (mean_2D[2] + radius) ≤ 0f0 ||
+        (mean_2D[2] - radius) ≥ Float32(resolution[2])
     )
         radii[i] = 0i32
         return
