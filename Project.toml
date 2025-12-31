@@ -1,6 +1,6 @@
 name = "GaussianSplatting"
 uuid = "991e6b22-92f0-46ac-8b70-8a93e7beee5d"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["Anton Smirnov <tonysmn97@gmail.com>"]
 
 [deps]
@@ -69,7 +69,7 @@ Metal = "1.9"
 ModernGL = "1.1"
 NearestNeighbors = "0.4"
 NerfUtils = "0.2"
-NeuralGraphicsGL = "0.5"
+NeuralGraphicsGL = "0.5.1"
 PlyIO = "1.2"
 Quaternions = "0.7"
 Rotations = "1.7"
