@@ -3,6 +3,7 @@ Base.@kwdef mutable struct UIState
     train::Ref{Bool} = Ref(false)
     render::Ref{Bool} = Ref(true)
     densify::Ref{Bool} = Ref(true)
+    scene_hovered::Bool = false
 
     loss::Float32 = 0f0
 

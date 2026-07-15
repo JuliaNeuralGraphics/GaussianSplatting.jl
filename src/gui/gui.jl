@@ -33,6 +33,19 @@ function is_mouse_in_ui()
     CImGui.IsMousePosValid() && unsafe_load(CImGui.GetIO().WantCaptureMouse)
 end
 
+function enable_docking!()
+    io = CImGui.GetIO()
+    io.ConfigFlags = unsafe_load(io.ConfigFlags) | CImGui.ImGuiConfigFlags_DockingEnable
+    return
+end
+
+function dockspace!()
+    # Passthru central node keeps the scene visible & interactive where no window is docked.
+    return CImGui.DockSpaceOverViewport(
+        0, CImGui.GetMainViewport(),
+        CImGui.ImGuiDockNodeFlags_PassthruCentralNode)
+end
+
 function look_at(position, target, up)
     Z = normalize(position - target)
     X = normalize(normalize(up) × Z)
@@ -96,16 +109,24 @@ function resize_callback(_, width, height)
     NGL.set_viewport(width, height)
     isassigned(GSGUI_REF) || return
 
-    width, height = 16 * cld(width, 16), 16 * cld(height, 16)
+    # Render resolution follows the `Scene` window size, not the OS window:
+    # the dock layout adjusts and `scene_window!` picks up the new size.
+    GSGUI_REF[].render_state.need_render = true
+    return
+end
 
-    gsgui::GSGUI = GSGUI_REF[]
-    NGL.resize!(gsgui.render_state.surface; width, height)
+# Resize render resolution to match the `Scene` window content size.
+function resize_scene!(gui::GSGUI; width::Int, height::Int)
+    NGL.resize!(gui.render_state.surface; width, height)
+    for attachment in values(gui.render_state.framebuffer.attachments)
+        NGL.resize!(attachment; width, height)
+    end
 
-    set_resolution!(gsgui.camera; width, height)
-    kab = get_backend(gsgui.rasterizer)
+    set_resolution!(gui.camera; width, height)
+    kab = get_backend(gui.rasterizer)
     # TODO free the old one before creating new one.
-    gsgui.rasterizer = GaussianRasterizer(kab, gsgui.camera; mode=gsgui.rasterizer.mode)
-    gsgui.render_state.need_render = true
+    gui.rasterizer = GaussianRasterizer(kab, gui.camera; mode=gui.rasterizer.mode)
+    gui.render_state.need_render = true
     return
 end
 
@@ -119,15 +140,19 @@ function GSGUI(kab, gaussians::GaussianModel, camera::Camera; gl_kwargs...)
     fonts = unsafe_load(CImGui.GetIO().Fonts)
     CImGui.AddFontFromFileTTF(fonts, font_file, 16)
 
+    enable_docking!()
+
     # Set up renderer.
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
 
-    render_state = RenderState(; surface=NGL.RenderSurface(;
-        internal_format=GL_RGB32F, data_type=GL_FLOAT,
-        resolution(camera)...))
+    render_state = RenderState(;
+        surface=NGL.RenderSurface(;
+            internal_format=GL_RGB32F, data_type=GL_FLOAT,
+            resolution(camera)...),
+        framebuffer=NGL.Framebuffer(; resolution(camera)...))
     control_settings = ControlSettings()
     ui_state = UIState()
 
@@ -152,6 +177,8 @@ function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
     fonts = unsafe_load(CImGui.GetIO().Fonts)
     CImGui.AddFontFromFileTTF(fonts, font_file, 16)
 
+    enable_docking!()
+
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
@@ -168,9 +195,11 @@ function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
         height=16 * cld(context.height, 16))...)
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
 
-    render_state = RenderState(; surface=NGL.RenderSurface(;
-        internal_format=GL_RGB32F, data_type=GL_FLOAT,
-        resolution(camera)...))
+    render_state = RenderState(;
+        surface=NGL.RenderSurface(;
+            internal_format=GL_RGB32F, data_type=GL_FLOAT,
+            resolution(camera)...),
+        framebuffer=NGL.Framebuffer(; resolution(camera)...))
     control_settings = ControlSettings()
     ui_state = UIState()
 
@@ -200,9 +229,11 @@ end
 function loop!(gui::GSGUI)
     frame_time = update_time!(gui.render_state)
     NGL.imgui_begin()
+    dockspace_id = dockspace!()
 
     # Handle controls.
-    mouse_in_ui = is_mouse_in_ui()
+    # `scene_hovered` lags one frame, same as ImGui's `WantCaptureMouse`.
+    mouse_in_ui = is_mouse_in_ui() && !gui.ui_state.scene_hovered
 
     handle_ui!(gui; frame_time)
     if !mouse_in_ui
@@ -220,35 +251,94 @@ function loop!(gui::GSGUI)
         gui.render_state.need_render = true
     end
 
-    # Draw gaussians.
-
     NGL.clear()
     NGL.set_clear_color(0.2, 0.2, 0.2, 1.0)
-    if gui.ui_state.render[]
-        render!(gui)
-    end
-    NGL.draw(gui.render_state.surface)
-    NGL.clear(NGL.GL_DEPTH_BUFFER_BIT)
 
-    # Draw other OpenGL objects.
+    # Draw gaussians & other OpenGL objects into the `Scene` window.
+    scene_window!(gui, dockspace_id) do
+        if !viewer_only(gui) && gui.ui_state.draw_cameras[]
+            P = NGL.perspective(gui.camera)
+            L = NGL.look_at(gui.camera)
 
-    P = NeuralGraphicsGL.perspective(gui.camera)
-    L = NeuralGraphicsGL.look_at(gui.camera)
-
-    if !viewer_only(gui) && gui.ui_state.draw_cameras[]
-        dataset = gui.trainer.dataset
-        for view_id in 1:length(dataset)
-            camera = dataset.train_cameras[view_id]
-            camera_perspective =
-                NGL.perspective(camera; near=0.1f0, far=0.2f0) *
-                NGL.look_at(camera)
-            NGL.draw(gui.frustum, camera_perspective, P, L)
+            dataset = gui.trainer.dataset
+            for view_id in 1:length(dataset)
+                camera = dataset.train_cameras[view_id]
+                camera_perspective =
+                    NGL.perspective(camera; near=0.1f0, far=0.2f0) *
+                    NGL.look_at(camera)
+                NGL.draw(gui.frustum, camera_perspective, P, L)
+            end
         end
     end
 
     NGL.imgui_end()
     GLFW.SwapBuffers(gui.context.window)
     GLFW.PollEvents()
+    return
+end
+
+"""
+Scene view as a dockable window: it starts docked into the dockspace's
+central node and re-renders at the new resolution when other windows
+docking around it change its size.
+
+`extra_draws` is called after the splats are drawn, with the scene
+framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
+"""
+function scene_window!(
+    extra_draws::Function, gui::GSGUI, dockspace_id;
+    force_render::Bool = false, allow_resize::Bool = true,
+)
+    CImGui.SetNextWindowDockID(dockspace_id, CImGui.ImGuiCond_FirstUseEver)
+    CImGui.PushStyleVar(
+        CImGui.ImGuiStyleVar_WindowPadding, CImGui.ImVec2(0f0, 0f0))
+    visible = CImGui.Begin("Scene")
+    CImGui.PopStyleVar()
+
+    hovered = false
+    if visible && allow_resize
+        avail = CImGui.GetContentRegionAvail()
+        width = 16 * max(1, floor(Int, avail.x / 16))
+        height = 16 * max(1, floor(Int, avail.y / 16))
+        res = resolution(gui.camera)
+        if width != res.width || height != res.height
+            resize_scene!(gui; width, height)
+        end
+    end
+
+    (force_render || gui.ui_state.render[]) && render!(gui)
+    if visible
+        draw_scene!(extra_draws, gui)
+
+        res = resolution(gui.camera)
+        color = gui.render_state.framebuffer[GL_COLOR_ATTACHMENT0]
+        # Flip v: OpenGL textures are bottom-up.
+        CImGui.Image(
+            CImGui.ImTextureRef(C_NULL, CImGui.ImTextureID(color.id)),
+            (Float32(res.width), Float32(res.height)),
+            (0f0, 1f0), (1f0, 0f0))
+        hovered = CImGui.IsWindowHovered()
+    end
+    CImGui.End()
+
+    gui.ui_state.scene_hovered = hovered
+    return
+end
+
+function draw_scene!(extra_draws::Function, gui::GSGUI)
+    fb = gui.render_state.framebuffer
+    (; width, height) = resolution(gui.camera)
+
+    NGL.bind(fb)
+    NGL.set_viewport(width, height)
+    NGL.clear()
+    NGL.set_clear_color(0.2, 0.2, 0.2, 1.0)
+
+    NGL.draw(gui.render_state.surface)
+    NGL.clear(NGL.GL_DEPTH_BUFFER_BIT)
+    extra_draws()
+
+    NGL.unbind(fb)
     return
 end
 

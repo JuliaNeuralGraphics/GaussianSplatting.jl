@@ -127,9 +127,11 @@ function loop!(capture_mode::CaptureMode; gui)
     frame_time = update_time!(gui.render_state)
 
     NGL.imgui_begin()
+    dockspace_id = dockspace!()
     handle_ui!(capture_mode; gui)
 
-    if !capture_mode.is_rendering && !is_mouse_in_ui()
+    mouse_in_ui = is_mouse_in_ui() && !gui.ui_state.scene_hovered
+    if !capture_mode.is_rendering && !mouse_in_ui
         controller_id = gui.ui_state.controller_mode[]
 
         gui.render_state.need_render |= handle_keyboard!(
@@ -154,14 +156,16 @@ function loop!(capture_mode::CaptureMode; gui)
         end
     end
 
-    render!(gui)
-    NGL.draw(gui.render_state.surface)
-    NGL.clear(NGL.GL_DEPTH_BUFFER_BIT)
-
-    if !capture_mode.is_rendering
-        P = NGL.perspective(gui.camera)
-        L = NGL.look_at(gui.camera)
-        NGL.draw(capture_mode.camera_path, P, L; frustum=gui.frustum)
+    # Lock render resolution while writing video: frame size must
+    # match the opened video stream.
+    scene_window!(gui, dockspace_id;
+        force_render=true, allow_resize=!capture_mode.is_rendering,
+    ) do
+        if !capture_mode.is_rendering
+            P = NGL.perspective(gui.camera)
+            L = NGL.look_at(gui.camera)
+            NGL.draw(capture_mode.camera_path, P, L; frustum=gui.frustum)
+        end
     end
 
     NGL.imgui_end()

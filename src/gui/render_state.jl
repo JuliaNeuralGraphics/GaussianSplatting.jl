@@ -1,6 +1,7 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
 Base.@kwdef mutable struct RenderState
     surface::NeuralGraphicsGL.RenderSurface
+    framebuffer::NeuralGraphicsGL.Framebuffer
     need_render::Bool = true # `true` to trigger first frame rendering
     last_frame_time::Float64 = time()
 end
@@ -88,11 +89,8 @@ function fpv_mouse_controller(
 )
     need_render = false
 
-    io = CImGui.GetIO()
-    do_handle_mouse =
-        CImGui.IsMousePosValid() &&
-        unsafe_load(io.WantCaptureMouse) == false &&
-        CImGui.IsMouseDown(0)
+    # Callers gate on the scene view being hovered.
+    do_handle_mouse = CImGui.IsMousePosValid() && CImGui.IsMouseDown(0)
     do_handle_mouse || return need_render
 
     mouse_δ = NeuralGraphicsGL.get_mouse_delta()
@@ -117,12 +115,10 @@ function orbiting_mouse_controller(
 )
     need_render = false
 
-    io = CImGui.GetIO()
     lmouse = CImGui.IsMouseDown(0)
     rmouse = CImGui.IsMouseDown(1)
-    do_handle_mouse =
-        CImGui.IsMousePosValid() &&
-        unsafe_load(io.WantCaptureMouse) == false && (lmouse || rmouse)
+    # Callers gate on the scene view being hovered.
+    do_handle_mouse = CImGui.IsMousePosValid() && (lmouse || rmouse)
     do_handle_mouse || return need_render
 
     mouse_δ = NeuralGraphicsGL.get_mouse_delta()
