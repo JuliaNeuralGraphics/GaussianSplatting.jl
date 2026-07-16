@@ -28,6 +28,7 @@ using NeuralGraphicsGL
 using ModernGL
 using CImGui
 using GLFW
+using NativeFileDialog
 
 import CImGui.lib as iglib
 
@@ -177,6 +178,24 @@ function gui(kab, path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = 
     else
         GSGUI(kab, path, scale; width, height, fullscreen, resizable)
     end
+    gui |> launch!
+    return
+end
+
+"""
+Application entry point: starts with an empty scene,
+datasets are loaded via the `File` menu.
+"""
+function app(kab; fullscreen::Bool = false)
+    width, height, resizable = fullscreen ?
+        (-1, -1, false) :
+        (1024, 1024, true)
+
+    gaussians = GaussianModel(kab)
+    fov = NU.fov2focal(1024, 45f0)
+    camera = Camera(; fx=fov, fy=fov, width, height)
+
+    gui = GSGUI(kab, gaussians, camera; width, height, fullscreen, resizable)
     gui |> launch!
     return
 end

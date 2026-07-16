@@ -81,11 +81,10 @@ end
     CaptureScreen
 end
 
-mutable struct GSGUI{
-    G <: GaussianModel,
-    T <: Maybe{Trainer},
-    R <: GaussianRasterizer,
-}
+# Fields are non-concrete so that a dataset can be loaded at runtime
+# (`trainer` goes from `nothing` to a `Trainer`, gaussians & rasterizer
+# are replaced): see `load_dataset!`.
+mutable struct GSGUI
     context::NGL.Context
     screen::Screen
     frustum::NGL.Frustum
@@ -96,9 +95,9 @@ mutable struct GSGUI{
     capture_mode::CaptureMode
 
     camera::Camera
-    gaussians::G
-    rasterizer::R
-    trainer::T
+    gaussians::GaussianModel
+    rasterizer::GaussianRasterizer
+    trainer::Maybe{Trainer}
 end
 
 const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
@@ -215,6 +214,138 @@ end
 
 viewer_only(gui::GSGUI) = isnothing(gui.trainer)
 
+"""
+Load a COLMAP dataset at runtime, replacing the current scene:
+new gaussians, trainer and rasterizers, keeping the GL context,
+render surface & current render resolution.
+"""
+function load_dataset!(gui::GSGUI, dataset_path::String; scale::Int)
+    kab = get_backend(gui.rasterizer)
+
+    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
+    camera = dataset.train_cameras[1]
+
+    opt_params = OptimizationParams()
+    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+        isotropic=false, max_sh_degree=3)
+    rasterizer = GaussianRasterizer(kab, camera; fused=true)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+
+    # Set-up separate renderer camera & rasterizer,
+    # keeping the current render resolution.
+    camera = deepcopy(camera)
+    set_resolution!(camera; resolution(gui.camera)...)
+    # TODO free the old one before creating new one.
+    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+
+    gui.camera = camera
+    gui.gaussians = gaussians
+    gui.rasterizer = gui_rasterizer
+    gui.trainer = trainer
+
+    reset_ui!(gui.ui_state)
+    gui.render_state.need_render = true
+    return
+end
+
+"""
+Load a `.bson` model checkpoint at runtime in viewer-only mode
+(no trainer), replacing the current scene.
+"""
+function load_bson!(gui::GSGUI, state_file::String)
+    kab = get_backend(gui.rasterizer)
+
+    θ = BSON.load(state_file)
+    gaussians = GaussianModel(kab)
+    set_from_bson!(gaussians, θ[:gaussians])
+
+    # Keep the current render resolution.
+    camera = θ[:camera]
+    set_resolution!(camera; resolution(gui.camera)...)
+    # TODO free the old one before creating new one.
+    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+
+    gui.camera = camera
+    gui.gaussians = gaussians
+    gui.rasterizer = gui_rasterizer
+    gui.trainer = nothing
+
+    reset_ui!(gui.ui_state)
+    gui.render_state.need_render = true
+    return
+end
+
+function reset_ui!(ui_state::UIState)
+    ui_state.train[] = false
+    ui_state.densify[] = true
+    ui_state.loss = 0f0
+    ui_state.selected_view[] = 0
+    ui_state.selected_mode[] = 0
+    ui_state.sh_degree[] = -1
+    return
+end
+
+function menu_bar!(gui::GSGUI)
+    CImGui.BeginMainMenuBar() || return
+
+    if CImGui.BeginMenu("File")
+        if CImGui.BeginMenu("Dataset Scale")
+            for scale in (1, 2, 4, 8)
+                if CImGui.MenuItem("$(scale)x", C_NULL,
+                    Int(gui.ui_state.dataset_scale[]) == scale)
+                    gui.ui_state.dataset_scale[] = scale
+                end
+            end
+            CImGui.EndMenu()
+        end
+
+        if CImGui.MenuItem("Open Dataset...")
+            dataset_path = pick_folder() # Empty when cancelled.
+            if !isempty(dataset_path)
+                try
+                    load_dataset!(gui, dataset_path;
+                        scale=Int(gui.ui_state.dataset_scale[]))
+                catch err
+                    @error "Failed to load COLMAP dataset from `$dataset_path`:" exception=(err, catch_backtrace())
+                end
+            end
+        end
+
+        CImGui.Separator()
+
+        # Viewer-only mode: no trainer.
+        if CImGui.MenuItem("Open BSON...")
+            state_file = pick_file(; filterlist="bson") # Empty when cancelled.
+            if !isempty(state_file)
+                try
+                    load_bson!(gui, state_file)
+                catch err
+                    @error "Failed to load BSON checkpoint from `$state_file`:" exception=(err, catch_backtrace())
+                end
+            end
+        end
+
+        CImGui.Separator()
+
+        # Saving needs a trainer: it stores optimizers & training step.
+        if CImGui.MenuItem("Save BSON...", C_NULL, false, !viewer_only(gui))
+            state_file = save_file(; filterlist="bson") # Empty when cancelled.
+            if !isempty(state_file)
+                endswith(state_file, ".bson") || (state_file *= ".bson")
+                try
+                    save_state(gui.trainer, state_file)
+                catch err
+                    @error "Failed to save BSON checkpoint to `$state_file`:" exception=(err, catch_backtrace())
+                end
+            end
+        end
+        CImGui.EndMenu()
+    end
+
+    CImGui.EndMainMenuBar()
+    return
+end
+
 function launch!(gui::GSGUI)
     NGL.render_loop(gui.context) do
         if gui.screen == MainScreen
@@ -229,6 +360,7 @@ end
 function loop!(gui::GSGUI)
     frame_time = update_time!(gui.render_state)
     NGL.imgui_begin()
+    menu_bar!(gui)
     dockspace_id = dockspace!()
 
     # Handle controls.
@@ -517,6 +649,14 @@ function render!(gui::GSGUI)
 
     gs = gui.gaussians
     rast = gui.rasterizer
+
+    # Empty scene (no dataset loaded yet): display background color.
+    if length(gs) == 0
+        (; width, height) = resolution(gui.camera)
+        NGL.set_data!(gui.render_state.surface,
+            zeros(Float32, 3, width, height))
+        return
+    end
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]
     sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree

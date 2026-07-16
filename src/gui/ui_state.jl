@@ -21,4 +21,6 @@ Base.@kwdef mutable struct UIState
 
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]
+
+    dataset_scale::Ref{Int32} = Ref{Int32}(1)
 end
