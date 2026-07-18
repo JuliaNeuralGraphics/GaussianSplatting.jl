@@ -22,5 +22,10 @@ Base.@kwdef mutable struct UIState
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]
 
+    # `Open Dataset` modal.
+    open_dataset_popup::Bool = false
     dataset_scale::Ref{Int32} = Ref{Int32}(1)
+    dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)
+    dataset_error::String = ""
+    dataset_load_task::Maybe{Task} = nothing
 end

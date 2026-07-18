@@ -215,13 +215,14 @@ end
 viewer_only(gui::GSGUI) = isnothing(gui.trainer)
 
 """
-Load a COLMAP dataset at runtime, replacing the current scene:
-new gaussians, trainer and rasterizers, keeping the GL context,
-render surface & current render resolution.
-"""
-function load_dataset!(gui::GSGUI, dataset_path::String; scale::Int)
-    kab = get_backend(gui.rasterizer)
+Load a COLMAP dataset: new gaussians, trainer and rasterizers.
+`width` & `height` specify the render resolution for the GUI camera.
 
+Runs on a background thread (see `open_dataset_modal!`), so it must
+not touch OpenGL state: the results are applied on the render thread
+in `apply_dataset!`.
+"""
+function load_dataset(kab, dataset_path::String; scale::Int, width::Int, height::Int)
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
@@ -231,17 +232,20 @@ function load_dataset!(gui::GSGUI, dataset_path::String; scale::Int)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
-    # Set-up separate renderer camera & rasterizer,
-    # keeping the current render resolution.
+    # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(camera)
-    set_resolution!(camera; resolution(gui.camera)...)
+    set_resolution!(camera; width, height)
     # TODO free the old one before creating new one.
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+    return (; camera, gaussians, gui_rasterizer, trainer)
+end
 
-    gui.camera = camera
-    gui.gaussians = gaussians
-    gui.rasterizer = gui_rasterizer
-    gui.trainer = trainer
+# Replace the current scene, keeping the GL context & render surface.
+function apply_dataset!(gui::GSGUI, loaded)
+    gui.camera = loaded.camera
+    gui.gaussians = loaded.gaussians
+    gui.rasterizer = loaded.gui_rasterizer
+    gui.trainer = loaded.trainer
 
     reset_ui!(gui.ui_state)
     gui.render_state.need_render = true
@@ -289,26 +293,8 @@ function menu_bar!(gui::GSGUI)
     CImGui.BeginMainMenuBar() || return
 
     if CImGui.BeginMenu("File")
-        if CImGui.BeginMenu("Dataset Scale")
-            for scale in (1, 2, 4, 8)
-                if CImGui.MenuItem("$(scale)x", C_NULL,
-                    Int(gui.ui_state.dataset_scale[]) == scale)
-                    gui.ui_state.dataset_scale[] = scale
-                end
-            end
-            CImGui.EndMenu()
-        end
-
         if CImGui.MenuItem("Open Dataset...")
-            dataset_path = pick_folder() # Empty when cancelled.
-            if !isempty(dataset_path)
-                try
-                    load_dataset!(gui, dataset_path;
-                        scale=Int(gui.ui_state.dataset_scale[]))
-                catch err
-                    @error "Failed to load COLMAP dataset from `$dataset_path`:" exception=(err, catch_backtrace())
-                end
-            end
+            gui.ui_state.open_dataset_popup = true
         end
 
         CImGui.Separator()
@@ -346,6 +332,109 @@ function menu_bar!(gui::GSGUI)
     return
 end
 
+"""
+Modal window for selecting a COLMAP dataset folder & its scale.
+Opened via the `File` menu; must be submitted at the same ID stack
+level as `OpenPopup`, hence outside of `menu_bar!`.
+"""
+function open_dataset_modal!(gui::GSGUI)
+    ui_state = gui.ui_state
+    if ui_state.open_dataset_popup
+        ui_state.open_dataset_popup = false
+        ui_state.dataset_error = ""
+        CImGui.OpenPopup("Open Dataset")
+    end
+
+    # Center on the viewport.
+    viewport = CImGui.GetMainViewport()
+    vp_pos, vp_size = unsafe_load(viewport.Pos), unsafe_load(viewport.Size)
+    CImGui.SetNextWindowPos(
+        (vp_pos.x + 0.5f0 * vp_size.x, vp_pos.y + 0.5f0 * vp_size.y),
+        CImGui.ImGuiCond_Appearing, (0.5f0, 0.5f0))
+
+    # Fixed width; height auto-fits the form on appearance & then stays
+    # constant, so the window does not shrink when only the loading
+    # spinner is displayed.
+    CImGui.SetNextWindowSize(
+        CImGui.ImVec2(600f0, 0f0), CImGui.ImGuiCond_Appearing)
+    CImGui.BeginPopupModal("Open Dataset", C_NULL,
+        CImGui.ImGuiWindowFlags_NoResize) || return
+
+    # Loading in progress: show a spinner until the task completes.
+    task = ui_state.dataset_load_task
+    if task ≢ nothing
+        yield() # Let the loading task run when Julia is single-threaded.
+        if istaskdone(task)
+            ui_state.dataset_load_task = nothing
+            try
+                apply_dataset!(gui, fetch(task))
+                CImGui.CloseCurrentPopup()
+            catch err
+                ui_state.dataset_error = "Failed to load dataset. See logs for details."
+                @error "Failed to load COLMAP dataset:" exception=(err, catch_backtrace())
+            end
+        else
+            CImGui.Text("Loading dataset. Please wait...")
+            # Negative fraction switches ProgressBar into indeterminate mode.
+            CImGui.ProgressBar(
+                -1f0 * Float32(CImGui.GetTime()),
+                CImGui.ImVec2(-1f0, 0f0), "Loading...")
+        end
+        CImGui.EndPopup()
+        return
+    end
+
+    CImGui.Text("Path to COLMAP dataset folder:")
+    CImGui.PushItemWidth(400)
+    CImGui.InputText("##dataset-path", pointer(ui_state.dataset_path),
+        length(ui_state.dataset_path))
+    CImGui.PopItemWidth()
+    CImGui.SameLine()
+    if CImGui.Button("Browse...")
+        dataset_path = pick_folder() # Empty when cancelled.
+        if !isempty(dataset_path)
+            ui_state.dataset_path = Vector{UInt8}(dataset_path * "\0"^512)
+        end
+    end
+
+    CImGui.Text("Scale:")
+    for scale in (1, 2, 4, 8)
+        CImGui.SameLine()
+        if CImGui.RadioButton("$(scale)x", Int(ui_state.dataset_scale[]) == scale)
+            ui_state.dataset_scale[] = scale
+        end
+    end
+
+    # Always occupy the error line to keep the window height constant.
+    if isempty(ui_state.dataset_error)
+        CImGui.Text(" ")
+    else
+        CImGui.TextColored((1f0, 0.3f0, 0.3f0, 1f0), ui_state.dataset_error)
+    end
+
+    CImGui.Separator()
+    dataset_path = unsafe_string(pointer(ui_state.dataset_path))
+    can_open = isdir(dataset_path)
+
+    can_open || disabled_begin()
+    if CImGui.Button("Open", CImGui.ImVec2(120, 0))
+        ui_state.dataset_error = ""
+        kab = get_backend(gui.rasterizer)
+        scale = Int(ui_state.dataset_scale[])
+        (; width, height) = resolution(gui.camera)
+        ui_state.dataset_load_task = Threads.@spawn load_dataset(
+            kab, dataset_path; scale, width, height)
+    end
+    can_open || disabled_end()
+
+    CImGui.SameLine()
+    if CImGui.Button("Cancel", CImGui.ImVec2(120, 0))
+        CImGui.CloseCurrentPopup()
+    end
+    CImGui.EndPopup()
+    return
+end
+
 function launch!(gui::GSGUI)
     NGL.render_loop(gui.context) do
         if gui.screen == MainScreen
@@ -361,6 +450,7 @@ function loop!(gui::GSGUI)
     frame_time = update_time!(gui.render_state)
     NGL.imgui_begin()
     menu_bar!(gui)
+    open_dataset_modal!(gui)
     dockspace_id = dockspace!()
 
     # Handle controls.
