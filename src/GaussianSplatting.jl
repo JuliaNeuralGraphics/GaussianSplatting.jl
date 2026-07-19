@@ -156,11 +156,11 @@ function app(kab; fullscreen::Bool = false)
         (-1, -1, false) :
         (1024, 1024, true)
 
-    gaussians = GaussianModel(kab)
     fov = NU.fov2focal(1024, 45f0)
     camera = Camera(; fx=fov, fy=fov, width, height)
 
-    gui = GSGUI(kab, gaussians, camera; width, height, fullscreen, resizable)
+    # No gaussians on startup: instantiated when loading a dataset/model.
+    gui = GSGUI(kab, nothing, camera; width, height, fullscreen, resizable)
     gui |> launch!
     return
 end

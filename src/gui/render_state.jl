@@ -29,6 +29,43 @@ mutable struct ControlSettings
     end
 end
 
+"""
+Estimate the scene's up direction as the average of the dataset
+cameras' up axes: photos are mostly taken with a roughly level camera,
+while the COLMAP world orientation is arbitrary. Yawing around this
+vector instead of the world `-Y` keeps the horizon level.
+Negated to match the `up_vec` convention (`-view_up` of an identity camera).
+"""
+function estimate_up_vec(cameras::Vector{Camera})
+    return -normalize(sum(view_up, cameras))
+end
+
+"""
+Look from `pos` towards `target` with zero roll w.r.t. `up_vec`:
+rebuild the orientation frame in `c2w` convention
+(columns: side, up, dir; `up_vec = -view_up`). See also `estimate_up_vec`.
+"""
+function look_at!(
+    c::Camera, pos::SVector{3, Float32}, target::SVector{3, Float32},
+    up_vec::SVector{3, Float32},
+)
+    dir = normalize(target - pos)
+    side = dir × up_vec
+    n = norm(side)
+    n ≈ 0f0 && return # Looking straight along `up_vec`: side is ambiguous.
+    side = side ./ n
+
+    up = dir × side
+    R = hcat(side, up, dir)
+    set_c2w!(c, R, pos)
+    return
+end
+
+# Remove camera roll w.r.t. `up_vec`, keeping the position & view direction.
+function level_horizon!(c::Camera, up_vec::SVector{3, Float32})
+    look_at!(c, view_pos(c), view_pos(c) + view_dir(c), up_vec)
+end
+
 function fpv_keyboard_controller(
     control_settings::ControlSettings, camera::Camera; frame_time::Real,
 )
@@ -101,7 +138,14 @@ function fpv_mouse_controller(
     if NeuralGraphicsGL.is_key_down(iglib.ImGuiKey_R) # roll
         R = AngleAxis(δy, view_dir(camera)...)
     else
-        R = AngleAxis(δx, control_settings.up_vec...) *
+        # Clamp pitch to ±89° from the horizon: crossing the pole
+        # would flip the yaw direction.
+        up_vec = control_settings.up_vec
+        pitch = asin(clamp(view_dir(camera) ⋅ up_vec, -1f0, 1f0))
+        pitch_limit = deg2rad(89f0)
+        δy = clamp(pitch + δy, -pitch_limit, pitch_limit) - pitch
+
+        R = AngleAxis(δx, up_vec...) *
             AngleAxis(δy, view_side(camera)...)
     end
 
@@ -114,6 +158,17 @@ function orbiting_mouse_controller(
     control_settings::ControlSettings, camera::Camera;
 )
     need_render = false
+    up_vec = control_settings.up_vec
+    target = control_settings.orbiting_target
+
+    # Zoom towards the target with the mouse wheel.
+    wheel = unsafe_load(CImGui.GetIO().MouseWheel)
+    if !(wheel ≈ 0f0)
+        r = norm(view_pos(camera) - target)
+        r_new = max(1f-2, r * 0.9f0^wheel)
+        shift!(camera, SVector{3, Float32}(0f0, 0f0, r - r_new))
+        need_render = true
+    end
 
     lmouse = CImGui.IsMouseDown(0)
     rmouse = CImGui.IsMouseDown(1)
@@ -127,28 +182,32 @@ function orbiting_mouse_controller(
     δx ≈ 0f0 && δy ≈ 0f0 && return need_render
 
     if lmouse
-        # Translate camera.
-        translate_vec = if NeuralGraphicsGL.is_key_down(iglib.ImGuiKey_F)
-            SVector{3, Float32}(δx, δy, 0)
-        else
-            SVector{3, Float32}(δx, 0f0, -δy * 10f0)
-        end
+        # Pan: translate camera & target in the view plane,
+        # scaled by the distance to the target.
+        r = norm(view_pos(camera) - target)
+        translate_vec = SVector{3, Float32}(δx * r, δy * r, 0f0)
+        world_δ = SMatrix{3, 3, Float32}(@view(camera.c2w[1:3, 1:3])) * translate_vec
         shift!(camera, translate_vec)
-
-        # TODO adjust distance to target
-        control_settings.orbiting_target = view_pos(camera) .+ 10f0 .* view_dir(camera)
+        control_settings.orbiting_target = target .+ world_δ
     elseif rmouse
-        sensitivity = 5f0
-        translate_vec = SVector{3, Float32}(δx * sensitivity, δy * sensitivity, 0f0)
-        shift!(camera, translate_vec)
+        # Orbit around the target: yaw about the scene up (no roll),
+        # pitch about the side axis, clamped to not cross the pole.
+        offset = view_pos(camera) - target
+        r = norm(offset)
+        r ≈ 0f0 && return need_render
 
-        target = control_settings.orbiting_target
-        LT = NGL.look_at(
-            view_pos(camera), target, view_up(camera);
-            left_handed=false)
+        dir = -offset ./ r # Viewing direction, towards the target.
+        side = dir × up_vec
+        n = norm(side)
+        n ≈ 0f0 && return need_render
+        side = side ./ n
 
-        new_c2w = inv(LT)
-        set_c2w!(camera, new_c2w)
+        pitch = asin(clamp(dir ⋅ up_vec, -1f0, 1f0))
+        pitch_limit = deg2rad(89f0)
+        δy = clamp(pitch + δy, -pitch_limit, pitch_limit) - pitch
+
+        R = AngleAxis(δx, up_vec...) * AngleAxis(δy, side...)
+        look_at!(camera, target .+ R * offset, target, up_vec)
     end
 
     need_render = true

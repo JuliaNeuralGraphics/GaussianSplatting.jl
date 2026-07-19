@@ -95,7 +95,8 @@ mutable struct GSGUI
     capture_mode::CaptureMode
 
     camera::Camera
-    gaussians::GaussianModel
+    # `nothing` on empty startup (`app`), until a dataset/model is loaded.
+    gaussians::Maybe{GaussianModel}
     rasterizer::GaussianRasterizer
     trainer::Maybe{Trainer}
 end
@@ -130,7 +131,7 @@ function resize_scene!(gui::GSGUI; width::Int, height::Int)
 end
 
 # Viewer-only mode.
-function GSGUI(kab, gaussians::GaussianModel, camera::Camera; gl_kwargs...)
+function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs...)
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -200,6 +201,7 @@ function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
             resolution(camera)...),
         framebuffer=NGL.Framebuffer(; resolution(camera)...))
     control_settings = ControlSettings()
+    control_settings.up_vec = estimate_up_vec(dataset.train_cameras)
     ui_state = UIState()
 
     capture_mode = CaptureMode()
@@ -237,7 +239,9 @@ function load_dataset(kab, dataset_path::String; scale::Int, width::Int, height:
     set_resolution!(camera; width, height)
     # TODO free the old one before creating new one.
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
-    return (; camera, gaussians, gui_rasterizer, trainer)
+
+    up_vec = estimate_up_vec(dataset.train_cameras)
+    return (; camera, gaussians, gui_rasterizer, trainer, up_vec)
 end
 
 # Replace the current scene, keeping the GL context & render surface.
@@ -246,6 +250,8 @@ function apply_dataset!(gui::GSGUI, loaded)
     gui.gaussians = loaded.gaussians
     gui.rasterizer = loaded.gui_rasterizer
     gui.trainer = loaded.trainer
+    # Yaw rotates around the estimated scene up: keeps the horizon level.
+    gui.control_settings.up_vec = loaded.up_vec
 
     reset_ui!(gui.ui_state)
     gui.render_state.need_render = true
@@ -570,17 +576,56 @@ function handle_ui!(gui::GSGUI; frame_time)
             if CImGui.BeginTabItem("Controls")
                 (; width, height) = resolution(gui.camera)
                 CImGui.Text("Render Resolution: $width x $height")
-                CImGui.Text("N Gaussians: $(size(gui.gaussians.points, 2))")
+                n_gaussians = gui.gaussians ≡ nothing ? 0 : length(gui.gaussians)
+                CImGui.Text("N Gaussians: $n_gaussians")
 
                 CImGui.Checkbox("Render", gui.ui_state.render)
 
                 CImGui.PushItemWidth(-100)
-                CImGui.Combo("Controller", gui.ui_state.controller_mode,
+                if CImGui.Combo("Controller", gui.ui_state.controller_mode,
                     gui.ui_state.controller_modes, length(gui.ui_state.controller_modes),
-                )
+                ) && gui.ui_state.controller_mode[] == 1
+                    # Entering orbit mode: place the target in front of the
+                    # camera, at a scene-sized distance.
+                    d = viewer_only(gui) ?
+                        10f0 : Float32(gui.trainer.dataset.camera_extent)
+                    gui.control_settings.orbiting_target =
+                        view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+                end
+
+                # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
+                CImGui.BeginTable("##up-vec-buttons-table", 2)
+                CImGui.TableNextRow()
+                CImGui.TableNextColumn()
+                if CImGui.Button("Set Up From View", CImGui.ImVec2(-1, 0))
+                    gui.control_settings.up_vec = -view_up(gui.camera)
+                end
+                CImGui.SetItemTooltip(
+                    "Use the current camera up as the scene up: " *
+                    "yaw will rotate around it.")
+                CImGui.TableNextColumn()
+                if CImGui.Button("Level Horizon", CImGui.ImVec2(-1, 0))
+                    level_horizon!(gui.camera, gui.control_settings.up_vec)
+                    gui.render_state.need_render = true
+                end
+                CImGui.SetItemTooltip(
+                    "Remove accumulated roll: align the camera with the scene up.")
+                CImGui.EndTable()
+
+                has_dataset = !viewer_only(gui)
+                has_dataset || disabled_begin()
+                if CImGui.Button("Reset Up From Dataset", CImGui.ImVec2(-1, 0))
+                    gui.control_settings.up_vec =
+                        estimate_up_vec(gui.trainer.dataset.train_cameras)
+                end
+                CImGui.SetItemTooltip(
+                    "Re-estimate the scene up from the dataset cameras, " *
+                    "discarding manual calibration.")
+                has_dataset || disabled_end()
 
                 CImGui.PushItemWidth(-100)
-                max_sh_degree = gui.gaussians.max_sh_degree
+                max_sh_degree = gui.gaussians ≡ nothing ?
+                    0 : gui.gaussians.max_sh_degree
                 if max_sh_degree > 0 && CImGui.SliderInt(
                     "SH degree", gui.ui_state.sh_degree,
                     -1, max_sh_degree, "%d / $max_sh_degree",
@@ -637,61 +682,9 @@ function handle_ui!(gui::GSGUI; frame_time)
                     )
                         vid = gui.ui_state.selected_view[] + 1
                         set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
+                        # A dataset photo's pose is level: use it to calibrate the yaw axis.
+                        gui.control_settings.up_vec = -view_up(gui.camera)
                         gui.render_state.need_render = true
-                    end
-                end
-                CImGui.EndTabItem()
-            end
-
-            if gui.trainer ≢ nothing && CImGui.BeginTabItem("Save/Load")
-                CImGui.Text("Path to Save Directory:")
-
-                CImGui.PushItemWidth(-1)
-                CImGui.InputText(
-                    "##savedir-inputtext", pointer(gui.ui_state.save_directory_path),
-                    length(gui.ui_state.save_directory_path))
-
-                if CImGui.Button("Save", CImGui.ImVec2(-1, 0))
-                    save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
-                    isdir(save_dir) || mkpath(save_dir)
-
-                    tstmp = now()
-                    fmt = "timestamp-$(month(tstmp))M-$(day(tstmp))D-$(hour(tstmp)):$(minute(tstmp))"
-                    save_file = joinpath(save_dir, "state-(step-$(gui.trainer.step))-($fmt).bson")
-                    save_state(gui.trainer, save_file)
-                end
-                CImGui.Separator()
-
-                if CImGui.Button("Export PLY", CImGui.ImVec2(-1, 0))
-                    save_dir = unsafe_string(pointer(gui.ui_state.save_directory_path))
-                    isdir(save_dir) || mkpath(save_dir)
-
-                    tstmp = now()
-                    fmt = "timestamp-$(month(tstmp))M-$(day(tstmp))D-$(hour(tstmp)):$(minute(tstmp))"
-                    save_file = joinpath(save_dir, "state-(step-$(gui.trainer.step))-($fmt).ply")
-                    export_ply(gui.gaussians, save_file)
-                end
-                CImGui.Separator()
-
-                CImGui.Text("Path to State File (.bson):")
-                CImGui.PushItemWidth(-1)
-                CImGui.InputText(
-                    "##statefile-inputtext", pointer(gui.ui_state.state_file),
-                    length(gui.ui_state.state_file))
-
-                if CImGui.Button("Load", CImGui.ImVec2(-1, 0))
-                    state_file = unsafe_string(pointer(gui.ui_state.state_file))
-                    if isfile(state_file)
-                        if endswith(state_file, ".bson")
-                            load_state!(gui.trainer, state_file)
-                            gui.render_state.need_render = true
-                        else
-                            gui.ui_state.state_file = Vector{UInt8}(
-                                "<invalid-file-extension>" * "\0"^512)
-                        end
-                    else
-                        gui.ui_state.state_file = Vector{UInt8}(
-                            "<file-does-not-exist>" * "\0"^512)
                     end
                 end
                 CImGui.EndTabItem()
@@ -741,7 +734,7 @@ function render!(gui::GSGUI)
     rast = gui.rasterizer
 
     # Empty scene (no dataset loaded yet): display background color.
-    if length(gs) == 0
+    if gs ≡ nothing || length(gs) == 0
         (; width, height) = resolution(gui.camera)
         NGL.set_data!(gui.render_state.surface,
             zeros(Float32, 3, width, height))
