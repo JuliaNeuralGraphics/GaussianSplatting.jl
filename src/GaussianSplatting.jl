@@ -60,6 +60,7 @@ include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
 include("dataset.jl")
+include("depth_supervision.jl")
 
 include("gaussians.jl")
 include("densification.jl")
@@ -75,7 +76,10 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
-function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
+function main(kab, dataset_path::String;
+    scale::Int, save_path::Maybe{String} = nothing,
+    opt_params::OptimizationParams = OptimizationParams(),
+)
     @info "Using `$kab` GPU backend."
 
     dataset = ColmapDataset(kab, dataset_path;
@@ -87,7 +91,6 @@ function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = 
     rasterizer = GaussianRasterizer(kab, camera;
         antialias=false, fused=true, mode=:rgbd)
 
-    opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"

@@ -11,6 +11,10 @@ struct ColmapDataset{
     train_image_filenames::Vector{String}
     train_cameras::Vector{Camera}
     train_images::I
+    # Monocular depth priors for depth supervision (`nothing` when
+    # an image has no prior) & their encoding quantization steps.
+    train_depths::Vector{Maybe{Matrix{Float32}}}
+    train_depth_qsteps::Vector{Float32}
 
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
@@ -62,6 +66,11 @@ function ColmapDataset(kab;
     camera_centers = SVector{3, Float32}[]
     cameras = Camera[]
 
+    # Depth priors (for depth supervision), discovered next to `images/`.
+    depth_index = depth_prior_index(dirname(images_dir); scale)
+    depth_maps = Maybe{Matrix{Float32}}[]
+    depth_qsteps = Float32[]
+
     image_filenames = String[]
     images_list = Array{UInt8, 3}[]
     for (id, img) in images
@@ -86,6 +95,19 @@ function ColmapDataset(kab;
         raw = floor.(UInt8, Float32.(channelview(image)) .* 255f0)
         raw = permutedims(raw, (1, 3, 2))
         push!(images_list, raw)
+
+        depth_paths = get(depth_index, lowercase(splitext(img.name)[1]), nothing)
+        if depth_paths ≡ nothing
+            push!(depth_maps, nothing)
+            push!(depth_qsteps, 0f0)
+        elseif length(depth_paths) > 1
+            error("Ambiguous depth priors for `$(img.name)`: `$depth_paths`.")
+        else
+            depth, qstep = load_depth_prior(
+                depth_paths[1], Int(new_resolution[1]), Int(new_resolution[2]))
+            push!(depth_maps, depth)
+            push!(depth_qsteps, qstep)
+        end
     end
     images = cat(images_list...; dims=4)
 
@@ -104,6 +126,8 @@ function ColmapDataset(kab;
         cameras = cameras[perm]
         images = images[:, :, :, perm]
         image_filenames = image_filenames[perm]
+        depth_maps = depth_maps[perm]
+        depth_qsteps = depth_qsteps[perm]
     end
 
     if train_test_split < 1
@@ -112,6 +136,8 @@ function ColmapDataset(kab;
         train_cameras = cameras[1:n_train]
         train_images = images[:, :, :, 1:n_train]
         train_image_filenames = image_filenames[1:n_train]
+        train_depths = depth_maps[1:n_train]
+        train_depth_qsteps = depth_qsteps[1:n_train]
 
         test_cameras = cameras[(n_train + 1):end]
         test_images = images[:, :, :, (n_train + 1):end]
@@ -120,11 +146,17 @@ function ColmapDataset(kab;
         train_cameras = cameras
         train_images = images
         train_image_filenames = image_filenames
+        train_depths = depth_maps
+        train_depth_qsteps = depth_qsteps
 
         test_cameras = Camera[]
         test_images = Array{UInt8, 4}(undef, 0, 0, 0, 0)
         test_image_filenames = String[]
     end
+
+    n_priors = count(!isnothing, train_depths)
+    verbose && n_priors > 0 &&
+        @info "Found depth priors for $n_priors / $(length(train_depths)) train images."
 
     ColmapDataset(
         # TODO why move to GPU?
@@ -132,6 +164,7 @@ function ColmapDataset(kab;
         adapt(kab, Float32.(points.points_colors) .* (1f0 / 255f0)),
         adapt(kab, scales),
         train_image_filenames, train_cameras, train_images,
+        train_depths, train_depth_qsteps,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
 end
