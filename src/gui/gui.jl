@@ -506,6 +506,47 @@ function loop!(gui::GSGUI)
 end
 
 """
+Pick a new orbiting target by unprojecting the rendered depth under
+the `(px, py)` pixel (1-based, top-left origin).
+Depth is averaged over a small window around the pixel to be robust
+to outliers at fuzzy silhouettes; background pixels (nothing rendered
+there, so the blended depth is ≈ 0) are excluded.
+Return `nothing` when the click hit only background.
+"""
+function pick_orbit_target(
+    gui::GSGUI, px::Integer, py::Integer,
+)::Maybe{SVector{3, Float32}}
+    gs = gui.gaussians
+    (gs ≡ nothing || length(gs) == 0) && return nothing
+
+    rast = gui.rasterizer
+    rast.mode == :rgbd || return nothing
+
+    (; width, height) = resolution(gui.camera)
+    (1 ≤ px ≤ width && 1 ≤ py ≤ height) || return nothing
+
+    δ = 4 # Window half-size.
+    depths = Array(@view(rast.image[4,
+        max(1, px - δ):min(width, px + δ),
+        max(1, py - δ):min(height, py + δ)]))
+    valid = depths .> 1f-2 # Near plane: rejects background pixels.
+    any(valid) || return nothing
+    z = mean(depths[valid])
+
+    # Unproject through the camera intrinsics
+    # (COLMAP frame: x right, y down, z forward).
+    fx, fy = gui.camera.intrinsics.focal
+    cx = gui.camera.intrinsics.principal[1] * width
+    cy = gui.camera.intrinsics.principal[2] * height
+    p_cam = SVector{3, Float32}(
+        (px - 0.5f0 - cx) * z / fx,
+        (py - 0.5f0 - cy) * z / fy,
+        z)
+    R = SMatrix{3, 3, Float32}(@view(gui.camera.c2w[1:3, 1:3]))
+    return R * p_cam .+ view_pos(gui.camera)
+end
+
+"""
 Scene view as a dockable window: it starts docked into the dockspace's
 central node and re-renders at the new resolution when other windows
 docking around it change its size.
@@ -546,6 +587,21 @@ function scene_window!(
             (Float32(res.width), Float32(res.height)),
             (0f0, 1f0), (1f0, 0f0))
         hovered = CImGui.IsWindowHovered()
+
+        # Double-click in orbiting mode: set the orbiting target to the
+        # point under the cursor. The image is drawn 1:1, so the offset
+        # from its top-left corner is the pixel position.
+        if gui.ui_state.controller_mode[] == 1 &&
+            CImGui.IsItemHovered() && CImGui.IsMouseDoubleClicked(0)
+
+            rect_min = CImGui.GetItemRectMin()
+            mouse_pos = CImGui.GetMousePos()
+            target = pick_orbit_target(gui,
+                floor(Int, mouse_pos.x - rect_min.x) + 1,
+                floor(Int, mouse_pos.y - rect_min.y) + 1)
+            target ≢ nothing &&
+                (gui.control_settings.orbiting_target = target)
+        end
     end
     CImGui.End()
 
@@ -709,9 +765,10 @@ function handle_ui!(gui::GSGUI; frame_time)
                 CImGui.TextWrapped(" ")
 
                 CImGui.TextWrapped("Orbiting controller:")
-                CImGui.TextWrapped("- Left Mouse to shift camera sideways and forward/backward.")
-                CImGui.TextWrapped("- F + Left Mouse to shift camera sideways and up/down.")
-                CImGui.TextWrapped("- Right Mouse to orbit camera.")
+                CImGui.TextWrapped("- Left Mouse to pan (moves the orbiting target).")
+                CImGui.TextWrapped("- Right Mouse to orbit around the target.")
+                CImGui.TextWrapped("- Mouse Wheel to zoom towards the target.")
+                CImGui.TextWrapped("- Double Left Click to pick a new orbiting target.")
                 CImGui.EndTabItem()
             end
             CImGui.EndTabBar()

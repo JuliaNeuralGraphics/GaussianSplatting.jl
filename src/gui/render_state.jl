@@ -182,10 +182,12 @@ function orbiting_mouse_controller(
     δx ≈ 0f0 && δy ≈ 0f0 && return need_render
 
     if lmouse
-        # Pan: translate camera & target in the view plane,
-        # scaled by the distance to the target.
+        # Pan: translate camera & target in the view plane so that
+        # the point at the target's depth follows the cursor 1:1.
         r = norm(view_pos(camera) - target)
-        translate_vec = SVector{3, Float32}(δx * r, δy * r, 0f0)
+        fx, fy = camera.intrinsics.focal
+        translate_vec = SVector{3, Float32}(
+            -mouse_δ.x * r / fx, -mouse_δ.y * r / fy, 0f0)
         world_δ = SMatrix{3, 3, Float32}(@view(camera.c2w[1:3, 1:3])) * translate_vec
         shift!(camera, translate_vec)
         control_settings.orbiting_target = target .+ world_δ
