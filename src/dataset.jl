@@ -11,10 +11,12 @@ struct ColmapDataset{
     train_image_filenames::Vector{String}
     train_cameras::Vector{Camera}
     train_images::I
-    # Monocular depth priors for depth supervision (`nothing` when
-    # an image has no prior) & their encoding quantization steps.
+
+    # Monocular depth priors for depth supervision (`nothing` when an image has no prior)
+    # + their encoding quantization steps.
     train_depths::Vector{Maybe{Matrix{Float32}}}
     train_depth_qsteps::Vector{Float32}
+    has_depth_priors::Bool
 
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
@@ -25,7 +27,6 @@ end
 
 function ColmapDataset(kab, dataset_dir::String;
     scale::Int = 1, train_test_split::Real = 0.8, permute::Bool = true,
-    verbose::Bool = true,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -33,15 +34,16 @@ function ColmapDataset(kab, dataset_dir::String;
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(kab;
         cameras_file, images_file, points_file,
-        scale, images_dir, train_test_split, permute, verbose)
+        scale, images_dir, train_test_split, permute)
 end
 
 function ColmapDataset(kab;
     cameras_file::String, images_file::String, points_file::String,
-    scale::Int = 1, images_dir::String, train_test_split::Real = 0.8,
-    permute::Bool = true, verbose::Bool = true,
+    scale::Int = 1, images_dir::String, train_test_split::Real = 0.8, permute::Bool = true,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
+    depths_dir = joinpath(dirname(images_dir), scale > 1 ? "depths_$scale" : "depths")
+    has_depth_dir = isdir(depths_dir)
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)
@@ -65,9 +67,8 @@ function ColmapDataset(kab;
     # Load cameras and images.
     camera_centers = SVector{3, Float32}[]
     cameras = Camera[]
-
-    # Depth priors (for depth supervision), discovered next to `images/`.
-    depth_index = depth_prior_index(dirname(images_dir); scale)
+    # Load depths priors if exist.
+    depth_priors_count = 0
     depth_maps = Maybe{Matrix{Float32}}[]
     depth_qsteps = Float32[]
 
@@ -76,7 +77,7 @@ function ColmapDataset(kab;
     for (id, img) in images
         image_path = joinpath(images_dir, img.name)
         if !isfile(image_path)
-            verbose && @info "Image files does not exist, skipping: `$image_path`."
+            @info "Image files does not exist, skipping: `$image_path`."
             continue
         end
 
@@ -96,27 +97,25 @@ function ColmapDataset(kab;
         raw = permutedims(raw, (1, 3, 2))
         push!(images_list, raw)
 
-        depth_paths = get(depth_index, lowercase(splitext(img.name)[1]), nothing)
-        if depth_paths ≡ nothing
-            push!(depth_maps, nothing)
-            push!(depth_qsteps, 0f0)
-        elseif length(depth_paths) > 1
-            error("Ambiguous depth priors for `$(img.name)`: `$depth_paths`.")
-        else
+        if has_depth_dir
+            depth_path = joinpath(depths_dir, "$(splitext(img.name)[1]).png")
             depth, qstep = load_depth_prior(
-                depth_paths[1], Int(new_resolution[1]), Int(new_resolution[2]))
+                depth_path, Int(new_resolution[1]), Int(new_resolution[2]))
             push!(depth_maps, depth)
             push!(depth_qsteps, qstep)
+            depth_priors_count += 1
+        else
+            push!(depth_maps, nothing)
+            push!(depth_qsteps, 0f0)
         end
     end
     images = cat(images_list...; dims=4)
 
-    # Compute cameras extent which is used for scaling learning rate
-    # and densification.
+    # Compute cameras extent which is used for scaling learning rate and densification.
     scene_center = sum(camera_centers) ./ length(camera_centers)
     scene_diagonal = maximum(map(c -> norm(c - scene_center), camera_centers))
-    # TODO resize scene into unit box?
     camera_extent::Float32 = min(4f0, scene_diagonal * 1.1f0)
+    # TODO resize scene into unit box?
 
     scales = compute_scales(points.points_3d)
 
@@ -154,9 +153,8 @@ function ColmapDataset(kab;
         test_image_filenames = String[]
     end
 
-    n_priors = count(!isnothing, train_depths)
-    verbose && n_priors > 0 &&
-        @info "Found depth priors for $n_priors / $(length(train_depths)) train images."
+    depth_priors_count > 0 &&
+        @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."
 
     ColmapDataset(
         # TODO why move to GPU?
@@ -164,7 +162,7 @@ function ColmapDataset(kab;
         adapt(kab, Float32.(points.points_colors) .* (1f0 / 255f0)),
         adapt(kab, scales),
         train_image_filenames, train_cameras, train_images,
-        train_depths, train_depth_qsteps,
+        train_depths, train_depth_qsteps, depth_priors_count > 0,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
 end
@@ -181,7 +179,6 @@ function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)
         md = mean(@view(d[2:end]).^2)
         scales[:, i] .= log(sqrt(max(1f-7, md) * point_size))
     end
-
     return scales
 end
 

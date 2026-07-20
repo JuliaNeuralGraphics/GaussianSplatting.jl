@@ -50,7 +50,9 @@ function Trainer(
     densify = true
     step = 0
 
-    depth_anchors = opt_params.use_depth_loss ?
+    use_depth_priors = opt_params.use_depth_loss && dataset.has_depth_priors
+    @info "Use depth priors for supervision: `$use_depth_priors`."
+    depth_anchors = use_depth_priors ?
         setup_depth_supervision(rast, dataset, opt_params) :
         Maybe{DepthAnchor}[]
 

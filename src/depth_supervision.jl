@@ -7,55 +7,11 @@
 # supervision target absolute and multi-view consistent instead of
 # letting the model drag the target along with its own errors.
 
-const DEPTH_SEARCH_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
-
-# Anchor fitting.
-const MAX_ANCHOR_SAMPLES = 262_144
-const MIN_ANCHOR_SAMPLES = 256
-const RANSAC_ITERATIONS = 256
-const RANSAC_SCORE_SUBSET = 16_384
-const ANCHOR_MIN_INLIER_FRACTION = 0.3f0
-const ANCHOR_MIN_CORR = 0.35f0
-const ANCHOR_VAR_RIDGE = 1.5f-5
-const FLAT_PRIOR_VAR = 1f-6
-const DEPTH_FLOOR_FRACTION = 0.05f0
-
 # Loss.
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
 const DEPTH_LOSS_GRADIENT_WEIGHT = 1f0
 const DEPTH_LOSS_FINAL_SCALE = 0.02f0
-
-# Prior discovery & loading.
-
-"""
-Index depth prior files found in `depth/` or `depths/` next to the
-images: maps a lowercased image stem (with relative subdirectories)
-to all candidate files. More than one candidate per stem is ambiguous
-and rejected at load time.
-
-For a downscaled dataset the scaled folders (`depth_4/`, `depths_4/`)
-take precedence, mirroring the `images_4/` convention; since priors are
-relative and resized at load, the unscaled folders are a fallback.
-"""
-function depth_prior_index(dataset_dir::String; scale::Int = 1)
-    index = _depth_prior_index(dataset_dir, scale)
-    scale > 1 && isempty(index) && (index = _depth_prior_index(dataset_dir, 1))
-    return index
-end
-
-function _depth_prior_index(dataset_dir::String, scale::Int)
-    index = Dict{String, Vector{String}}()
-    dir = joinpath(dataset_dir, scale > 1 ? "depths_$(scale)" : "depths")
-    isdir(dir) || return index
-
-    for (root, _, files) in walkdir(dir), file in files
-        stem, ext = splitext(relpath(joinpath(root, file), dir))
-        lowercase(ext) in DEPTH_SEARCH_EXTENSIONS || continue
-        push!(get!(Vector{String}, index, lowercase(stem)), joinpath(root, file))
-    end
-    return index
-end
 
 """
 Load a depth prior as a `(width, height)` Float32 map, resized to the
@@ -96,13 +52,13 @@ struct AnchorFit
     usable::Bool
 end
 
-function ls_affine_fit(ts, ys)
+function ls_affine_fit(ts, ys; var_ridge::Float32 = 1.5f-5)
     μt, μy = mean(ts), mean(ys)
     cov_ty = mean((ts .- μt) .* (ys .- μy))
     var_t = mean(abs2, ts .- μt)
     # Small ridge: the slope shrinks toward zero when the prior's
     # variance is near the quantization noise floor.
-    a = cov_ty / (var_t + ANCHOR_VAR_RIDGE)
+    a = cov_ty / (var_t + var_ridge)
     return a, μy - a * μt
 end
 
@@ -112,18 +68,26 @@ contaminated sparse SfM clouds that break least-squares + trimming:
 LS init for the residual scale (from MAD), 2-point hypotheses scored by
 inlier count on a subset, then two LS refits on the consensus set.
 """
-function ransac_affine_fit(ts::Vector{Float32}, ys::Vector{Float32})
+function ransac_affine_fit(
+    ts::Vector{Float32}, ys::Vector{Float32};
+    ransac_iterations::Int = 256,
+    min_anchor_samples::Int = 256,
+    anchor_min_inlier_fraction::Float32 = 0.3f0,
+    anchor_min_corr::Float32 = 0.35f0,
+    score_subset::Int = 16_384,
+)
     n = length(ts)
     a, b = ls_affine_fit(ts, ys)
     res = abs.(ys .- (a .* ts .+ b))
     ϵ = max(3f0 * 1.4826f0 * median(res), 1f-8)
 
-    subset = n ≤ RANSAC_SCORE_SUBSET ?
-        (1:n) : round.(Int, range(1, n; length=RANSAC_SCORE_SUBSET))
+    subset = n ≤ score_subset ?
+        (1:n) :
+        round.(Int, range(1, n; length=score_subset))
     score(a, b) = count(i -> abs(ys[i] - (a * ts[i] + b)) ≤ ϵ, subset)
 
     best_a, best_b, best_score = a, b, score(a, b)
-    for _ in 1:RANSAC_ITERATIONS
+    for _ in 1:ransac_iterations
         i, j = rand(1:n), rand(1:n)
         δt = ts[i] - ts[j]
         abs(δt) < 1f-8 && continue
@@ -138,7 +102,7 @@ function ransac_affine_fit(ts::Vector{Float32}, ys::Vector{Float32})
     inliers = Int[]
     for _ in 1:2
         inliers = findall(i -> abs(ys[i] - (a * ts[i] + b)) ≤ ϵ, 1:n)
-        length(inliers) < MIN_ANCHOR_SAMPLES && break
+        length(inliers) < min_anchor_samples && break
         a, b = ls_affine_fit(@view(ts[inliers]), @view(ys[inliers]))
     end
 
@@ -148,9 +112,9 @@ function ransac_affine_fit(ts::Vector{Float32}, ys::Vector{Float32})
     isfinite(corr) || (corr = 0f0)
 
     usable =
-        n ≥ MIN_ANCHOR_SAMPLES &&
-        inlier_fraction ≥ ANCHOR_MIN_INLIER_FRACTION &&
-        abs(corr) ≥ ANCHOR_MIN_CORR
+        n ≥ min_anchor_samples &&
+        inlier_fraction ≥ anchor_min_inlier_fraction &&
+        abs(corr) ≥ anchor_min_corr
     return AnchorFit(a, b, corr, inlier_fraction, usable)
 end
 
@@ -162,18 +126,20 @@ function robust_aabb(points::Matrix{Float32}; q::Float32 = 0.01f0, pad::Float32 
 end
 
 """
-Collect `(prior value, camera-space depth)` pairs for one camera:
-subsample the init point cloud, gate by a robust scene AABB and the
-near plane, project with the camera intrinsics and sample the prior
-at the landing pixel.
+Given depth `prior` for a `camera`, project `points` onto image plane
+and collect depth values at those pixels, rejecting invalid projections.
+
+Return `(prior depth, point depth)` pairs, where `point depth` is the
+depth of the point in camera space after `R * x + t` transformation.
 """
 function collect_anchor_samples(
     points::Matrix{Float32}, camera::Camera, prior::Matrix{Float32};
     aabb_min::SVector{3, Float32}, aabb_max::SVector{3, Float32},
     near_plane::Float32 = 0.2f0,
+    max_anchor_samples::Int = 262_144,
 )
     n = size(points, 2)
-    stride = max(1, cld(n, MAX_ANCHOR_SAMPLES))
+    stride = max(1, cld(n, max_anchor_samples))
 
     (; width, height) = resolution(camera)
     fx, fy = camera.intrinsics.focal
@@ -206,18 +172,22 @@ end
 """
 Fit per-camera depth anchors against the SfM point cloud.
 
-Each camera with a prior gets two candidate fits — disparity
-(`1/(z + floor) ≈ a·t + b`) and depth (`z ≈ a·t + b`) — where `floor`
-softens the inversion so near-camera outliers cannot dominate.
-With `mode = :ssi` the dataset-wide parameterization is resolved by
-majority vote over per-camera correlations; `:ssi_disparity` and
-`:ssi_depth` force it. Cameras whose selected fit is unusable or has
-an inconsistent slope sign are dropped from depth supervision.
+Each camera with a prior gets two candidate fits:
+- disparity (`1 / (z + floor) ≈ a·t + b`);
+- and depth (`z ≈ a·t + b`).
+
+Where `floor` softens the inversion so near-camera outliers cannot dominate.
+With `mode = :ssi` the dataset-wide parameterization is resolved by majority vote over per-camera correlations,
+while `:ssi_disparity` and `:ssi_depth` force it.
+Cameras whose selected fit is unusable or has an inconsistent slope sign are dropped from depth supervision.
 """
 function fit_depth_anchors(
     points::Matrix{Float32}, cameras::Vector{Camera},
     priors::Vector{Maybe{Matrix{Float32}}};
-    mode::Symbol = :ssi, verbose::Bool = true,
+    mode::Symbol = :ssi,
+    min_anchor_samples::Int = 256,
+    depth_floor_fraction::Float32 = 0.05f0,
+    flat_prior_var::Float32 = 1f-6,
 )
     modes = (:ssi, :ssi_disparity, :ssi_depth)
     mode in modes || error("Invalid depth loss mode: $mode ∉ $modes")
@@ -231,17 +201,16 @@ function fit_depth_anchors(
         prior = priors[i]
         prior ≡ nothing && continue
 
-        ts, zs = collect_anchor_samples(
-            points, cameras[i], prior; aabb_min, aabb_max)
-        length(ts) < MIN_ANCHOR_SAMPLES && continue
+        ts, zs = collect_anchor_samples(points, cameras[i], prior; aabb_min, aabb_max)
+        length(ts) < min_anchor_samples && continue
         # A constant prior has no geometry signal.
-        var(ts) < FLAT_PRIOR_VAR && continue
+        var(ts) < flat_prior_var && continue
 
-        depth_floor = max(1f-8, DEPTH_FLOOR_FRACTION * median(zs))
+        depth_floor = max(1f-8, depth_floor_fraction * median(zs))
         fits[i] = (;
             floor=depth_floor,
-            disparity=ransac_affine_fit(ts, 1f0 ./ (zs .+ depth_floor)),
-            depth=ransac_affine_fit(ts, zs))
+            disparity=ransac_affine_fit(ts, 1f0 ./ (zs .+ depth_floor); min_anchor_samples),
+            depth=ransac_affine_fit(ts, zs; min_anchor_samples))
     end
 
     disparity = if mode == :ssi
@@ -277,7 +246,7 @@ function fit_depth_anchors(
         n_anchored += 1
     end
 
-    verbose && @info string(
+    @info string(
         "Depth supervision: $n_anchored / $n_cameras cameras anchored ",
         "(", disparity ? "disparity" : "depth", " model).")
     return anchors
