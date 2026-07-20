@@ -17,6 +17,9 @@ struct ColmapDataset{
     train_depths::Vector{Maybe{Matrix{Float32}}}
     train_depth_qsteps::Vector{Float32}
     has_depth_priors::Bool
+    # Directory the depth priors were loaded from (`nothing` when absent);
+    # the fitted-anchor sidecar cache lives next to it.
+    depths_dir::Maybe{String}
 
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
@@ -163,6 +166,7 @@ function ColmapDataset(kab;
         adapt(kab, scales),
         train_image_filenames, train_cameras, train_images,
         train_depths, train_depth_qsteps, depth_priors_count > 0,
+        has_depth_dir ? depths_dir : nothing,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
 end

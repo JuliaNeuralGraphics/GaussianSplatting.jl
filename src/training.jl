@@ -80,7 +80,9 @@ function setup_depth_supervision(
         @warn "Depth supervision requires an init point cloud to fit anchors, disabling."
         return disabled
     end
-    return fit_depth_anchors(
+    @assert dataset.depths_dir ≢ nothing
+    return load_or_fit_depth_anchors(
+        dataset.depths_dir,
         points, dataset.train_cameras, dataset.train_depths;
         mode=opt_params.depth_loss_mode)
 end

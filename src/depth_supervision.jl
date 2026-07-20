@@ -41,7 +41,7 @@ struct DepthAnchor
     a::Float32
     b::Float32
     floor::Float32
-    disparity::Bool
+    disparity::Float32
 end
 
 struct AnchorFit
@@ -219,14 +219,16 @@ function fit_depth_anchors(
             fit ≡ nothing && continue
             (fit.disparity.usable || fit.depth.usable) || continue
             total += 1
-            better_disparity = !fit.depth.usable || (fit.disparity.usable &&
-                abs(fit.disparity.corr) ≥ abs(fit.depth.corr))
+            better_disparity =
+                !fit.depth.usable ||
+                (fit.disparity.usable && abs(fit.disparity.corr) ≥ abs(fit.depth.corr))
             votes += better_disparity
         end
         votes ≥ total - votes
     else
         mode == :ssi_disparity
     end
+    @info "Depth supervision mode: `$(disparity ? :disparity : :depth)`."
 
     # Majority slope sign among usable fits: outvoted cameras are dropped.
     selected(fit) = disparity ? fit.disparity : fit.depth
@@ -242,7 +244,7 @@ function fit_depth_anchors(
         fits[i] ≡ nothing && continue
         f = selected(fits[i])
         (f.usable && sign(f.a) == slope_sign) || continue
-        anchors[i] = DepthAnchor(f.a, f.b, fits[i].floor, disparity)
+        anchors[i] = DepthAnchor(f.a, f.b, fits[i].floor, Float32(disparity))
         n_anchored += 1
     end
 
@@ -252,10 +254,71 @@ function fit_depth_anchors(
     return anchors
 end
 
+# Fingerprint of exactly the inputs that change the fit: mode, the point
+# cloud, and per-camera identity + pose + intrinsics. A mismatch triggers
+# a refit (re-run SfM, regenerated depths, new mode, ...). The per-camera
+# contribution is combined commutatively because `train_cameras` is
+# re-permuted every dataset load.
+function depth_anchors_fingerprint(
+    points::Matrix{Float32}, cameras::Vector{Camera}, mode::Symbol,
+)
+    h = hash(mode)
+    h = hash(size(points), h)
+    h = hash(points, h)
+
+    cam_hash = zero(UInt)
+    for cam in cameras
+        ch = hash(cam.img_name)
+        ch = hash(cam.w2c, ch)
+        ch = hash(cam.intrinsics.focal, ch)
+        ch = hash(cam.intrinsics.principal, ch)
+        ch = hash(cam.intrinsics.resolution, ch)
+        cam_hash += ch # Order-independent.
+    end
+    return hash(cam_hash, h)
+end
+
+"""
+Fit per-camera depth anchors, or load them from the cache next to
+`depths_dir` when a cache with a matching fingerprint exists.
+"""
+function load_or_fit_depth_anchors(
+    depths_dir::String,
+    points::Matrix{Float32}, cameras::Vector{Camera},
+    priors::Vector{Maybe{Matrix{Float32}}};
+    mode::Symbol = :ssi,
+)
+    fingerprint = depth_anchors_fingerprint(points, cameras, mode)
+    cache_path = joinpath(dirname(depths_dir), "$(basename(depths_dir))_anchors.bson")
+
+    if isfile(cache_path)
+        try
+            cached = BSON.load(cache_path)
+            if cached[:fingerprint] == fingerprint
+                by_name = cached[:anchors]::Dict
+                @info "Loaded cached depth anchors from `$cache_path`."
+                return Maybe{DepthAnchor}[get(by_name, cam.img_name, nothing) for cam in cameras]
+            end
+
+            @warn "Depth anchor cache is stale `$cache_path`, recomputing..."
+        catch err
+            @warn "Failed to load anchor cache from `$cache_path`, recomputing..."
+        end
+    end
+
+    anchors = fit_depth_anchors(points, cameras, priors; mode)
+
+    by_name = Dict{String, DepthAnchor}()
+    for (cam, a) in zip(cameras, anchors)
+        a ≡ nothing || (by_name[cam.img_name] = a)
+    end
+    BSON.bson(cache_path, Dict(:fingerprint => fingerprint, :anchors => by_name))
+    @info "Saved depth anchors to `$cache_path`."
+    return anchors
+end
+
 # The loss.
 
-# Generic over the element type: Zygote differentiates GPU broadcasts
-# by evaluating with `ForwardDiff.Dual` numbers.
 geman_mcclure(x) = 0.5f0 * x^2 / (1f0 + x^2)
 
 # Zero loss & gradient inside the quantization corridor: without this,
@@ -269,13 +332,11 @@ inverse-depth target `d`, quantization deadband half-width and validity.
 For the depth model the half-step is propagated through the inversion
 as `half·d²`.
 """
-function depth_target(
-    anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep::Float32,
-)
+function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep::Float32)
     affine = anchor.a .* prior .+ anchor.b
     valid = isfinite.(prior) .& (prior .> 0f0) .& (affine .> 0f0)
     half_step = 0.5f0 * qstep * abs(anchor.a)
-    if anchor.disparity
+    if anchor.disparity > 0
         target = min.(affine, 1f0 / anchor.floor)
         half_band = fill!(similar(prior), half_step)
     else
@@ -307,9 +368,17 @@ function ssi_depth_loss(
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
+    # TODO(depth-alpha-grad): propagate gradients through α (transmittance).
+    # LichtFeld feeds an analytic `grad_alpha = -g·e/α` (the quotient-rule
+    # term of `e = D/α`) into its backward, so depth loss shapes Gaussian
+    # opacity directly. Our `∇rasterize`/`∇project!` has no adjoint input for
+    # the accumulated-alpha map, so there is nowhere to backprop that
+    # cotangent — hence `α` is detached here and opacity is only affected
+    # indirectly through the depth channel. Extending the rasterizer backward
+    # to accept a `vaccum_α` cotangent (mirroring the color/depth channels)
+    # would recover LichtFeld's direct opacity supervision.
     α = ignore_derivatives(clamp.(1f0 .- transmittance, 0f0, 1f0))
-    w = ignore_derivatives(
-        ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
+    w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
 
     p = 1f0 ./ (depth_img ./ max.(α, 1f-6) .+ depth_floor)

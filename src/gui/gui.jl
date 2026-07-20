@@ -307,7 +307,7 @@ function menu_bar!(gui::GSGUI)
 
         # Viewer-only mode: no trainer.
         if CImGui.MenuItem("Open BSON...")
-            state_file = pick_file(; filterlist="bson") # Empty when cancelled.
+            state_file = pick_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
                 try
                     load_bson!(gui, state_file)
@@ -321,7 +321,7 @@ function menu_bar!(gui::GSGUI)
 
         # Saving needs a trainer: it stores optimizers & training step.
         if CImGui.MenuItem("Save BSON...", C_NULL, false, !viewer_only(gui))
-            state_file = save_file(; filterlist="bson") # Empty when cancelled.
+            state_file = save_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
                 endswith(state_file, ".bson") || (state_file *= ".bson")
                 try
@@ -397,7 +397,7 @@ function open_dataset_modal!(gui::GSGUI)
     CImGui.PopItemWidth()
     CImGui.SameLine()
     if CImGui.Button("Browse...")
-        dataset_path = pick_folder() # Empty when cancelled.
+        dataset_path = pick_folder(homedir()) # Empty when cancelled.
         if !isempty(dataset_path)
             ui_state.dataset_path = Vector{UInt8}(dataset_path * "\0"^512)
         end
