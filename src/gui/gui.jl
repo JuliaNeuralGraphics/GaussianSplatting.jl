@@ -493,7 +493,14 @@ function loop!(gui::GSGUI)
 
     do_train = gui.ui_state.train[] && !mouse_in_ui
     if do_train
-        gui.ui_state.loss = step!(gui.trainer)
+        try
+            gui.ui_state.loss = step!(gui.trainer)
+        catch err
+            # E.g. non-finite loss: stop training instead of crashing
+            # the app; the scene stays viewable.
+            gui.ui_state.train[] = false
+            @error "Training step failed, stopping training." exception=(err, catch_backtrace())
+        end
         gui.render_state.need_render = true
     end
 

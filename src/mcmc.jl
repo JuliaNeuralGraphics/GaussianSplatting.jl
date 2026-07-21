@@ -56,8 +56,8 @@ function mcmc_binom_coefficients(n_max::Int)
 end
 
 function regularization_loss(strategy::MCMCStrategy, opacities, scales)
-    return strategy.opacity_reg * mean(NU.sigmoid.(opacities))
-        + strategy.scale_reg * mean(exp.(scales))
+    return strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +
+        strategy.scale_reg * mean(exp.(scales))
 end
 
 function post_train_step!(
