@@ -3,7 +3,7 @@
 # under the terms of the LICENSE.md file.
 
 # ENV["GSP_TEST_AMDGPU"] = true
-ENV["GSP_TEST_CUDA"] = true
+# ENV["GSP_TEST_CUDA"] = true
 
 import Pkg
 if get(ENV, "GSP_TEST_AMDGPU", "false") == "true"
@@ -38,6 +38,8 @@ using ImageFiltering
 using GaussianSplatting: i32, u32
 
 import KernelAbstractions as KA
+
+# kab = KA.CPU()
 
 struct SSIM{W <: Flux.Conv}
     window::W
@@ -78,73 +80,35 @@ end
 DATASET = nothing
 GAUSSIANS = nothing
 
-@info "Testing on `$kab` backend."
+# @info "Testing on `$kab` backend."
 
 @testset "GaussianSplatting" begin
 
-# @testset "quat2mat" begin
-#     r = RotXYZ(rand(Float32), rand(Float32), rand(Float32))
-#     q = QuatRotation{Float32}(r)
+@testset "quat2mat" begin
+    r = RotXYZ(rand(Float32), rand(Float32), rand(Float32))
+    q = QuatRotation{Float32}(r)
 
-#     ŷ = @inferred GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q.w, q.x, q.y, q.z))
-#     y = SMatrix{3, 3, Float32, 9}(q)
-#     @test all(ŷ .≈ y)
-# end
+    ŷ = @inferred GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q.w, q.x, q.y, q.z))
+    y = SMatrix{3, 3, Float32, 9}(q)
+    @test all(ŷ .≈ y)
+end
 
-# @testset "get_rect" begin
-#     width, height = 1024, 1024
-#     block = SVector{2, Int32}(16, 16)
-#     grid = SVector{2, Int32}(cld(width, block[1]), cld(height, block[2]))
+@testset "get_rect" begin
+    width, height = 1024, 1024
+    block = SVector{2, Int32}(16, 16)
+    grid = SVector{2, Int32}(cld(width, block[1]), cld(height, block[2]))
 
-#     # rect covering only one block
-#     rmin, rmax = @inferred GaussianSplatting.get_rect(
-#         SVector{2, Float32}(0, 0), 1i32, grid, block)
-#     @test all(rmin .== (0, 0))
-#     @test all(rmax .== (1, 1))
+    # rect covering only one block
+    rmin, rmax = @inferred GaussianSplatting.get_rect(
+        SVector{2, Float32}(0, 0), 1i32, grid, block)
+    @test all(rmin .== (0, 0))
+    @test all(rmax .== (1, 1))
 
-#     # rect covering 2 blocks
-#     rmin, rmax = @inferred GaussianSplatting.get_rect(
-#         SVector{2, Float32}(0, 0), Int32(block[1] + 1), grid, block)
-#     @test all(rmin .== (0, 0))
-#     @test all(rmax .== (2, 2))
-# end
-
-# @testset "Tile ranges" begin
-#     gaussian_keys = adapt(kab,
-#         UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
-
-#     ranges = KA.allocate(kab, UInt32, 2, 4)
-#     fill!(ranges, 0u32)
-
-#     GaussianSplatting.identify_tile_range!(kab, 256)(
-#         ranges, gaussian_keys; ndrange=length(gaussian_keys))
-#     @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
-# end
-
-@testset "SSIM" begin
-    ssim = SSIM(kab)
-
-    x = KA.ones(kab, Float32, (16, 16, 3, 1))
-    ref = KA.zeros(kab, Float32, (16, 16, 3, 1))
-    @test ssim(x, ref) ≈ 0f0 atol=1f-4 rtol=1f-4
-    ref = KA.ones(kab, Float32, (16, 16, 3, 1))
-    @test ssim(x, ref) ≈ 1f0
-
-    x = zeros(Float32, (16, 16, 3, 1))
-    x[1:4, 1:4, :, :] .= 0.25f0
-    x[5:8, 1:4, :, :] .= 0.5f0
-    x[9:12, 13:16, :, :] .= 0.75f0
-    x[13:16, 13:16, :, :] .= 1f0
-    @test ssim(adapt(kab, x), ref) ≈ 0.1035 atol=1f-3 rtol=1f-3
-
-    x = adapt(kab, rand(Float32, 128, 128, 3, 2))
-    ref = adapt(kab, rand(Float32, 128, 128, 3, 2))
-    @test ssim(x, ref) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
-
-    y, ∇ = Zygote.withgradient(x -> ssim(x, ref), x)
-    yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
-    @test y ≈ yf
-    @test ∇[1] ≈ ∇f[1]
+    # rect covering 2 blocks
+    rmin, rmax = @inferred GaussianSplatting.get_rect(
+        SVector{2, Float32}(0, 0), Int32(block[1] + 1), grid, block)
+    @test all(rmin .== (0, 0))
+    @test all(rmax .== (2, 2))
 end
 
 @testset "ls_affine_fit" begin
@@ -196,6 +160,44 @@ end
     ts_small = collect(Float32, 1:100)
     f = ransac_affine_fit(ts_small, 2f0 .* ts_small .+ 3f0)
     @test !f.usable
+end
+
+@testset "Tile ranges" begin
+    gaussian_keys = adapt(kab,
+        UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
+
+    ranges = KA.allocate(kab, UInt32, 2, 4)
+    fill!(ranges, 0u32)
+
+    GaussianSplatting.identify_tile_range!(kab, 256)(
+        ranges, gaussian_keys; ndrange=length(gaussian_keys))
+    @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
+end
+
+@testset "SSIM" begin
+    ssim = SSIM(kab)
+
+    x = KA.ones(kab, Float32, (16, 16, 3, 1))
+    ref = KA.zeros(kab, Float32, (16, 16, 3, 1))
+    @test ssim(x, ref) ≈ 0f0 atol=1f-4 rtol=1f-4
+    ref = KA.ones(kab, Float32, (16, 16, 3, 1))
+    @test ssim(x, ref) ≈ 1f0
+
+    x = zeros(Float32, (16, 16, 3, 1))
+    x[1:4, 1:4, :, :] .= 0.25f0
+    x[5:8, 1:4, :, :] .= 0.5f0
+    x[9:12, 13:16, :, :] .= 0.75f0
+    x[13:16, 13:16, :, :] .= 1f0
+    @test ssim(adapt(kab, x), ref) ≈ 0.1035 atol=1f-3 rtol=1f-3
+
+    x = adapt(kab, rand(Float32, 128, 128, 3, 2))
+    ref = adapt(kab, rand(Float32, 128, 128, 3, 2))
+    @test ssim(x, ref) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
+
+    y, ∇ = Zygote.withgradient(x -> ssim(x, ref), x)
+    yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
+    @test y ≈ yf
+    @test ∇[1] ≈ ∇f[1]
 end
 
 # @testset "Dataset loading" begin

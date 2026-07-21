@@ -63,8 +63,7 @@ function Trainer(
 end
 
 function setup_depth_supervision(
-    rast::GaussianRasterizer, dataset::ColmapDataset,
-    opt_params::OptimizationParams,
+    rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams,
 )
     disabled = Maybe{DepthAnchor}[]
     if rast.mode != :rgbd
@@ -236,7 +235,7 @@ function step!(trainer::Trainer)
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
 
-            # Unconditional slice (a no-op for `:rgb`): a branch whose
+            # NOTE: Unconditional slice (a no-op for `:rgb`): a branch whose
             # else-arm aliases `image_features` unsliced makes Zygote
             # mis-route the gradient of the alias past the `getindex`
             # pullback once the depth term adds a second use, crashing

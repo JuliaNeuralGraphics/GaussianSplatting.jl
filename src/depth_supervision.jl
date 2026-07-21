@@ -266,14 +266,7 @@ function fit_depth_anchors(
     return anchors
 end
 
-# Fingerprint of exactly the inputs that change the fit: mode, the point
-# cloud, and per-camera identity + pose + intrinsics. A mismatch triggers
-# a refit (re-run SfM, regenerated depths, new mode, ...). The per-camera
-# contribution is combined commutatively because `train_cameras` is
-# re-permuted every dataset load.
-function depth_anchors_fingerprint(
-    points::Matrix{Float32}, cameras::Vector{Camera}, mode::Symbol,
-)
+function depth_anchors_fingerprint(points::Matrix{Float32}, cameras::Vector{Camera}, mode::Symbol)
     h = hash(mode)
     h = hash(size(points), h)
     h = hash(points, h)
@@ -285,7 +278,7 @@ function depth_anchors_fingerprint(
         ch = hash(cam.intrinsics.focal, ch)
         ch = hash(cam.intrinsics.principal, ch)
         ch = hash(cam.intrinsics.resolution, ch)
-        cam_hash += ch # Order-independent.
+        cam_hash += ch # Independent of the camera order.
     end
     return hash(cam_hash, h)
 end
@@ -328,8 +321,6 @@ function load_or_fit_depth_anchors(
     @info "Saved depth anchors to `$cache_path`."
     return anchors
 end
-
-# The loss.
 
 geman_mcclure(x) = 0.5f0 * x^2 / (1f0 + x^2)
 
@@ -380,15 +371,6 @@ function ssi_depth_loss(
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
-    # TODO(depth-alpha-grad): propagate gradients through α (transmittance).
-    # LichtFeld feeds an analytic `grad_alpha = -g·e/α` (the quotient-rule
-    # term of `e = D/α`) into its backward, so depth loss shapes Gaussian
-    # opacity directly. Our `∇rasterize`/`∇project!` has no adjoint input for
-    # the accumulated-alpha map, so there is nowhere to backprop that
-    # cotangent — hence `α` is detached here and opacity is only affected
-    # indirectly through the depth channel. Extending the rasterizer backward
-    # to accept a `vaccum_α` cotangent (mirroring the color/depth channels)
-    # would recover LichtFeld's direct opacity supervision.
     α = ignore_derivatives(clamp.(1f0 .- transmittance, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
@@ -406,13 +388,15 @@ function ssi_depth_loss(
 
     # Forward differences along x (width) and y (height); pairs are
     # weighted by the lesser alpha and both pixels must be valid.
-    hx = (p[2:end, :] .- p[1:(end - 1), :]) .-
+    hx =
+        (p[2:end, :] .- p[1:(end - 1), :]) .-
         (target[2:end, :] .- target[1:(end - 1), :])
     bx = half_band[2:end, :] .+ half_band[1:(end - 1), :]
     wx = min.(w[2:end, :], w[1:(end - 1), :])
     grad_x = sum(wx .* geman_mcclure.(deadband.(hx, bx) .* iscale))
 
-    hy = (p[:, 2:end] .- p[:, 1:(end - 1)]) .-
+    hy =
+        (p[:, 2:end] .- p[:, 1:(end - 1)]) .-
         (target[:, 2:end] .- target[:, 1:(end - 1)])
     by = half_band[:, 2:end] .+ half_band[:, 1:(end - 1)]
     wy = min.(w[:, 2:end], w[:, 1:(end - 1)])
