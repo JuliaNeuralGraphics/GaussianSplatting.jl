@@ -11,15 +11,6 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
-    dense_percent::Float32 = 1f-2
-
-    densify_from_iter::Int = 500
-    densify_until_iter::Int = 15000
-    densification_interval::Int = 100
-    densify_grad_threshold::Float32 = 2f-4
-
-    opacity_reset_interval::Int = 30_000
-
     # Depth supervision with monocular priors (see `depth_supervision.jl`).
     # Requires depth maps next to the dataset images, an init point cloud and a `:rgbd` rasterizer.
     use_depth_loss::Bool = true

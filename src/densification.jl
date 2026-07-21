@@ -1,31 +1,32 @@
-function densify_and_prune!(gs::GaussianModel, optimizers;
-    extent::Float32, pruning_extent::Float32,
-    grad_threshold::Float32, min_opacity::Float32,
-    max_screen_size::Int32, dense_percent::Float32,
+function densify_and_prune!(strategy::DefaultStrategy, gs::GaussianModel, optimizers;
+    extent::Float32, pruning_extent::Float32, max_screen_size::Int32,
 )
-    ∇means_2d = gs.accum_∇means_2d ./ gs.denom
+    grad_threshold = strategy.densify_grad_threshold
+    dense_percent = strategy.dense_percent
+
+    ∇means_2d = strategy.accum_∇means_2d ./ strategy.denom
     mask = isnan.(∇means_2d)
     ∇means_2d[mask] .= 0f0
     KA.unsafe_free!(mask)
 
-    densify_clone!(gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
-    densify_split!(gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
+    densify_clone!(strategy, gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
+    densify_split!(strategy, gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
     KA.unsafe_free!(∇means_2d)
 
     # Prune points that are too transparent, occupy too much space in image space
     # and have high scale in world space.
-    valid_mask = reshape(NU.sigmoid.(gs.opacities) .> min_opacity, :)
+    valid_mask = reshape(NU.sigmoid.(gs.opacities) .> strategy.min_opacity, :)
     if max_screen_size > 0
         γ = 0.1f0 * pruning_extent
         valid_mask .&=
-            (gs.max_radii .< max_screen_size) .&&
+            (strategy.max_radii .< max_screen_size) .&&
             reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)
     end
-    prune_points!(gs, optimizers, valid_mask)
+    prune_points!(strategy, gs, optimizers, valid_mask)
     return
 end
 
-function densify_clone!(gs::GaussianModel, optimizers;
+function densify_clone!(strategy::DefaultStrategy, gs::GaussianModel, optimizers;
     ∇means_2d, grad_threshold::Float32,
     extent::Float32, dense_percent::Float32,
 )
@@ -46,7 +47,7 @@ function densify_clone!(gs::GaussianModel, optimizers;
     new_ids = gs.ids ≡ nothing ? nothing : gs.ids[mask]
     KA.unsafe_free!(mask)
 
-    densification_postfix!(gs, optimizers;
+    densification_postfix!(strategy, gs, optimizers;
         new_points, new_features_dc, new_features_rest,
         new_scales, new_rotations, new_opacities, new_ids)
 
@@ -60,7 +61,7 @@ function densify_clone!(gs::GaussianModel, optimizers;
     return
 end
 
-function densify_split!(gs::GaussianModel, optimizers;
+function densify_split!(strategy::DefaultStrategy, gs::GaussianModel, optimizers;
     ∇means_2d, grad_threshold::Float32,
     extent::Float32, dense_percent::Float32,
 )
@@ -99,7 +100,7 @@ function densify_split!(gs::GaussianModel, optimizers;
     end
     KA.unsafe_free!(stds)
 
-    densification_postfix!(gs, optimizers;
+    densification_postfix!(strategy, gs, optimizers;
         new_points, new_features_dc, new_features_rest,
         new_scales, new_rotations, new_opacities, new_ids)
 
@@ -115,7 +116,7 @@ function densify_split!(gs::GaussianModel, optimizers;
     # ignoring newly inserted gaussians.
     valid_mask = vcat(.!mask, KA.ones(kab, Bool, n_new_points))
     KA.unsafe_free!(mask)
-    prune_points!(gs, optimizers, valid_mask)
+    prune_points!(strategy, gs, optimizers, valid_mask)
     return
 end
 
@@ -134,7 +135,7 @@ end
     points[i] = p .+ R * ξ
 end
 
-function prune_points!(gs::GaussianModel, optimizers, valid_mask)
+function prune_points!(strategy::DefaultStrategy, gs::GaussianModel, optimizers, valid_mask)
     _prune_optimizer!(optimizers.points, valid_mask, gs.points)
     # TODO turn into macro:
     # @unsafe_replace gs.points = gs.points[:, valid_mask]
@@ -169,17 +170,17 @@ function prune_points!(gs::GaussianModel, optimizers, valid_mask)
     KA.unsafe_free!(gs.opacities)
     gs.opacities = new_opacities
 
-    new_max_radii = gs.max_radii[valid_mask]
-    KA.unsafe_free!(gs.max_radii)
-    gs.max_radii = new_max_radii
+    new_max_radii = strategy.max_radii[valid_mask]
+    KA.unsafe_free!(strategy.max_radii)
+    strategy.max_radii = new_max_radii
 
-    new_accum_∇means_2d = gs.accum_∇means_2d[valid_mask]
-    KA.unsafe_free!(gs.accum_∇means_2d)
-    gs.accum_∇means_2d = new_accum_∇means_2d
+    new_accum_∇means_2d = strategy.accum_∇means_2d[valid_mask]
+    KA.unsafe_free!(strategy.accum_∇means_2d)
+    strategy.accum_∇means_2d = new_accum_∇means_2d
 
-    new_denom = gs.denom[valid_mask]
-    KA.unsafe_free!(gs.denom)
-    gs.denom = new_denom
+    new_denom = strategy.denom[valid_mask]
+    KA.unsafe_free!(strategy.denom)
+    strategy.denom = new_denom
 
     if gs.ids ≢ nothing
         new_ids = gs.ids[valid_mask]
@@ -190,7 +191,7 @@ function prune_points!(gs::GaussianModel, optimizers, valid_mask)
 end
 
 function densification_postfix!(
-    gs::GaussianModel, optimizers;
+    strategy::DefaultStrategy, gs::GaussianModel, optimizers;
     new_points, new_features_dc, new_features_rest,
     new_scales, new_rotations, new_opacities, new_ids,
 )
@@ -226,15 +227,15 @@ function densification_postfix!(
     KA.unsafe_free!(gs.opacities)
     gs.opacities = new_opacities
 
-    KA.unsafe_free!(gs.max_radii)
-    KA.unsafe_free!(gs.accum_∇means_2d)
-    KA.unsafe_free!(gs.denom)
+    KA.unsafe_free!(strategy.max_radii)
+    KA.unsafe_free!(strategy.accum_∇means_2d)
+    KA.unsafe_free!(strategy.denom)
 
     kab = get_backend(gs)
     n = size(gs.points, 2)
-    gs.max_radii = KA.zeros(kab, Int32, n)
-    gs.accum_∇means_2d = KA.zeros(kab, Float32, n)
-    gs.denom = KA.zeros(kab, Float32, n)
+    strategy.max_radii = KA.zeros(kab, Int32, n)
+    strategy.accum_∇means_2d = KA.zeros(kab, Float32, n)
+    strategy.denom = KA.zeros(kab, Float32, n)
 
     if gs.ids ≢ nothing
         new_ids = cat(gs.ids, new_ids; dims=1)

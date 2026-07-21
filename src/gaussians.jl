@@ -1,9 +1,7 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
 mutable struct GaussianModel{
     P <: AbstractMatrix{Float32},
-    R <: AbstractVector{Int32},
     D <: AbstractArray{Float32, 3},
-    G <: AbstractVector{Float32},
     I <: Maybe{AbstractVector{Int32}},
 }
     points::P
@@ -12,10 +10,6 @@ mutable struct GaussianModel{
     scales::P
     rotations::P
     opacities::P
-
-    max_radii::R
-    accum_∇means_2d::G
-    denom::G
 
     ids::I
 
@@ -47,17 +41,13 @@ function GaussianModel(
     rotations[1, :] .= 1f0
 
     opacities = inverse_sigmoid.(0.1f0 .* KA.ones(kab, Float32, (1, n)))
-    max_radii = KA.zeros(kab, Int32, n)
-    accum_∇means_2d = KA.zeros(kab, Float32, n)
-    denom = KA.zeros(kab, Float32, n)
 
     ids = use_ids ? KA.zeros(kab, Int32, n) : nothing
 
     GaussianModel(
         points, features_dc, features_rest,
         isotropic ? mean(scales; dims=1) : scales,
-        rotations, opacities,
-        max_radii, accum_∇means_2d, denom, ids,
+        rotations, opacities, ids,
         sh_degree, max_sh_degree)
 end
 
@@ -79,10 +69,6 @@ function bson_params(m::GaussianModel)
         rotations=adapt(CPU(), m.rotations),
         opacities=adapt(CPU(), m.opacities),
 
-        max_radii=adapt(CPU(), m.max_radii),
-        accum_∇means_2d=adapt(CPU(), m.accum_∇means_2d),
-        denom=adapt(CPU(), m.denom),
-
         sh_degree=m.sh_degree,
         max_sh_degree=m.max_sh_degree)
 end
@@ -95,10 +81,6 @@ function set_from_bson!(m::GaussianModel, θ)
     m.scales = adapt(kab, θ.scales)
     m.rotations = adapt(kab, θ.rotations)
     m.opacities = adapt(kab, θ.opacities)
-
-    m.max_radii = adapt(kab, θ.max_radii)
-    m.accum_∇means_2d = adapt(kab, θ.accum_∇means_2d)
-    m.denom = adapt(kab, θ.denom)
 
     m.sh_degree = θ.sh_degree
     m.max_sh_degree = θ.max_sh_degree
@@ -116,37 +98,6 @@ end
 end
 
 Base.length(g::GaussianModel) = size(g.points, 2)
-
-function update_stats!(
-    gs::GaussianModel, radii::AbstractVector{Int32},
-    ∇means_2d::AbstractVector{SVector{2, Float32}},
-    resolution::SVector{2, UInt32},
-)
-    _update_stats!(get_backend(gs), 256)(
-        gs.max_radii, gs.accum_∇means_2d, gs.denom,
-        radii, ∇means_2d, resolution; ndrange=length(gs))
-    return
-end
-
-@kernel cpu=false inbounds=true function _update_stats!(
-    # Outputs.
-    max_radii::AbstractVector{Int32},
-    accum_∇means_2d::AbstractVector{Float32},
-    denom::AbstractVector{Float32},
-    # Inputs.
-    radii::AbstractVector{Int32},
-    ∇means_2d::AbstractVector{SVector{2, Float32}},
-    resolution::SVector{2, UInt32},
-)
-    i = @index(Global)
-    r = radii[i]
-    r > 0 || return
-
-    max_radii[i] = max(max_radii[i], r)
-    ∇mean_2d = ∇means_2d[i] .* resolution .* 0.5f0
-    accum_∇means_2d[i] += norm(∇mean_2d)
-    denom[i] += 1f0
-end
 
 """
 Convert colors from [0, 1] range to [-SH0 / 2, SH0 / 2].
@@ -212,14 +163,9 @@ function import_ply(filename::String, kab)
     max_sh_degree::Int = sqrt(size(features_rest, 2) + 1) - 1
     sh_degree::Int = max_sh_degree
 
-    max_radii = KA.zeros(kab, Int32, n)
-    accum_∇means_2d = KA.zeros(kab, Float32, n)
-    denom = KA.zeros(kab, Float32, n)
-
     gaussians = GaussianModel(
         adapt(kab, xyz), adapt(kab, features_dc), adapt(kab, features_rest),
         adapt(kab, scales), adapt(kab, rotations), adapt(kab, opacities),
-        max_radii, accum_∇means_2d, denom,
         nothing, sh_degree, max_sh_degree)
 
     return (; gaussians, vertex)
