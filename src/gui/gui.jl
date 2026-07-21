@@ -167,8 +167,13 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     return gsgui
 end
 
+# Densification strategies selectable in the UI.
+const STRATEGIES = (:default, :mcmc)
+
 # Training mode.
-function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
+function GSGUI(kab, dataset_path::String, scale::Int;
+    strategy::Symbol = :default, gl_kwargs...,
+)
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -186,7 +191,8 @@ function GSGUI(kab, dataset_path::String, scale::Int; gl_kwargs...)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
-    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
+        strategy=create_strategy(strategy, gaussians))
 
     # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(camera)
@@ -224,7 +230,9 @@ Runs on a background thread (see `open_dataset_modal!`), so it must
 not touch OpenGL state: the results are applied on the render thread
 in `apply_dataset!`.
 """
-function load_dataset(kab, dataset_path::String; scale::Int, width::Int, height::Int)
+function load_dataset(kab, dataset_path::String;
+    scale::Int, width::Int, height::Int, strategy::Symbol = :default,
+)
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
@@ -232,7 +240,8 @@ function load_dataset(kab, dataset_path::String; scale::Int, width::Int, height:
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
-    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
+        strategy=create_strategy(strategy, gaussians))
 
     # Set-up separate renderer camera & rasterizer.
     camera = deepcopy(camera)
@@ -411,6 +420,14 @@ function open_dataset_modal!(gui::GSGUI)
         end
     end
 
+    CImGui.Text("Densification strategy:")
+    for (i, strategy) in enumerate(STRATEGIES)
+        CImGui.SameLine()
+        if CImGui.RadioButton("$strategy", Int(ui_state.dataset_strategy[]) == i - 1)
+            ui_state.dataset_strategy[] = i - 1
+        end
+    end
+
     # Always occupy the error line to keep the window height constant.
     if isempty(ui_state.dataset_error)
         CImGui.Text(" ")
@@ -427,9 +444,10 @@ function open_dataset_modal!(gui::GSGUI)
         ui_state.dataset_error = ""
         kab = get_backend(gui.rasterizer)
         scale = Int(ui_state.dataset_scale[])
+        strategy = STRATEGIES[ui_state.dataset_strategy[] + 1]
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
-            kab, dataset_path; scale, width, height)
+            kab, dataset_path; scale, width, height, strategy)
     end
     can_open || disabled_end()
 

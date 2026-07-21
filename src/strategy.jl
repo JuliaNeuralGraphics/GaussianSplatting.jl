@@ -6,6 +6,17 @@ called once per train step after the optimizer update.
 abstract type AbstractStrategy end
 
 """
+Strategy-specific loss term added to the photometric loss in `step!`.
+Must be Zygote-differentiable w.r.t. `opacities` & `scales` (raw, pre-activation).
+"""
+regularization_loss(::AbstractStrategy, opacities, scales) = 0f0
+
+create_strategy(kind::Symbol, gs) =
+    kind == :default ? DefaultStrategy(gs) :
+    kind == :mcmc ? MCMCStrategy() :
+    throw(ArgumentError("Unknown densification strategy `$kind`, must be one of: `:default`, `:mcmc`."))
+
+"""
 The original 3DGS adaptive density control: clone small/split big Gaussians
 with high image-space positional gradient, prune transparent & oversized ones,
 periodically reset opacity.

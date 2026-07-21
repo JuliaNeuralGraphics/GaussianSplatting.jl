@@ -246,7 +246,10 @@ function step!(trainer::Trainer)
 
             l1 = mean(abs.(image_eval .- target_image))
             s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
-            total = (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+            total =
+                (1f0 - params.λ_dssim) * l1
+                + params.λ_dssim * s
+                + regularization_loss(trainer.strategy, opacities, scales)
 
             if depth_data ≢ nothing
                 depth_img = image_features[4, :, :]

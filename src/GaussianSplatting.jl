@@ -65,6 +65,7 @@ include("depth_supervision.jl")
 include("gaussians.jl")
 include("strategy.jl")
 include("densification.jl")
+include("mcmc.jl")
 include("rasterization/rasterizer.jl")
 include("training.jl")
 include("gui/gui.jl")
@@ -79,20 +80,20 @@ use_ak(kab) = false
 
 function main(kab, dataset_path::String;
     scale::Int, save_path::Maybe{String} = nothing,
-    opt_params::OptimizationParams = OptimizationParams(),
+    opt_params::OptimizationParams = OptimizationParams(), strategy::Symbol = :default,
 )
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(kab, dataset_path;
-        scale, train_test_split=0.9, permute=false)
+    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=0.9, permute=false)
     camera = dataset.test_cameras[1]
 
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+    gaussians = GaussianModel(
+        dataset.points, dataset.colors, dataset.scales;
         max_sh_degree=3, isotropic=false)
-    rasterizer = GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgbd)
+    rasterizer = GaussianRasterizer(kab, camera; antialias=false, fused=true, mode=:rgbd)
 
-    trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
+    trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
+        strategy=create_strategy(strategy, gaussians))
 
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
     @info "N train images: $(length(dataset.train_cameras))"

@@ -162,6 +162,38 @@ end
     @test !f.usable
 end
 
+@testset "MCMC relocation (Eq. 9)" begin
+    strategy = GaussianSplatting.MCMCStrategy()
+    relocation_params = GaussianSplatting.relocation_params
+
+    # ratio = 1: splitting into a single copy is an identity.
+    new_o, coeff = relocation_params(strategy, 0.9f0, 1)
+    @test new_o ≈ 0.9f0 atol=1f-6
+    @test coeff ≈ 1f0 atol=1f-5
+
+    # ratio = 2 closed form: new_o = 1 - √(1 - o), scales shrink.
+    o = 0.9f0
+    new_o, coeff = relocation_params(strategy, o, 2)
+    @test new_o ≈ 1f0 - sqrt(1f0 - o) atol=1f-5
+    @test 0f0 < coeff < 1f0
+
+    # Opacity & scale multiplier stay valid & monotonically
+    # decrease with the split count over the whole ratio range.
+    prev_o, prev_coeff = 1f0, 1f0 + 1f-5
+    for ratio in 1:strategy.n_max
+        new_o, coeff = relocation_params(strategy, 0.99f0, ratio)
+        @test strategy.min_opacity ≤ new_o < 1f0
+        @test new_o ≤ prev_o
+        @test 0f0 < coeff ≤ prev_coeff
+        prev_o, prev_coeff = new_o, coeff
+    end
+
+    # Near-dead source stays finite & clamped to the opacity floor.
+    new_o, coeff = relocation_params(strategy, 0.004f0, 2)
+    @test new_o ≈ strategy.min_opacity
+    @test isfinite(coeff) && coeff > 0f0
+end
+
 @testset "Tile ranges" begin
     gaussian_keys = adapt(kab,
         UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])

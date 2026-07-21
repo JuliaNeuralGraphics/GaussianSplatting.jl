@@ -195,6 +195,29 @@ function densification_postfix!(
     new_points, new_features_dc, new_features_rest,
     new_scales, new_rotations, new_opacities, new_ids,
 )
+    append_gaussians!(gs, optimizers;
+        new_points, new_features_dc, new_features_rest,
+        new_scales, new_rotations, new_opacities, new_ids)
+
+    KA.unsafe_free!(strategy.max_radii)
+    KA.unsafe_free!(strategy.accum_∇means_2d)
+    KA.unsafe_free!(strategy.denom)
+
+    kab = get_backend(gs)
+    n = size(gs.points, 2)
+    strategy.max_radii = KA.zeros(kab, Int32, n)
+    strategy.accum_∇means_2d = KA.zeros(kab, Float32, n)
+    strategy.denom = KA.zeros(kab, Float32, n)
+    return
+end
+
+# Append new Gaussians to the model & extend optimizer states
+# with zeroed moments for the new rows.
+function append_gaussians!(
+    gs::GaussianModel, optimizers;
+    new_points, new_features_dc, new_features_rest,
+    new_scales, new_rotations, new_opacities, new_ids,
+)
     _append_optimizer!(optimizers.points, new_points)
     new_points = cat(gs.points, new_points; dims=ndims(new_points))
     KA.unsafe_free!(gs.points)
@@ -226,16 +249,6 @@ function densification_postfix!(
     new_opacities = cat(gs.opacities, new_opacities; dims=ndims(new_opacities))
     KA.unsafe_free!(gs.opacities)
     gs.opacities = new_opacities
-
-    KA.unsafe_free!(strategy.max_radii)
-    KA.unsafe_free!(strategy.accum_∇means_2d)
-    KA.unsafe_free!(strategy.denom)
-
-    kab = get_backend(gs)
-    n = size(gs.points, 2)
-    strategy.max_radii = KA.zeros(kab, Int32, n)
-    strategy.accum_∇means_2d = KA.zeros(kab, Float32, n)
-    strategy.denom = KA.zeros(kab, Float32, n)
 
     if gs.ids ≢ nothing
         new_ids = cat(gs.ids, new_ids; dims=1)
@@ -271,5 +284,14 @@ function _prune_optimizer!(opt::NU.Adam, mask, x)
     KA.unsafe_free!(opt.ν[1])
     opt.μ[1] = new_μ
     opt.ν[1] = new_ν
+    return
+end
+
+# Zero Adam moments for Gaussians at `idxs` (parameters shaped as `x`),
+# e.g. after their parameters were replaced by relocation.
+function _zero_optimizer_rows!(opt::NU.Adam, x, idxs)
+    d = ntuple(i -> Colon(), ndims(x) - 1)
+    reshape(opt.μ[1], size(x))[d..., idxs] .= 0f0
+    reshape(opt.ν[1], size(x))[d..., idxs] .= 0f0
     return
 end
