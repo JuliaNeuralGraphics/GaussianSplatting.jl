@@ -268,10 +268,18 @@ function step!(trainer::Trainer)
             "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
 
         # Apply gradients.
+        θ_names = (:points, :features_dc, :features_rest, :opacities, :scales, :rotations)
         for i in 1:length(θ)
             θᵢ = θ[i]
             isempty(θᵢ) && continue
-            NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=false)
+            ∇ᵢ = ∇[i]
+            # NaN/Inf gradients can arise even from a finite loss (e.g. `0·Inf`
+            # in a pullback): catch them before the update corrupts parameters.
+            # `sum` propagates non-finite values in a single cheap reduction.
+            isfinite(sum(∇ᵢ)) || error(
+                "Gradient w.r.t. `$(θ_names[i])` is not finite at step `$(trainer.step)` " *
+                "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
+            NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
         end
     end
 

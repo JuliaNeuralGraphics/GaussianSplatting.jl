@@ -100,6 +100,20 @@ end
 Base.length(g::GaussianModel) = size(g.points, 2)
 
 """
+Error if any model parameter is non-finite; `context` names the operation
+that just modified them. `sum` propagates NaN/Inf, so the cost is a single
+reduction per parameter.
+"""
+function check_finite(gs::GaussianModel, context::String)
+    for name in (:points, :features_dc, :features_rest, :scales, :rotations, :opacities)
+        x = getfield(gs, name)
+        isempty(x) && continue
+        isfinite(sum(x)) || error("`$name` are not finite after `$context`.")
+    end
+    return
+end
+
+"""
 Convert colors from [0, 1] range to [-SH0 / 2, SH0 / 2].
 """
 rgb_2_sh(x) = (x - 0.5f0) * (1f0 / SH0)

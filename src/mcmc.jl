@@ -71,9 +71,12 @@ function post_train_step!(
     if refining
         GPUArrays.unsafe_free!(cache)
         relocate_gaussians!(strategy, gs, optimizers)
+        check_finite(gs, "MCMC relocation")
         add_gaussians!(strategy, gs, optimizers)
+        check_finite(gs, "MCMC growth")
     end
     inject_noise!(strategy, gs, optimizers.points.lr)
+    isfinite(sum(gs.points)) || error("`points` are not finite after `MCMC noise injection`.")
     return
 end
 
@@ -246,18 +249,23 @@ function inject_noise!(strategy::MCMCStrategy, gs::GaussianModel, points_lr::Flo
     return
 end
 
-@kernel cpu=false inbounds=true function _inject_noise!(
+# TODO inbounds
+@kernel cpu=false inbounds=false function _inject_noise!(
     points, opacities, scales, rotations, lr::Float32,
 )
     i = @index(Global)
     ξ = SVector{3, Float32}(randn(Float32), randn(Float32), randn(Float32))
 
     R = unnorm_quat2rot(rotations[i])
-    s² = exp.(2f0 .* scales[i]) # Scalar for isotropic scales.
+    # Cap the variance: `exp` overflow (raw scale > 44) would give
+    # `Σξ = ±Inf` & poison the position with `0·Inf = NaN`.
+    s² = min.(exp.(2f0 .* scales[i]), 1f8) # Scalar for isotropic scales.
     # Σ·ξ = R·S²·Rᵀ·ξ.
     Σξ = R * (s² .* (R' * ξ))
 
     op = NU.sigmoid(opacities[i])
-    factor = lr / (1f0 + exp(100f0 * op - 0.5f0))
+    # Cap the exponent: for opaque Gaussians (op ≳ 0.89) `exp` overflows
+    # to `Inf` & `lr/Inf` relies on Inf-arithmetic to zero the factor.
+    factor = lr / (1f0 + exp(min(100f0 * op - 0.5f0, 80f0)))
     points[i] = points[i] .+ factor .* Σξ
 end
