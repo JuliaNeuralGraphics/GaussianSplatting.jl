@@ -28,6 +28,7 @@ using Zygote
 using LinearAlgebra
 using GaussianSplatting
 using Statistics
+using Random
 using StaticArrays
 using Quaternions
 using Rotations
@@ -144,6 +145,57 @@ GAUSSIANS = nothing
     yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
     @test y ≈ yf
     @test ∇[1] ≈ ∇f[1]
+end
+
+@testset "ls_affine_fit" begin
+    ls_affine_fit = GaussianSplatting.ls_affine_fit
+
+    # Exact affine data is recovered (ridge negligible against real variance).
+    ts = collect(Float32, 1:100)
+    a, b = ls_affine_fit(ts, 2f0 .* ts .+ 3f0)
+    @test a ≈ 2f0 atol=1f-3
+    @test b ≈ 3f0 atol=1f-3
+
+    # A constant prior has zero variance: the ridge shrinks the slope to ~0
+    # and the intercept falls back to the mean of `ys`.
+    a, b = ls_affine_fit(fill(5f0, 100), fill(7f0, 100))
+    @test a ≈ 0f0 atol=1f-4
+    @test b ≈ 7f0 atol=1f-4
+end
+
+@testset "ransac_affine_fit" begin
+    ransac_affine_fit = GaussianSplatting.ransac_affine_fit
+
+    # Clean linear data: exact recovery, perfect correlation, all inliers.
+    ts = collect(Float32, 1:1000)
+    f = ransac_affine_fit(ts, 2f0 .* ts .+ 3f0)
+    @test f.a ≈ 2f0 atol=1f-3
+    @test f.b ≈ 3f0 atol=1f-3
+    @test f.corr ≈ 1f0 atol=1f-3
+    @test f.inlier_fraction ≈ 1f0 atol=1f-3
+    @test f.usable
+
+    # 25% gross outliers: RANSAC still recovers the slope and stays usable,
+    # where a plain least-squares fit would be dragged off the true line.
+    Random.seed!(0)
+    ys = 2f0 .* ts .+ 3f0
+    ys[1:4:end] .= rand(Float32, length(1:4:1000)) .* 3000f0 .- 1000f0
+    f = ransac_affine_fit(ts, ys)
+    @test f.a ≈ 2f0 atol=1f-1
+    @test f.corr > 0.8f0
+    @test f.inlier_fraction > 0.6f0
+    @test f.usable
+
+    # Pure noise has no linear signal: rejected via the correlation gate.
+    Random.seed!(1)
+    f = ransac_affine_fit(ts, rand(Float32, 1000))
+    @test abs(f.corr) < 0.35f0
+    @test !f.usable
+
+    # Too few samples are never usable, regardless of fit quality.
+    ts_small = collect(Float32, 1:100)
+    f = ransac_affine_fit(ts_small, 2f0 .* ts_small .+ 3f0)
+    @test !f.usable
 end
 
 # @testset "Dataset loading" begin

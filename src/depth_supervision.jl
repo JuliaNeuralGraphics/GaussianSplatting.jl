@@ -52,21 +52,28 @@ struct AnchorFit
     usable::Bool
 end
 
+"""
+Least-squares affine fit `y ≈ a·t + b` over paired samples `ts`, `ys`,
+returning `(a, b)`. `var_ridge` regularizes the slope: it shrinks toward
+zero when the prior's variance approaches the quantization noise floor,
+so a near-constant prior yields a flat (uninformative) fit instead of an
+arbitrary steep one.
+"""
 function ls_affine_fit(ts, ys; var_ridge::Float32 = 1.5f-5)
     μt, μy = mean(ts), mean(ys)
     cov_ty = mean((ts .- μt) .* (ys .- μy))
     var_t = mean(abs2, ts .- μt)
-    # Small ridge: the slope shrinks toward zero when the prior's
-    # variance is near the quantization noise floor.
     a = cov_ty / (var_t + var_ridge)
-    return a, μy - a * μt
+    b = μy - a * μt
+    return a, b
 end
 
 """
 RANSAC affine regression `y ≈ a·t + b`, designed to survive the heavily
 contaminated sparse SfM clouds that break least-squares + trimming:
-LS init for the residual scale (from MAD), 2-point hypotheses scored by
-inlier count on a subset, then two LS refits on the consensus set.
+LS init for the residual scale (from Median Absolute Deviation),
+2-point hypotheses scored by inlier count on a subset,
+then two LS refits on the consensus set.
 """
 function ransac_affine_fit(
     ts::Vector{Float32}, ys::Vector{Float32};
@@ -79,6 +86,11 @@ function ransac_affine_fit(
     n = length(ts)
     a, b = ls_affine_fit(ts, ys)
     res = abs.(ys .- (a .* ts .+ b))
+    # Robust inlier threshold ϵ = 3·σ, floored at 1e-8:
+    #   median(res) is the MAD (median absolute deviation), robust to the
+    #     heavy outlier contamination that would inflate a plain std;
+    #   1.4826 = 1/Φ⁻¹(0.75) rescales MAD into a std estimate for Gaussian data;
+    #   3 is the σ gate.
     ϵ = max(3f0 * 1.4826f0 * median(res), 1f-8)
 
     subset = n ≤ score_subset ?
