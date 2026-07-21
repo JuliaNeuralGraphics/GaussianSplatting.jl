@@ -4,6 +4,7 @@ mutable struct Trainer{
     G <: GaussianModel,
     D <: ColmapDataset,
     C <: GPUArrays.AllocCache,
+    S <: AbstractStrategy,
     F,
     O,
 }
@@ -17,6 +18,7 @@ mutable struct Trainer{
     points_lr_scheduler::F
     opt_params::OptimizationParams
 
+    strategy::S
     densify::Bool
     step::Int
     ids::Vector{Int}
@@ -28,6 +30,7 @@ end
 function Trainer(
     rast::GaussianRasterizer, gs::GaussianModel,
     dataset::ColmapDataset, opt_params::OptimizationParams;
+    strategy::AbstractStrategy = DefaultStrategy(gs),
 )
     ϵ = 1f-15
     kab = get_backend(gs)
@@ -58,7 +61,7 @@ function Trainer(
 
     Trainer(
         rast, gs, dataset, optimizers, cache,
-        points_lr_scheduler, opt_params, densify, step, ids,
+        points_lr_scheduler, opt_params, strategy, densify, step, ids,
         depth_anchors)
 end
 
@@ -134,11 +137,6 @@ function load_state!(trainer::Trainer, filename::String)
 
     trainer.step = θ[:step]
     return
-end
-
-function reset_opacity!(trainer::Trainer)
-    reset_opacity!(trainer.gaussians)
-    NU.reset!(trainer.optimizers.opacities)
 end
 
 # Convert image from UInt8 to Float32 & permute from (c, w, h) to (w, h, c, 1).
@@ -268,27 +266,10 @@ function step!(trainer::Trainer)
         end
     end
 
-    if trainer.densify && trainer.step ≤ params.densify_until_iter
-        update_stats!(gs, rast.gstate.radii,
-            rast.gstate.∇means_2d, camera.intrinsics.resolution)
-        do_densify =
-            trainer.step ≥ params.densify_from_iter &&
-            trainer.step % params.densification_interval == 0
-        if do_densify
-            GPUArrays.unsafe_free!(trainer.cache)
-
-            max_screen_size::Int32 =
-                trainer.step > params.opacity_reset_interval ? 20 : 0
-            densify_and_prune!(gs, trainer.optimizers;
-                extent=trainer.dataset.camera_extent,
-                pruning_extent=trainer.dataset.camera_extent,
-                grad_threshold=params.densify_grad_threshold,
-                min_opacity=0.05f0, max_screen_size, params.dense_percent)
-        end
-
-        if trainer.step % params.opacity_reset_interval == 0
-            reset_opacity!(trainer)
-        end
+    if trainer.densify
+        post_train_step!(
+            trainer.strategy, gs, trainer.optimizers, rast, camera, trainer.cache;
+            trainer.step, extent=trainer.dataset.camera_extent)
     end
     return loss
 end

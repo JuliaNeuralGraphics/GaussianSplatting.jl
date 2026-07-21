@@ -63,6 +63,7 @@ include("dataset.jl")
 include("depth_supervision.jl")
 
 include("gaussians.jl")
+include("strategy.jl")
 include("densification.jl")
 include("rasterization/rasterizer.jl")
 include("training.jl")
