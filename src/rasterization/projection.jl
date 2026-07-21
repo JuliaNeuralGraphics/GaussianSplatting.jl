@@ -250,6 +250,12 @@ end
 }
     i = @index(Global)
 
+    # Culled in the forward: cotangents are zero & `conics[i]`/`mean_cam`
+    # are stale or degenerate (e.g. `z ≈ 0` → `1/z = Inf` → `0·Inf = NaN`
+    # in `vmeans` for a Gaussian that was never rendered). Outputs are
+    # zero-initialized, so returning leaves the correct zero gradient.
+    radii[i] > 0i32 || return
+
     conic = conics[i]
     Σ_2D_inv = SMatrix{2, 2, Float32, 4}(
         conic[1], conic[2],
