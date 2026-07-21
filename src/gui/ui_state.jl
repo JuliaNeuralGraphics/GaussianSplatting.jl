@@ -3,15 +3,12 @@ Base.@kwdef mutable struct UIState
     train::Ref{Bool} = Ref(false)
     render::Ref{Bool} = Ref(true)
     densify::Ref{Bool} = Ref(true)
+    scene_hovered::Bool = false
 
     loss::Float32 = 0f0
 
     draw_cameras::Ref{Bool} = Ref(false)
     selected_view::Ref{Int32} = Ref{Int32}(0)
-
-    save_directory_path::Vector{UInt8} = Vector{UInt8}(
-        joinpath(homedir(), "GaussianSplattingModels") * "\0"^512)
-    state_file::Vector{UInt8} = Vector{UInt8}("\0"^512)
 
     sh_degree::Ref{Int32} = Ref{Int32}(-1) # -1 means use value from the model
 
@@ -20,4 +17,11 @@ Base.@kwdef mutable struct UIState
 
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]
+
+    # `Open Dataset` modal.
+    open_dataset_popup::Bool = false
+    dataset_scale::Ref{Int32} = Ref{Int32}(1)
+    dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)
+    dataset_error::String = ""
+    dataset_load_task::Maybe{Task} = nothing
 end

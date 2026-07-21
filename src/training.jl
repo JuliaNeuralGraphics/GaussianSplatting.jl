@@ -20,6 +20,9 @@ mutable struct Trainer{
     densify::Bool
     step::Int
     ids::Vector{Int}
+
+    # Per train camera depth anchors; empty when depth supervision is off.
+    depth_anchors::Vector{Maybe{DepthAnchor}}
 end
 
 function Trainer(
@@ -46,9 +49,41 @@ function Trainer(
     ids = collect(1:length(dataset))
     densify = true
     step = 0
+
+    use_depth_priors = opt_params.use_depth_loss && dataset.has_depth_priors
+    @info "Use depth priors for supervision: `$use_depth_priors`."
+    depth_anchors = use_depth_priors ?
+        setup_depth_supervision(rast, dataset, opt_params) :
+        Maybe{DepthAnchor}[]
+
     Trainer(
         rast, gs, dataset, optimizers, cache,
-        points_lr_scheduler, opt_params, densify, step, ids)
+        points_lr_scheduler, opt_params, densify, step, ids,
+        depth_anchors)
+end
+
+function setup_depth_supervision(
+    rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams,
+)
+    disabled = Maybe{DepthAnchor}[]
+    if rast.mode != :rgbd
+        @warn "Depth supervision requires a `:rgbd` rasterizer, disabling."
+        return disabled
+    end
+    if !any(!isnothing, dataset.train_depths)
+        @warn "Depth supervision enabled, but no depth priors were found, disabling."
+        return disabled
+    end
+    points = Array(dataset.points)
+    if isempty(points)
+        @warn "Depth supervision requires an init point cloud to fit anchors, disabling."
+        return disabled
+    end
+    @assert dataset.depths_dir ≢ nothing
+    return load_or_fit_depth_anchors(
+        dataset.depths_dir,
+        points, dataset.train_cameras, dataset.train_depths;
+        mode=opt_params.depth_loss_mode)
 end
 
 function bson_params(opt::NU.Adam)
@@ -174,8 +209,25 @@ function step!(trainer::Trainer)
         gs.points, gs.features_dc, gs.features_rest,
         gs.opacities, gs.scales, gs.rotations)
 
+    anchor = isempty(trainer.depth_anchors) ? nothing : trainer.depth_anchors[idx]
+
     kab = get_backend(rast)
     GPUArrays.@cached trainer.cache begin
+        # Depth supervision target for this view (constant w.r.t. AD).
+        depth_data = if anchor ≡ nothing
+            nothing
+        else
+            prior = adapt(kab, trainer.dataset.train_depths[idx])
+            target, half_band, valid = depth_target(
+                anchor, prior, trainer.dataset.train_depth_qsteps[idx])
+            # Depth dominates early geometry formation;
+            # photometric loss wins fine detail late.
+            decay = DEPTH_LOSS_FINAL_SCALE^clamp(
+                Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
+            weight = params.depth_loss_weight * decay
+            (; target, half_band, valid, weight)
+        end
+
         loss, ∇ = Zygote.withgradient(
             θ...,
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations
@@ -183,11 +235,12 @@ function step!(trainer::Trainer)
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
 
-            image = if rast.mode == :rgbd
-                image_features[1:3, :, :]
-            else
-                image_features
-            end
+            # NOTE: Unconditional slice (a no-op for `:rgb`): a branch whose
+            # else-arm aliases `image_features` unsliced makes Zygote
+            # mis-route the gradient of the alias past the `getindex`
+            # pullback once the depth term adds a second use, crashing
+            # gradient accumulation with a shape mismatch.
+            image = image_features[1:3, :, :]
 
             # From (c, w, h) to (w, h, c, 1) for SSIM.
             image_tmp = permutedims(image, (2, 3, 1))
@@ -195,7 +248,16 @@ function step!(trainer::Trainer)
 
             l1 = mean(abs.(image_eval .- target_image))
             s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
-            (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+            total = (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+
+            if depth_data ≢ nothing
+                depth_img = image_features[4, :, :]
+                total += depth_data.weight * ssi_depth_loss(depth_img;
+                    transmittance=rast.istate.accum_α,
+                    depth_data.target, depth_data.half_band, depth_data.valid,
+                    depth_floor=anchor.floor)
+            end
+            total
         end
 
         # Apply gradients.

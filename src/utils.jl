@@ -19,6 +19,13 @@ Base.@kwdef struct OptimizationParams
     densify_grad_threshold::Float32 = 2f-4
 
     opacity_reset_interval::Int = 30_000
+
+    # Depth supervision with monocular priors (see `depth_supervision.jl`).
+    # Requires depth maps next to the dataset images, an init point cloud and a `:rgbd` rasterizer.
+    use_depth_loss::Bool = true
+    depth_loss_weight::Float32 = 2f0
+    depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
+    depth_loss_steps::Int = 30_000 # Weight decays to 2% by this step.
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)

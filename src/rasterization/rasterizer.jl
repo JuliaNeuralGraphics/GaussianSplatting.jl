@@ -38,7 +38,7 @@ end
 function GaussianRasterizer(kab;
     width::Int, height::Int,
     fused::Bool = true,
-    mode::Symbol = :rgb,
+    mode::Symbol = :rgbd,
     antialias::Bool = false,
 )
     @assert width % 16 == 0 && height % 16 == 0

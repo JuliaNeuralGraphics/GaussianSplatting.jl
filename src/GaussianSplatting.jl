@@ -28,6 +28,7 @@ using NeuralGraphicsGL
 using ModernGL
 using CImGui
 using GLFW
+using NativeFileDialog
 
 import CImGui.lib as iglib
 
@@ -59,6 +60,7 @@ include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
 include("dataset.jl")
+include("depth_supervision.jl")
 
 include("gaussians.jl")
 include("densification.jl")
@@ -74,7 +76,10 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
-function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = nothing)
+function main(kab, dataset_path::String;
+    scale::Int, save_path::Maybe{String} = nothing,
+    opt_params::OptimizationParams = OptimizationParams(),
+)
     @info "Using `$kab` GPU backend."
 
     dataset = ColmapDataset(kab, dataset_path;
@@ -86,7 +91,6 @@ function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = 
     rasterizer = GaussianRasterizer(kab, camera;
         antialias=false, fused=true, mode=:rgbd)
 
-    opt_params = OptimizationParams()
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params)
 
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
@@ -146,37 +150,20 @@ function main(kab, dataset_path::String; scale::Int, save_path::Maybe{String} = 
     return
 end
 
-function gui(kab, path::String; scale::Maybe{Int} = nothing, fullscreen::Bool = false)
-    ispath(path) || error("Path does not exist: `$path`.")
-
-    viewer_mode = endswith(path, ".bson") || endswith(path, ".ply")
-    !viewer_mode && !isdir(path) && error(
-        "`path` must be either a [`.bson`, '.ply'] model checkpoint or " *
-        "a directory with COLMAP dataset, instead: `$path`.")
-    !viewer_mode && scale ≡ nothing && error(
-        "`scale` keyword argument must be specified if `path` is a COLMAP dataset.")
-
+"""
+Application entry point: starts with an empty scene,
+datasets are loaded via the `File` menu.
+"""
+function app(kab; fullscreen::Bool = false)
     width, height, resizable = fullscreen ?
         (-1, -1, false) :
         (1024, 1024, true)
 
-    gui = if viewer_mode
-        if endswith(path, ".bson")
-            θ = BSON.load(path)
-            gaussians = GaussianModel(kab)
-            set_from_bson!(gaussians, θ[:gaussians])
-            camera = θ[:camera]
-        else
-            (; gaussians) = import_ply(path, kab)
-            width = 1024
-            fov = NU.fov2focal(1024, 45f0)
-            camera = Camera(; fx=fov, fy=fov, width, height=width)
-        end
+    fov = NU.fov2focal(1024, 45f0)
+    camera = Camera(; fx=fov, fy=fov, width, height)
 
-        GSGUI(kab, gaussians, camera; width, height, fullscreen, resizable)
-    else
-        GSGUI(kab, path, scale; width, height, fullscreen, resizable)
-    end
+    # No gaussians on startup: instantiated when loading a dataset/model.
+    gui = GSGUI(kab, nothing, camera; width, height, fullscreen, resizable)
     gui |> launch!
     return
 end

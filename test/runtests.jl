@@ -3,7 +3,7 @@
 # under the terms of the LICENSE.md file.
 
 # ENV["GSP_TEST_AMDGPU"] = true
-ENV["GSP_TEST_CUDA"] = true
+# ENV["GSP_TEST_CUDA"] = true
 
 import Pkg
 if get(ENV, "GSP_TEST_AMDGPU", "false") == "true"
@@ -28,6 +28,7 @@ using Zygote
 using LinearAlgebra
 using GaussianSplatting
 using Statistics
+using Random
 using StaticArrays
 using Quaternions
 using Rotations
@@ -37,6 +38,8 @@ using ImageFiltering
 using GaussianSplatting: i32, u32
 
 import KernelAbstractions as KA
+
+# kab = KA.CPU()
 
 struct SSIM{W <: Flux.Conv}
     window::W
@@ -77,48 +80,99 @@ end
 DATASET = nothing
 GAUSSIANS = nothing
 
-@info "Testing on `$kab` backend."
+# @info "Testing on `$kab` backend."
 
 @testset "GaussianSplatting" begin
 
-# @testset "quat2mat" begin
-#     r = RotXYZ(rand(Float32), rand(Float32), rand(Float32))
-#     q = QuatRotation{Float32}(r)
+@testset "quat2mat" begin
+    r = RotXYZ(rand(Float32), rand(Float32), rand(Float32))
+    q = QuatRotation{Float32}(r)
 
-#     ŷ = @inferred GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q.w, q.x, q.y, q.z))
-#     y = SMatrix{3, 3, Float32, 9}(q)
-#     @test all(ŷ .≈ y)
-# end
+    ŷ = @inferred GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q.w, q.x, q.y, q.z))
+    y = SMatrix{3, 3, Float32, 9}(q)
+    @test all(ŷ .≈ y)
+end
 
-# @testset "get_rect" begin
-#     width, height = 1024, 1024
-#     block = SVector{2, Int32}(16, 16)
-#     grid = SVector{2, Int32}(cld(width, block[1]), cld(height, block[2]))
+@testset "get_rect" begin
+    width, height = 1024, 1024
+    block = SVector{2, Int32}(16, 16)
+    grid = SVector{2, Int32}(cld(width, block[1]), cld(height, block[2]))
 
-#     # rect covering only one block
-#     rmin, rmax = @inferred GaussianSplatting.get_rect(
-#         SVector{2, Float32}(0, 0), 1i32, grid, block)
-#     @test all(rmin .== (0, 0))
-#     @test all(rmax .== (1, 1))
+    # rect covering only one block
+    rmin, rmax = @inferred GaussianSplatting.get_rect(
+        SVector{2, Float32}(0, 0), 1i32, grid, block)
+    @test all(rmin .== (0, 0))
+    @test all(rmax .== (1, 1))
 
-#     # rect covering 2 blocks
-#     rmin, rmax = @inferred GaussianSplatting.get_rect(
-#         SVector{2, Float32}(0, 0), Int32(block[1] + 1), grid, block)
-#     @test all(rmin .== (0, 0))
-#     @test all(rmax .== (2, 2))
-# end
+    # rect covering 2 blocks
+    rmin, rmax = @inferred GaussianSplatting.get_rect(
+        SVector{2, Float32}(0, 0), Int32(block[1] + 1), grid, block)
+    @test all(rmin .== (0, 0))
+    @test all(rmax .== (2, 2))
+end
 
-# @testset "Tile ranges" begin
-#     gaussian_keys = adapt(kab,
-#         UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
+@testset "ls_affine_fit" begin
+    ls_affine_fit = GaussianSplatting.ls_affine_fit
 
-#     ranges = KA.allocate(kab, UInt32, 2, 4)
-#     fill!(ranges, 0u32)
+    # Exact affine data is recovered (ridge negligible against real variance).
+    ts = collect(Float32, 1:100)
+    a, b = ls_affine_fit(ts, 2f0 .* ts .+ 3f0)
+    @test a ≈ 2f0 atol=1f-3
+    @test b ≈ 3f0 atol=1f-3
 
-#     GaussianSplatting.identify_tile_range!(kab, 256)(
-#         ranges, gaussian_keys; ndrange=length(gaussian_keys))
-#     @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
-# end
+    # A constant prior has zero variance: the ridge shrinks the slope to ~0
+    # and the intercept falls back to the mean of `ys`.
+    a, b = ls_affine_fit(fill(5f0, 100), fill(7f0, 100))
+    @test a ≈ 0f0 atol=1f-4
+    @test b ≈ 7f0 atol=1f-4
+end
+
+@testset "ransac_affine_fit" begin
+    ransac_affine_fit = GaussianSplatting.ransac_affine_fit
+
+    # Clean linear data: exact recovery, perfect correlation, all inliers.
+    ts = collect(Float32, 1:1000)
+    f = ransac_affine_fit(ts, 2f0 .* ts .+ 3f0)
+    @test f.a ≈ 2f0 atol=1f-3
+    @test f.b ≈ 3f0 atol=1f-3
+    @test f.corr ≈ 1f0 atol=1f-3
+    @test f.inlier_fraction ≈ 1f0 atol=1f-3
+    @test f.usable
+
+    # 25% gross outliers: RANSAC still recovers the slope and stays usable,
+    # where a plain least-squares fit would be dragged off the true line.
+    Random.seed!(0)
+    ys = 2f0 .* ts .+ 3f0
+    ys[1:4:end] .= rand(Float32, length(1:4:1000)) .* 3000f0 .- 1000f0
+    f = ransac_affine_fit(ts, ys)
+    @test f.a ≈ 2f0 atol=1f-1
+    @test f.corr > 0.8f0
+    @test f.inlier_fraction > 0.6f0
+    @test f.usable
+
+    # Pure noise has no linear signal: rejected via the correlation gate.
+    Random.seed!(1)
+    f = ransac_affine_fit(ts, rand(Float32, 1000))
+    @test abs(f.corr) < 0.35f0
+    @test !f.usable
+
+    # Too few samples are never usable, regardless of fit quality.
+    ts_small = collect(Float32, 1:100)
+    f = ransac_affine_fit(ts_small, 2f0 .* ts_small .+ 3f0)
+    @test !f.usable
+end
+
+@testset "Tile ranges" begin
+    gaussian_keys = adapt(kab,
+        UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
+
+    ranges = KA.allocate(kab, UInt32, 2, 4)
+    fill!(ranges, 0u32)
+
+    GaussianSplatting.identify_tile_range!(kab, 256)(
+        ranges, gaussian_keys; ndrange=length(gaussian_keys))
+    @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
+end
 
 @testset "SSIM" begin
     ssim = SSIM(kab)
