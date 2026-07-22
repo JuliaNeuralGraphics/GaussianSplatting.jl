@@ -2,8 +2,9 @@
 Densification from "3D Gaussian Splatting as Markov Chain Monte Carlo"
 (as implemented in LichtFeld Studio): instead of heuristic clone/split/prune
 & opacity resets, the number of Gaussians only grows (up to `max_cap`) and
-dead Gaussians (opacity ≤ `min_opacity`) are relocated onto alive ones with
-an opacity/scale correction (Eq. 9) that preserves the render.
+dead Gaussians (opacity ≤ `min_opacity` or scale above `max_scale`·extent)
+are relocated onto alive ones with an opacity/scale correction (Eq. 9) that
+preserves the render.
 Position noise scaled by each Gaussian's covariance & opacity keeps the chain
 exploring, while opacity & scale L1 regularization (see [`regularization_loss`](@ref))
 provides the pressure that produces dead Gaussians to recycle.
@@ -14,6 +15,7 @@ mutable struct MCMCStrategy <: AbstractStrategy
 
     max_cap::Int
     min_opacity::Float32
+    max_scale::Float32 # Relative to the scene extent.
     start_refine::Int
     stop_refine::Int
     refine_every::Int
@@ -27,6 +29,7 @@ end
 function MCMCStrategy(;
     max_cap::Int = 2_000_000,
     min_opacity::Float32 = 0.005f0,
+    max_scale::Float32 = 0.1f0,
     start_refine::Int = 500,
     stop_refine::Int = 25_000,
     refine_every::Int = 100,
@@ -38,7 +41,7 @@ function MCMCStrategy(;
 )
     MCMCStrategy(
         mcmc_binom_coefficients(n_max),
-        max_cap, min_opacity, start_refine, stop_refine, refine_every,
+        max_cap, min_opacity, max_scale, start_refine, stop_refine, refine_every,
         grow_factor, noise_lr, opacity_reg, scale_reg, n_max)
 end
 
@@ -70,22 +73,30 @@ function post_train_step!(
         step % strategy.refine_every == 0
     if refining
         GPUArrays.unsafe_free!(cache)
-        relocate_gaussians!(strategy, gs, optimizers)
+        relocate_gaussians!(strategy, gs, optimizers; extent)
         add_gaussians!(strategy, gs, optimizers)
     end
-    inject_noise!(strategy, gs, optimizers.points.lr)
+    inject_noise!(strategy, gs, optimizers.points.lr; extent)
     return
 end
 
 """
-Move dead Gaussians (opacity ≤ `min_opacity`) onto alive ones sampled with
-probability ∝ opacity, correcting the target's opacity/scale (Eq. 9) so the
-render is preserved. Adam moments of every touched Gaussian are reset.
+Move dead Gaussians (opacity ≤ `min_opacity` or scale above `max_scale`·extent)
+onto alive ones sampled with probability ∝ opacity, correcting the target's
+opacity/scale (Eq. 9) so the render is preserved.
+Adam moments of every touched Gaussian are reset.
 """
-function relocate_gaussians!(strategy::MCMCStrategy, gs::GaussianModel, optimizers)
+function relocate_gaussians!(
+    strategy::MCMCStrategy, gs::GaussianModel, optimizers; extent::Float32,
+)
     o = Array(reshape(NU.sigmoid.(gs.opacities), :))
-    dead = findall(≤(strategy.min_opacity), o)
-    alive = findall(>(strategy.min_opacity), o)
+    # Oversized Gaussians join the dead set: MCMC has no other pruning
+    # mechanism, so without this runaways survive until their opacity dies.
+    log_max_scale = log(strategy.max_scale * extent)
+    s_max = Array(vec(maximum(gs.scales; dims=1)))
+    is_dead = @. (o ≤ strategy.min_opacity) | (s_max > log_max_scale)
+    dead = findall(is_dead)
+    alive = findall(!, is_dead)
     (isempty(dead) || isempty(alive)) && return 0
 
     ids = multinomial_sample(o[alive], length(dead))
@@ -228,22 +239,29 @@ end
 """
 Perturb positions with noise `∝ Σ·ξ`, gated to near-dead Gaussians by a steep
 opacity sigmoid & scaled by the (decaying) position learning rate.
+Each kick is capped at a fraction of the scene extent: `‖Σ·ξ‖ ∝ scale²`
+would otherwise teleport big near-dead Gaussians across the scene every step.
 """
-function inject_noise!(strategy::MCMCStrategy, gs::GaussianModel, points_lr::Float32)
+function inject_noise!(
+    strategy::MCMCStrategy, gs::GaussianModel, points_lr::Float32; extent::Float32,
+)
     n = length(gs)
     n == 0 && return
     isotropic = size(gs.scales, 1) == 1
+    # Half the relocation size threshold: kicks stay small relative
+    # to the biggest Gaussian allowed to survive relocation.
+    max_kick = 0.5f0 * strategy.max_scale * extent
     _inject_noise!(get_backend(gs))(
         reinterpret(SVector{3, Float32}, gs.points),
         gs.opacities,
         isotropic ? gs.scales : reinterpret(SVector{3, Float32}, gs.scales),
         reinterpret(SVector{4, Float32}, gs.rotations),
-        points_lr * strategy.noise_lr; ndrange=n)
+        points_lr * strategy.noise_lr, max_kick; ndrange=n)
     return
 end
 
 @kernel cpu=false inbounds=true function _inject_noise!(
-    points, opacities, scales, rotations, lr::Float32,
+    points, opacities, scales, rotations, lr::Float32, max_kick::Float32,
 )
     i = @index(Global)
     ξ = SVector{3, Float32}(randn(Float32), randn(Float32), randn(Float32))
@@ -257,5 +275,8 @@ end
     op = NU.sigmoid(opacities[i])
     # Cap the exponent: for opaque Gaussians `exp` overflows to `Inf`.
     factor = lr / (1f0 + exp(min(100f0 * op - 0.5f0, 80f0)))
-    points[i] = points[i] .+ factor .* Σξ
+    Δ = factor .* Σξ
+    l = norm(Δ)
+    l > max_kick && (Δ = Δ .* (max_kick / l))
+    points[i] = points[i] .+ Δ
 end

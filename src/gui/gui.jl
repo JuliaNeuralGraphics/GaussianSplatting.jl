@@ -755,6 +755,15 @@ function handle_ui!(gui::GSGUI; frame_time)
 
                     CImGui.EndTable()
 
+                    if gui.trainer.strategy isa MCMCStrategy
+                        strategy = gui.trainer.strategy
+                        max_cap_ref = Ref{Int32}(strategy.max_cap)
+                        CImGui.PushItemWidth(-100)
+                        if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
+                            strategy.max_cap = max(length(gui.gaussians), Int(max_cap_ref[]))
+                        end
+                    end
+
                     image_filenames = gui.trainer.dataset.train_image_filenames
                     CImGui.Text("Camera view:")
                     CImGui.PushItemWidth(-1)
