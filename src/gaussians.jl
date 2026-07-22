@@ -44,9 +44,12 @@ function GaussianModel(
 
     ids = use_ids ? KA.zeros(kab, Int32, n) : nothing
 
+    # The model owns its arrays (densification replaces & frees them),
+    # so it must not alias the caller's `points`/`scales` (e.g. a dataset's
+    # point cloud, which outlives the model).
     GaussianModel(
-        points, features_dc, features_rest,
-        isotropic ? mean(scales; dims=1) : scales,
+        copy(points), features_dc, features_rest,
+        isotropic ? mean(scales; dims=1) : copy(scales),
         rotations, opacities, ids,
         sh_degree, max_sh_degree)
 end

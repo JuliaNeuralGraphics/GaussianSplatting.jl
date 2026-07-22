@@ -183,6 +183,52 @@ function validate(trainer::Trainer)
     return (; eval_ssim, eval_mse, eval_psnr)
 end
 
+# Post-mortem for a non-finite gradient: NaN/Inf counts for every parameter
+# & the forward state of the first few offending Gaussians, to localize
+# the origin (culled, degenerate, behind camera, ...).
+function nonfinite_gradient_report(
+    trainer::Trainer, θ, θ_names, ∇, camera::Camera, view_idx::Int,
+)
+    gs = trainer.gaussians
+    n = length(gs)
+    io = IOBuffer()
+    println(io,
+        "Non-finite gradients at step `$(trainer.step)` " *
+        "(train view `$view_idx`: `$(trainer.dataset.train_image_filenames[view_idx])`):")
+
+    bad_ids = Int[]
+    for i in 1:length(θ)
+        isempty(θ[i]) && continue
+        ∇ᵢ = reshape(∇[i], :, n)
+        mask = reshape(any(.!isfinite.(∇ᵢ); dims=1), :)
+        n_bad = sum(mask)
+        n_bad == 0 && continue
+        println(io, "  ∇$(θ_names[i]): non-finite for $n_bad / $n gaussians")
+        isempty(bad_ids) && (bad_ids = Array(findall(mask))[1:min(end, 5)])
+    end
+
+    # Forward state of the first few offending Gaussians.
+    if !isempty(bad_ids)
+        R_w2c = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+        t_w2c = SVector{3, Float32}(camera.w2c[1:3, 4])
+        ids_gpu = adapt(get_backend(gs), bad_ids)
+        P = Array(gs.points[:, ids_gpu])
+        O = Array(gs.opacities[:, ids_gpu])
+        S = Array(gs.scales[:, ids_gpu])
+        Q = Array(gs.rotations[:, ids_gpu])
+        radii = Array(trainer.rast.gstate.radii[ids_gpu])
+        for (k, gid) in enumerate(bad_ids)
+            p = SVector{3, Float32}(P[1, k], P[2, k], P[3, k])
+            z = (R_w2c * p + t_w2c)[3]
+            println(io,
+                "  gaussian `$gid`: z_cam=`$z`, radii=`$(radii[k])`, " *
+                "opacity_raw=`$(O[1, k])`, scales_raw=`$(S[:, k])`, " *
+                "‖q‖=`$(norm(@view(Q[:, k])))`")
+        end
+    end
+    return String(take!(io))
+end
+
 function step!(trainer::Trainer)
     trainer.step += 1
     update_lr!(trainer)
@@ -246,7 +292,10 @@ function step!(trainer::Trainer)
 
             l1 = mean(abs.(image_eval .- target_image))
             s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
-            total = (1f0 - params.λ_dssim) * l1 + params.λ_dssim * s
+            total =
+                (1f0 - params.λ_dssim) * l1 +
+                params.λ_dssim * s +
+                regularization_loss(trainer.strategy, opacities, scales)
 
             if depth_data ≢ nothing
                 depth_img = image_features[4, :, :]
@@ -258,11 +307,27 @@ function step!(trainer::Trainer)
             total
         end
 
+        # Guard before applying gradients: a non-finite loss means non-finite
+        # gradients, which would irreversibly corrupt the parameters.
+        isfinite(loss) || error(
+            "Loss is not finite (`$loss`) at step `$(trainer.step)` " *
+            "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
+
+        gsp_debug = GSP_DEBUG[]
+
         # Apply gradients.
+        θ_names = (:points, :features_dc, :features_rest, :opacities, :scales, :rotations)
         for i in 1:length(θ)
             θᵢ = θ[i]
             isempty(θᵢ) && continue
-            NU.step!(trainer.optimizers[i], θᵢ, ∇[i]; dispose=false)
+            ∇ᵢ = ∇[i]
+            if gsp_debug
+                # NaN/Inf gradients can arise even from a finite loss (e.g. `0·Inf`
+                # in a pullback): catch them before the update corrupts parameters.
+                # `sum` propagates non-finite values in a single cheap reduction.
+                isfinite(sum(∇ᵢ)) || error(nonfinite_gradient_report(trainer, θ, θ_names, ∇, camera, idx))
+            end
+            NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
         end
     end
 

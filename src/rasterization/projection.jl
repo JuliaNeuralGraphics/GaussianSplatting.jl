@@ -250,6 +250,12 @@ end
 }
     i = @index(Global)
 
+    # Culled in the forward: cotangents are zero & `conics[i]`/`mean_cam`
+    # are stale or degenerate (e.g. `z ≈ 0` → `1/z = Inf` → `0·Inf = NaN`
+    # in `vmeans` for a Gaussian that was never rendered). Outputs are
+    # zero-initialized, so returning leaves the correct zero gradient.
+    radii[i] > 0i32 || return
+
     conic = conics[i]
     Σ_2D_inv = SMatrix{2, 2, Float32, 4}(
         conic[1], conic[2],
@@ -391,15 +397,19 @@ end
             focal[1] * mean[1] * vmean_2D[1] +
             focal[2] * mean[2] * vmean_2D[2]),
     )
-    # FOV clipping.
-    vmean[1] +=
-        -lim_xy_neg[1] ≤ (mean[1] * rz) ≤ lim_xy[1] ?
-        -focal[1] * rz² * vJ[1, 3] :
-        -focal[1] * rz³ * vJ[1, 3] * txy[1]
-    vmean[2] +=
-        -lim_xy_neg[2] ≤ (mean[2] * rz) ≤ lim_xy[2] ?
-        -focal[2] * rz² * vJ[2, 3] :
-        -focal[2] * rz³ * vJ[2, 3] * txy[2]
+    # FOV clipping: when clamped, `txy = z·lim` does not depend on `x` (`y`),
+    # and the `J[·, 3]` contribution goes to `z` instead:
+    # ∂J[1, 3]/∂z = f·txy·rz³ = 2f·txy·rz³ (below) - f·txy·rz³ (correction).
+    if -lim_xy_neg[1] ≤ (mean[1] * rz) ≤ lim_xy[1]
+        vmean[1] += -focal[1] * rz² * vJ[1, 3]
+    else
+        vmean[3] += -focal[1] * rz³ * vJ[1, 3] * txy[1]
+    end
+    if -lim_xy_neg[2] ≤ (mean[2] * rz) ≤ lim_xy[2]
+        vmean[2] += -focal[2] * rz² * vJ[2, 3]
+    else
+        vmean[3] += -focal[2] * rz³ * vJ[2, 3] * txy[2]
+    end
     vmean[3] +=
         -focal[1] * rz² * vJ[1, 1] - focal[2] * rz² * vJ[2, 2] +
         2f0 * focal[1] * txy[1] * rz³ * vJ[1, 3] +

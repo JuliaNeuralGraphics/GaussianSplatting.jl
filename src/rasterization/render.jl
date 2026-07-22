@@ -490,18 +490,18 @@ end
 
 function ∇unnorm_quat2rot(q::SVector{4, Float32}, vR::SMatrix{3, 3, Float32, 9})
     inv_norm = 1f0 / norm(q)
-    q = q / inv_norm
+    q = q * inv_norm # Unit quaternion: the projection below requires it.
     w, x, y, z = q
 
     vqn = SVector{4, Float32}(
         2f0 * (
             x * (vR[3, 2] - vR[2, 3]) +
             y * (vR[1, 3] - vR[3, 1]) +
-            z * (vR[2, 1] - vR[2, 1])
+            z * (vR[2, 1] - vR[1, 2])
         ),
         2f0 * (
             -2f0 * x * (vR[2, 2] + vR[3, 3]) +
-            y * (vR[2, 1] + vR[2, 1]) +
+            y * (vR[2, 1] + vR[1, 2]) +
             z * (vR[3, 1] + vR[1, 3]) +
             w * (vR[3, 2] - vR[2, 3])
         ),
