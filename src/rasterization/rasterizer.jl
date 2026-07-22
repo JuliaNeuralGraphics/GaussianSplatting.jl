@@ -59,7 +59,8 @@ function GaussianRasterizer(kab;
     scales_act = KA.allocate(kab, Float32, (3, 0))
     opacities_act = KA.allocate(kab, Float32, (1, 0))
 
-    image = KA.allocate(kab, Float32, (mode == :rgbd ? 4 : 3, width, height))
+    # :rgbd renders 5 channels: rgb, depth & the alpha map (see `GeometryState`).
+    image = KA.allocate(kab, Float32, (mode == :rgbd ? 5 : 3, width, height))
     host_image, pinned_image = allocate_pinned(kab, Float32, (3, width, height))
 
     rast = GaussianRasterizer(
@@ -197,7 +198,13 @@ function (rast::GaussianRasterizer)(
         colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
 
         color_features = if rast.mode == :rgbd
-            vcat(colors, reshape(depths, 1, :))
+            # Constant-1 row renders the alpha map (see `GeometryState`);
+            # `ignore_derivatives` stops its (meaningless) cotangent from the
+            # `vcat` pullback, while its effect on opacities/means/conics
+            # flows through the `vα` path of `∇render!`.
+            ones_row = ignore_derivatives(
+                KA.ones(get_backend(rast), Float32, (1, length(depths))))
+            vcat(colors, reshape(depths, 1, :), ones_row)
         else
             colors
         end
@@ -340,7 +347,8 @@ function rasterize(
     color_features = if render_depth
         rast.gstate.color_features[1:3, :] .= reshape(reinterpret(Float32, rast.gstate.rgbs), 3, :)
         rast.gstate.color_features[4, :] .= rast.gstate.depths
-        _as_T(SVector{4, Float32}, rast.gstate.color_features)
+        rast.gstate.color_features[5, :] .= 1f0 # Constant feature: renders the alpha map.
+        _as_T(SVector{5, Float32}, rast.gstate.color_features)
     else
         rast.gstate.rgbs
     end
@@ -357,7 +365,8 @@ function rasterize(
         color_features,
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        render_depth ? SVector{4, Float32}(background..., 0f0) : background,
+        # Zero background for the depth & alpha channels.
+        render_depth ? SVector{5, Float32}(background..., 0f0, 0f0) : background,
         BLOCK, Val(BLOCK_SIZE))
     return rast.image
 end
@@ -381,7 +390,7 @@ function ∇rasterize(
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    vcolor_features = KA.zeros(kab, Float32, (render_depth ? 4 : 3, n))
+    vcolor_features = KA.zeros(kab, Float32, (render_depth ? 5 : 3, n))
     vconics = KA.zeros(kab, Float32, (3, n))
     vcov = KA.zeros(kab, Float32, (6, n))
 
@@ -396,7 +405,7 @@ function ∇rasterize(
     (; width, height) = resolution(camera)
 
     color_features = render_depth ?
-        _as_T(SVector{4, Float32}, rast.gstate.color_features) :
+        _as_T(SVector{5, Float32}, rast.gstate.color_features) :
         rast.gstate.rgbs
 
     ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
@@ -407,7 +416,7 @@ function ∇rasterize(
         reshape(reinterpret(Float32, rast.gstate.∇means_2d), 2, :),
         # Inputs.
         reshape(
-            reinterpret(SVector{render_depth ? 4 : 3, Float32}, vpixels),
+            reinterpret(SVector{render_depth ? 5 : 3, Float32}, vpixels),
             size(vpixels)[2:3]),
         rast.istate.n_contrib,
         rast.istate.accum_α,
@@ -420,9 +429,13 @@ function ∇rasterize(
 
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        render_depth ? SVector{4, Float32}(background..., 0f0) : background,
+        render_depth ? SVector{5, Float32}(background..., 0f0, 0f0) : background,
         rast.grid, BLOCK, Val(BLOCK_SIZE))
 
+    # Row 5 of `vcolor_features` is the cotangent of the constant-1 alpha
+    # feature: dropped (the feature is not a parameter). The alpha map's
+    # effect on opacities/means/conics is already accumulated by `∇render!`
+    # through the per-channel `vα` path.
     vrgbs, vdepths = if render_depth
         vcolor_features[1:3, :], vcolor_features[4, :]
     else

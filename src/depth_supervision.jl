@@ -350,28 +350,34 @@ function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep
 end
 
 """
-Scale-and-shift-invariant depth loss on the rendered blended depth `D`.
+Scale-and-shift-invariant depth loss on the rendered blended depth `D`
+and the rendered alpha map `alpha`.
 
 The rendered value is the alpha-normalized expected depth `e = D / α`
-mapped to softened inverse depth `p = 1/(e + floor)`; `α = 1 - T` is
-treated as a constant (the backward has no alpha-map input), so
-gradients flow to the Gaussians only through the depth map.
+mapped to softened inverse depth `p = 1/(e + floor)`. Both `D` and `α`
+are differentiable rasterizer outputs, so the quotient rule feeds an
+alpha cotangent back into the backward and the depth loss shapes Gaussian opacity directly.
+
+The weights & normalizations built from `α` stay detached:
+supervision pressure should not leak in through its own weighting.
+
 Data term: alpha-weighted Geman-McClure penalty on the deadbanded
 residual, scaled by the alpha-weighted std of `p` (detached).
 Gradient term: same penalty on the mismatch of forward-difference
-gradients (MiDaS-style), aligning depth edges rather than absolute
-values. The sum is normalized by the total alpha.
+gradients (MiDaS-style), aligning depth edges rather than absolute values.
+
+The sum is normalized by the total alpha.
 """
 function ssi_depth_loss(
-    depth_img::AbstractMatrix{Float32};
-    transmittance::AbstractMatrix{Float32},
+    depth_img::AbstractMatrix{Float32},
+    alpha::AbstractMatrix{Float32};
     target::AbstractMatrix{Float32},
     half_band::AbstractMatrix{Float32},
     valid::AbstractMatrix{Bool},
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
-    α = ignore_derivatives(clamp.(1f0 .- transmittance, 0f0, 1f0))
+    α = clamp.(alpha, 0f0, 1f0)
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
 

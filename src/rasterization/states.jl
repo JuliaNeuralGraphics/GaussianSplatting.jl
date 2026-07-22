@@ -31,7 +31,10 @@ GeometryState(kab, n::Int; extended::Bool = false) = GeometryState(
     KA.zeros(kab, Int32, n),
     KA.zeros(kab, SVector{3, Float32}, n),
     KA.zeros(kab, Int32, n),
-    extended ? KA.zeros(kab, Float32, (4, n)) : nothing)
+    # rgb + depth + constant-1 alpha feature: `Σᵢ 1·αᵢ·Tᵢ = 1 - T_final`,
+    # so the 5th channel renders the alpha map & the standard per-channel
+    # backward yields its exact gradient (the `grad_alpha` path).
+    extended ? KA.zeros(kab, Float32, (5, n)) : nothing)
 
 Base.length(gstate::GeometryState) = length(gstate.depths)
 
