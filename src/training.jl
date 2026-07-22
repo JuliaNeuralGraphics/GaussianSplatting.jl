@@ -299,8 +299,8 @@ function step!(trainer::Trainer)
 
             if depth_data ≢ nothing
                 depth_img = image_features[4, :, :]
-                total += depth_data.weight * ssi_depth_loss(depth_img;
-                    transmittance=rast.istate.accum_α,
+                alpha_img = image_features[5, :, :]
+                total += depth_data.weight * ssi_depth_loss(depth_img, alpha_img;
                     depth_data.target, depth_data.half_band, depth_data.valid,
                     depth_floor=anchor.floor)
             end

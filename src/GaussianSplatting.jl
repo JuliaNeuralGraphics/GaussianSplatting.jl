@@ -238,6 +238,7 @@ function benchmark(kab, dataset_path::String;
             n_gaussians=length(gaussians), loss,
             ssim=eval_ssim, mse=eval_mse, psnr=eval_psnr))
 
+        # TODO (AMDGPU.jl) bulk-freeing in finalizers triggers use-after-free?
         # Release GPU memory before the next run. Synchronize around the
         # frees: no in-flight kernel may touch the buffers being released &
         # any async fault from this run surfaces here, inside its config.
