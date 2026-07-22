@@ -25,6 +25,7 @@
 using Adapt
 using Test
 using Zygote
+using FiniteDifferences
 using LinearAlgebra
 using GaussianSplatting
 using Statistics
@@ -91,6 +92,219 @@ GAUSSIANS = nothing
     ŷ = @inferred GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q.w, q.x, q.y, q.z))
     y = SMatrix{3, 3, Float32, 9}(q)
     @test all(ŷ .≈ y)
+end
+
+@testset "∇unnorm_quat2rot vs finite differences" begin
+    for _ in 1:100
+        # Un-normalized quaternions with norms well below & above 1:
+        # the adjoint must handle the normalization, not assume ‖q‖ = 1.
+        scale = 0.3f0 + 2f0 * rand(Float32)
+        q = SVector{4, Float32}(randn(Float32, 4)...) * scale
+        vR = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+
+        vq = @inferred GaussianSplatting.∇unnorm_quat2rot(q, vR)
+
+        # Differentiate the scalar loss L(q) = Σᵢⱼ vR[i, j]·R(q)[i, j] in
+        # Float64 (converting to Float32 only for the primal call), so the
+        # finite-difference error stays well below the tolerance.
+        loss = x -> sum(
+            SMatrix{3, 3, Float64, 9}(vR) .*
+            GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(x))
+        )
+
+        # The loss goes through the Float32 kernel, so its evaluations carry
+        # ~1e-6 noise, not the ~1e-16 Float64 roundoff the step-size heuristic
+        # assumes: `factor` scales the assumed roundoff so the FDM picks a
+        # larger step & doesn't amplify that noise into the gradient.
+        # `max_range` keeps that step clear of the singularity at `q = 0`.
+        fdm = central_fdm(5, 1; factor=1e10, max_range=0.25 * norm(q))
+        fd = FiniteDifferences.grad(fdm, loss, Float64.(collect(q)))[1]
+        @test vq ≈ SVector{4, Float64}(fd) atol=1e-3 rtol=5e-3
+
+        # R(c·q) = R(q) ⇒ the gradient has no radial component.
+        @test abs(vq ⋅ q) / norm(vq) < 1f-5
+    end
+end
+
+@testset "∇pos_world_to_cam vs finite differences" begin
+    fdm = central_fdm(5, 1; factor=1e10)
+    for _ in 1:100
+        R = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+        t = SVector{3, Float32}(randn(Float32, 3)...)
+        p = SVector{3, Float32}(randn(Float32, 3)...)
+        v = SVector{3, Float32}(randn(Float32, 3)...)
+
+        vR, vt, vp = @inferred GaussianSplatting.∇pos_world_to_cam(R, t, p, v)
+
+        loss = (R̂, t̂, p̂) -> SVector{3, Float64}(v) ⋅ GaussianSplatting.pos_world_to_cam(
+            SMatrix{3, 3, Float32, 9}(R̂),
+            SVector{3, Float32}(t̂),
+            SVector{3, Float32}(p̂),
+        )
+        fd_R, fd_t, fd_p = FiniteDifferences.grad(fdm, loss,
+            Matrix{Float64}(R), Vector{Float64}(t), Vector{Float64}(p))
+        @test vR ≈ SMatrix{3, 3, Float64, 9}(fd_R) atol=1e-3 rtol=5e-3
+        @test vt ≈ SVector{3, Float64}(fd_t) atol=1e-3 rtol=5e-3
+        @test vp ≈ SVector{3, Float64}(fd_p) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "∇covar_world_to_cam vs finite differences" begin
+    fdm = central_fdm(5, 1; factor=1e10)
+    for _ in 1:100
+        R = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+        A = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+        Σ = A * A' # Symmetric PSD, like a real covariance.
+        vΣ_cam = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+        # The adjoint accumulates on top of an incoming `vR`.
+        vR_in = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+
+        vR, vΣ = @inferred GaussianSplatting.∇covar_world_to_cam(R, Σ, vΣ_cam, vR_in)
+
+        loss = (R̂, Σ̂) -> sum(
+            SMatrix{3, 3, Float64, 9}(vΣ_cam) .*
+            GaussianSplatting.covar_world_to_cam(
+                SMatrix{3, 3, Float32, 9}(R̂),
+                SMatrix{3, 3, Float32, 9}(Σ̂)),
+        )
+        fd_R, fd_Σ = FiniteDifferences.grad(fdm, loss,
+            Matrix{Float64}(R), Matrix{Float64}(Σ))
+        @test vR - vR_in ≈ SMatrix{3, 3, Float64, 9}(fd_R) atol=1e-3 rtol=5e-3
+        @test vΣ ≈ SMatrix{3, 3, Float64, 9}(fd_Σ) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "∇perspective_projection vs finite differences" begin
+    focal = SVector{2, Float32}(1000f0, 1000f0)
+    resolution = SVector{2, Int32}(1920, 1080)
+    principal = SVector{2, Float32}(0.5f0, 0.5f0)
+
+    # FOV clamping limits from the primal (symmetric principal point,
+    # so the negative limit equals the positive one): means are placed
+    # either well inside or well outside them, and `max_range` bounds
+    # the FDM step, so evaluations never cross the clamping kink.
+    tan_fov = 0.5f0 .* resolution ./ focal
+    lim = (resolution .- principal .* resolution) ./ focal .+ 0.3f0 .* tan_fov
+    fdm = central_fdm(5, 1; factor=1e10, max_range=0.1)
+
+    for inside in (true, false), _ in 1:50
+        # `x/z` either ≤ 50% of the limit or 20%+ beyond it, random sign.
+        ratio = inside ?
+            (2f0 .* rand(SVector{2, Float32}) .- 1f0) .* 0.5f0 .* lim :
+            sign.(randn(SVector{2, Float32})) .* (1.2f0 .+ 0.5f0 .* rand(SVector{2, Float32})) .* lim
+        z = 2f0 + 4f0 * rand(Float32)
+        mean = SVector{3, Float32}(ratio[1] * z, ratio[2] * z, z)
+
+        A = 0.1f0 * SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+        Σ = A * A' # Symmetric PSD, like a real covariance.
+        vΣ_2D = SMatrix{2, 2, Float32, 4}(randn(Float32, 4)...)
+        vmean_2D = SVector{2, Float32}(randn(Float32, 2)...)
+
+        vΣ, vmean = @inferred GaussianSplatting.∇perspective_projection(
+            mean, Σ, focal, resolution, principal, vΣ_2D, vmean_2D)
+
+        loss = (m̂, Σ̂) -> begin
+            Σ_2D, mean_2D = GaussianSplatting.perspective_projection(
+                SVector{3, Float32}(m̂), SMatrix{3, 3, Float32, 9}(Σ̂),
+                focal, resolution, principal)
+            sum(SMatrix{2, 2, Float64, 4}(vΣ_2D) .* Σ_2D) +
+                SVector{2, Float64}(vmean_2D) ⋅ mean_2D
+        end
+        fd_mean, fd_Σ = FiniteDifferences.grad(fdm, loss,
+            Vector{Float64}(mean), Matrix{Float64}(Σ))
+        @test vmean ≈ SVector{3, Float64}(fd_mean) atol=1e-3 rtol=5e-3
+        @test vΣ ≈ SMatrix{3, 3, Float64, 9}(fd_Σ) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "∇quat_scale_to_cov vs finite differences" begin
+    for _ in 1:100
+        norm_scale = 0.3f0 + 2f0 * rand(Float32)
+        q = SVector{4, Float32}(randn(Float32, 4)...) * norm_scale
+        scale = exp.(0.5f0 .* SVector{3, Float32}(randn(Float32, 3)...))
+        R = GaussianSplatting.unnorm_quat2rot(q)
+        vΣ = SMatrix{3, 3, Float32, 9}(randn(Float32, 9)...)
+
+        vq, vscale = @inferred GaussianSplatting.∇quat_scale_to_cov(q, scale, R, vΣ)
+
+        loss = (q̂, ŝ) -> sum(
+            SMatrix{3, 3, Float64, 9}(vΣ) .*
+            GaussianSplatting.quat_scale_to_cov(
+                SVector{4, Float32}(q̂), SVector{3, Float32}(ŝ)),
+        )
+        fdm = central_fdm(5, 1; factor=1e10, max_range=0.25 * norm(q))
+        fd_q, fd_s = FiniteDifferences.grad(fdm, loss,
+            Vector{Float64}(q), Vector{Float64}(scale))
+        @test vq ≈ SVector{4, Float64}(fd_q) atol=1e-3 rtol=5e-3
+        @test vscale ≈ SVector{3, Float64}(fd_s) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "∇inverse vs finite differences" begin
+    # `∇inverse` takes the already-inverted matrix, as at its call site.
+    # `inverse` & the adjoint assume a symmetric input, so the FD runs over
+    # the 3 free entries of `[a b; b c]`: `dL/db` then corresponds to
+    # `vX[1, 2] + vX[2, 1]`.
+    fdm = central_fdm(5, 1; factor=1e10, max_range=0.2)
+    for _ in 1:100
+        A = SMatrix{2, 2, Float32, 4}(randn(Float32, 4)...)
+        # Positive definite & away from the singular `det ≈ 0` early-out.
+        X = A * A' + SMatrix{2, 2, Float32, 4}(0.5f0, 0f0, 0f0, 0.5f0)
+        b = randn(Float32, 3)
+        vY = SMatrix{2, 2, Float32, 4}(b[1], b[2], b[2], b[3])
+
+        _, Y = GaussianSplatting.inverse(X)
+        vX = @inferred GaussianSplatting.∇inverse(Y, vY)
+
+        loss = p -> begin
+            _, Ŷ = GaussianSplatting.inverse(
+                SMatrix{2, 2, Float32, 4}(p[1], p[2], p[2], p[3]))
+            sum(SMatrix{2, 2, Float64, 4}(vY) .* Ŷ)
+        end
+        fd = FiniteDifferences.grad(fdm, loss, Float64[X[1, 1], X[2, 1], X[2, 2]])[1]
+        vX_sym = SVector{3, Float32}(vX[1, 1], vX[1, 2] + vX[2, 1], vX[2, 2])
+        @test vX_sym ≈ SVector{3, Float64}(fd) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "∇add_blur vs finite differences" begin
+    # `∇add_blur` covers only the `compensation` output (the `Σ_2D_blur`
+    # path is an identity, accumulated separately at the call site) & its
+    # third argument is the conic — the inverse of the blurred covariance —
+    # exactly what the call site passes. Symmetric 3-entry parametrization,
+    # as for `∇inverse`.
+    ϵ = 0.3f0
+    fdm = central_fdm(5, 1; factor=1e10, max_range=0.2)
+    for _ in 1:100
+        A = SMatrix{2, 2, Float32, 4}(randn(Float32, 4)...)
+        Σ = A * A' + SMatrix{2, 2, Float32, 4}(0.5f0, 0f0, 0f0, 0.5f0)
+        vcomp = randn(Float32)
+
+        Σ_blur, _, comp = GaussianSplatting.add_blur(Σ, ϵ)
+        _, conic = GaussianSplatting.inverse(Σ_blur)
+        vΣ = @inferred GaussianSplatting.∇add_blur(comp, vcomp, conic, ϵ)
+
+        loss = p -> Float64(vcomp) * GaussianSplatting.add_blur(
+            SMatrix{2, 2, Float32, 4}(p[1], p[2], p[2], p[3]), ϵ)[3]
+        fd = FiniteDifferences.grad(fdm, loss, Float64[Σ[1, 1], Σ[2, 1], Σ[2, 2]])[1]
+        vΣ_sym = SVector{3, Float32}(vΣ[1, 1], vΣ[1, 2] + vΣ[2, 1], vΣ[2, 2])
+        @test vΣ_sym ≈ SVector{3, Float64}(fd) atol=1e-4 rtol=5e-3
+    end
+end
+
+@testset "∇normalize vs finite differences" begin
+    for _ in 1:100
+        scale = 0.3f0 + 2f0 * rand(Float32)
+        dir = SVector{3, Float32}(randn(Float32, 3)...) * scale
+        vdir = SVector{3, Float32}(randn(Float32, 3)...)
+
+        vd = @inferred GaussianSplatting.∇normalize(dir, vdir)
+
+        loss = d̂ -> SVector{3, Float64}(vdir) ⋅ normalize(SVector{3, Float32}(d̂))
+        fdm = central_fdm(5, 1; factor=1e10, max_range=0.25 * norm(dir))
+        fd = FiniteDifferences.grad(fdm, loss, Vector{Float64}(dir))[1]
+        @test vd ≈ SVector{3, Float64}(fd) atol=1e-3 rtol=5e-3
+    end
 end
 
 @testset "get_rect" begin

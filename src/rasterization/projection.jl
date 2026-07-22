@@ -397,15 +397,19 @@ end
             focal[1] * mean[1] * vmean_2D[1] +
             focal[2] * mean[2] * vmean_2D[2]),
     )
-    # FOV clipping.
-    vmean[1] +=
-        -lim_xy_neg[1] ≤ (mean[1] * rz) ≤ lim_xy[1] ?
-        -focal[1] * rz² * vJ[1, 3] :
-        -focal[1] * rz³ * vJ[1, 3] * txy[1]
-    vmean[2] +=
-        -lim_xy_neg[2] ≤ (mean[2] * rz) ≤ lim_xy[2] ?
-        -focal[2] * rz² * vJ[2, 3] :
-        -focal[2] * rz³ * vJ[2, 3] * txy[2]
+    # FOV clipping: when clamped, `txy = z·lim` does not depend on `x` (`y`),
+    # and the `J[·, 3]` contribution goes to `z` instead:
+    # ∂J[1, 3]/∂z = f·txy·rz³ = 2f·txy·rz³ (below) - f·txy·rz³ (correction).
+    if -lim_xy_neg[1] ≤ (mean[1] * rz) ≤ lim_xy[1]
+        vmean[1] += -focal[1] * rz² * vJ[1, 3]
+    else
+        vmean[3] += -focal[1] * rz³ * vJ[1, 3] * txy[1]
+    end
+    if -lim_xy_neg[2] ≤ (mean[2] * rz) ≤ lim_xy[2]
+        vmean[2] += -focal[2] * rz² * vJ[2, 3]
+    else
+        vmean[3] += -focal[2] * rz³ * vJ[2, 3] * txy[2]
+    end
     vmean[3] +=
         -focal[1] * rz² * vJ[1, 1] - focal[2] * rz² * vJ[2, 2] +
         2f0 * focal[1] * txy[1] * rz³ * vJ[1, 3] +

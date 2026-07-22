@@ -25,7 +25,7 @@ mutable struct MCMCStrategy <: AbstractStrategy
 end
 
 function MCMCStrategy(;
-    max_cap::Int = 1_000_000,
+    max_cap::Int = 2_000_000,
     min_opacity::Float32 = 0.005f0,
     start_refine::Int = 500,
     stop_refine::Int = 25_000,
@@ -71,12 +71,9 @@ function post_train_step!(
     if refining
         GPUArrays.unsafe_free!(cache)
         relocate_gaussians!(strategy, gs, optimizers)
-        check_finite(gs, "MCMC relocation")
         add_gaussians!(strategy, gs, optimizers)
-        check_finite(gs, "MCMC growth")
     end
     inject_noise!(strategy, gs, optimizers.points.lr)
-    isfinite(sum(gs.points)) || error("`points` are not finite after `MCMC noise injection`.")
     return
 end
 
@@ -103,23 +100,19 @@ function relocate_gaussians!(strategy::MCMCStrategy, gs::GaussianModel, optimize
     # (`dead ∩ sampled = ∅`, so gather-then-scatter is safe).
     gs.points[:, dead_gpu] = gs.points[:, sampled_gpu]
     gs.features_dc[:, :, dead_gpu] = gs.features_dc[:, :, sampled_gpu]
-    if !isempty(gs.features_rest)
-        gs.features_rest[:, :, dead_gpu] = gs.features_rest[:, :, sampled_gpu]
-    end
+    isempty(gs.features_rest) ||
+        (gs.features_rest[:, :, dead_gpu] = gs.features_rest[:, :, sampled_gpu])
     gs.scales[:, dead_gpu] = gs.scales[:, sampled_gpu]
     gs.rotations[:, dead_gpu] = gs.rotations[:, sampled_gpu]
     gs.opacities[:, dead_gpu] = gs.opacities[:, sampled_gpu]
-    if gs.ids ≢ nothing
-        gs.ids[dead_gpu] = gs.ids[sampled_gpu]
-    end
+    gs.ids ≢ nothing && (gs.ids[dead_gpu] = gs.ids[sampled_gpu])
 
     # Both source & destination rows received new parameters: reset their moments.
     touched = adapt(kab, union(sampled, dead))
     _zero_optimizer_rows!(optimizers.points, gs.points, touched)
     _zero_optimizer_rows!(optimizers.features_dc, gs.features_dc, touched)
-    if !isempty(gs.features_rest)
+    isempty(gs.features_rest) ||
         _zero_optimizer_rows!(optimizers.features_rest, gs.features_rest, touched)
-    end
     _zero_optimizer_rows!(optimizers.scales, gs.scales, touched)
     _zero_optimizer_rows!(optimizers.rotations, gs.rotations, touched)
     _zero_optimizer_rows!(optimizers.opacities, gs.opacities, touched)
@@ -249,23 +242,20 @@ function inject_noise!(strategy::MCMCStrategy, gs::GaussianModel, points_lr::Flo
     return
 end
 
-# TODO inbounds
-@kernel cpu=false inbounds=false function _inject_noise!(
+@kernel cpu=false inbounds=true function _inject_noise!(
     points, opacities, scales, rotations, lr::Float32,
 )
     i = @index(Global)
     ξ = SVector{3, Float32}(randn(Float32), randn(Float32), randn(Float32))
 
     R = unnorm_quat2rot(rotations[i])
-    # Cap the variance: `exp` overflow (raw scale > 44) would give
-    # `Σξ = ±Inf` & poison the position with `0·Inf = NaN`.
+    # Cap the variance: `exp` overflow would give `Σξ = ±Inf` & poison the position.
     s² = min.(exp.(2f0 .* scales[i]), 1f8) # Scalar for isotropic scales.
     # Σ·ξ = R·S²·Rᵀ·ξ.
     Σξ = R * (s² .* (R' * ξ))
 
     op = NU.sigmoid(opacities[i])
-    # Cap the exponent: for opaque Gaussians (op ≳ 0.89) `exp` overflows
-    # to `Inf` & `lr/Inf` relies on Inf-arithmetic to zero the factor.
+    # Cap the exponent: for opaque Gaussians `exp` overflows to `Inf`.
     factor = lr / (1f0 + exp(min(100f0 * op - 0.5f0, 80f0)))
     points[i] = points[i] .+ factor .* Σξ
 end

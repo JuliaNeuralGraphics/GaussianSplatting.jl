@@ -44,9 +44,12 @@ function GaussianModel(
 
     ids = use_ids ? KA.zeros(kab, Int32, n) : nothing
 
+    # The model owns its arrays (densification replaces & frees them),
+    # so it must not alias the caller's `points`/`scales` (e.g. a dataset's
+    # point cloud, which outlives the model).
     GaussianModel(
-        points, features_dc, features_rest,
-        isotropic ? mean(scales; dims=1) : scales,
+        copy(points), features_dc, features_rest,
+        isotropic ? mean(scales; dims=1) : copy(scales),
         rotations, opacities, ids,
         sh_degree, max_sh_degree)
 end
@@ -98,20 +101,6 @@ end
 end
 
 Base.length(g::GaussianModel) = size(g.points, 2)
-
-"""
-Error if any model parameter is non-finite; `context` names the operation
-that just modified them. `sum` propagates NaN/Inf, so the cost is a single
-reduction per parameter.
-"""
-function check_finite(gs::GaussianModel, context::String)
-    for name in (:points, :features_dc, :features_rest, :scales, :rotations, :opacities)
-        x = getfield(gs, name)
-        isempty(x) && continue
-        isfinite(sum(x)) || error("`$name` are not finite after `$context`.")
-    end
-    return
-end
 
 """
 Convert colors from [0, 1] range to [-SH0 / 2, SH0 / 2].

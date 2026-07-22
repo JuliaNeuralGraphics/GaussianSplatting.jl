@@ -313,17 +313,20 @@ function step!(trainer::Trainer)
             "Loss is not finite (`$loss`) at step `$(trainer.step)` " *
             "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
 
+        gsp_debug = GSP_DEBUG[]
+
         # Apply gradients.
         θ_names = (:points, :features_dc, :features_rest, :opacities, :scales, :rotations)
         for i in 1:length(θ)
             θᵢ = θ[i]
             isempty(θᵢ) && continue
             ∇ᵢ = ∇[i]
-            # NaN/Inf gradients can arise even from a finite loss (e.g. `0·Inf`
-            # in a pullback): catch them before the update corrupts parameters.
-            # `sum` propagates non-finite values in a single cheap reduction.
-            isfinite(sum(∇ᵢ)) || error(
-                nonfinite_gradient_report(trainer, θ, θ_names, ∇, camera, idx))
+            if gsp_debug
+                # NaN/Inf gradients can arise even from a finite loss (e.g. `0·Inf`
+                # in a pullback): catch them before the update corrupts parameters.
+                # `sum` propagates non-finite values in a single cheap reduction.
+                isfinite(sum(∇ᵢ)) || error(nonfinite_gradient_report(trainer, θ, θ_names, ∇, camera, idx))
+            end
             NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
         end
     end
