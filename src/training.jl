@@ -25,6 +25,8 @@ mutable struct Trainer{
 
     # Per train camera depth anchors; empty when depth supervision is off.
     depth_anchors::Vector{Maybe{DepthAnchor}}
+    # Per train camera appearance grids; `nothing` when disabled.
+    bilateral_grid::Maybe{BilateralGrid}
 end
 
 function Trainer(
@@ -53,16 +55,24 @@ function Trainer(
     densify = true
     step = 0
 
-    use_depth_priors = opt_params.use_depth_loss && dataset.has_depth_priors
-    @info "Use depth priors for supervision: `$use_depth_priors`."
-    depth_anchors = use_depth_priors ?
-        setup_depth_supervision(rast, dataset, opt_params) :
+    depth_anchors = if opt_params.use_depth_loss && dataset.has_depth_priors
+        @info "Use depth priors for supervision."
+        setup_depth_supervision(rast, dataset, opt_params)
+    else
         Maybe{DepthAnchor}[]
+    end
+
+    bilateral_grid = if opt_params.use_bilateral_grid
+        @info "Using bilateral grid of `$(opt_params.bilateral_grid_size)` size."
+        BilateralGrid(kab, length(dataset.train_cameras), opt_params)
+    else
+        nothing
+    end
 
     Trainer(
         rast, gs, dataset, optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
-        depth_anchors)
+        depth_anchors, bilateral_grid)
 end
 
 function setup_depth_supervision(
@@ -113,10 +123,15 @@ function save_state(trainer::Trainer, filename::String)
         scales=bson_params(trainer.optimizers.scales),
         rotations=bson_params(trainer.optimizers.rotations))
 
+    bilateral = trainer.bilateral_grid ≡ nothing ? nothing : (;
+        grids=adapt(CPU(), trainer.bilateral_grid.grids),
+        opt=bson_params(trainer.bilateral_grid.optimizer))
+
     camera = trainer.dataset.train_cameras[1]
     BSON.bson(filename, Dict(
         :gaussians => bson_params(trainer.gaussians),
         :optimizers => optimizers,
+        :bilateral => bilateral,
         :step => trainer.step,
         :camera => camera,
     ))
@@ -134,6 +149,15 @@ function load_state!(trainer::Trainer, filename::String)
     set_from_bson!(trainer.optimizers.opacities, optimizers.opacities)
     set_from_bson!(trainer.optimizers.scales, optimizers.scales)
     set_from_bson!(trainer.optimizers.rotations, optimizers.rotations)
+
+    # Older checkpoints have no grids; a checkpoint with grids restores them
+    # only if the trainer has them enabled (they must match the same dataset).
+    bilateral = get(θ, :bilateral, nothing)
+    if trainer.bilateral_grid ≢ nothing && bilateral ≢ nothing
+        kab = get_backend(trainer.gaussians)
+        copyto!(trainer.bilateral_grid.grids, adapt(kab, bilateral.grids))
+        set_from_bson!(trainer.bilateral_grid.optimizer, bilateral.opt)
+    end
 
     trainer.step = θ[:step]
     return
@@ -254,6 +278,7 @@ function step!(trainer::Trainer)
         gs.opacities, gs.scales, gs.rotations)
 
     anchor = isempty(trainer.depth_anchors) ? nothing : trainer.depth_anchors[idx]
+    bgrid = trainer.bilateral_grid
 
     kab = get_backend(rast)
     GPUArrays.@cached trainer.cache begin
@@ -273,8 +298,8 @@ function step!(trainer::Trainer)
         end
 
         loss, ∇ = Zygote.withgradient(
-            θ...,
-        ) do means_3d, features_dc, features_rest, opacities, scales, rotations
+            θ..., bgrid ≡ nothing ? nothing : bgrid.grids,
+        ) do means_3d, features_dc, features_rest, opacities, scales, rotations, bgrids
             image_features = rast(
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
@@ -286,6 +311,12 @@ function step!(trainer::Trainer)
             # gradient accumulation with a shape mismatch.
             image = image_features[1:3, :, :]
 
+            # Per-view appearance correction before the photometric loss;
+            # evaluation & viewing use the raw render.
+            if bgrids ≢ nothing
+                image = bilateral_slice(image, bgrids[:, :, :, :, idx])
+            end
+
             # From (c, w, h) to (w, h, c, 1) for SSIM.
             image_tmp = permutedims(image, (2, 3, 1))
             image_eval = reshape(image_tmp, size(image_tmp)..., 1)
@@ -296,6 +327,10 @@ function step!(trainer::Trainer)
                 (1f0 - params.λ_dssim) * l1 +
                 params.λ_dssim * s +
                 regularization_loss(trainer.strategy, opacities, scales)
+
+            if bgrids ≢ nothing
+                total += params.tv_loss_weight * tv_loss(bgrids)
+            end
 
             if depth_data ≢ nothing
                 depth_img = image_features[4, :, :]
@@ -329,6 +364,16 @@ function step!(trainer::Trainer)
             end
             NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
         end
+
+        if bgrid ≢ nothing
+            ∇grids = ∇[end]
+            if gsp_debug
+                isfinite(sum(∇grids)) || error(
+                    "Non-finite bilateral grid gradient at step `$(trainer.step)` " *
+                    "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
+            end
+            NU.step!(bgrid.optimizer, bgrid.grids, ∇grids; dispose=false)
+        end
     end
 
     if trainer.densify
@@ -341,5 +386,7 @@ end
 
 function update_lr!(trainer::Trainer)
     trainer.optimizers.points.lr = trainer.points_lr_scheduler(trainer.step)
+    bgrid = trainer.bilateral_grid
+    bgrid ≡ nothing || (bgrid.optimizer.lr = bgrid.scheduler(trainer.step))
     return
 end

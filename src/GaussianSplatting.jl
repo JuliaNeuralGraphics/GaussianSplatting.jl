@@ -63,6 +63,7 @@ include("dataset.jl")
 include("depth_supervision.jl")
 
 include("gaussians.jl")
+include("bilateral_grid.jl")
 include("strategy.jl")
 include("densification.jl")
 include("mcmc.jl")

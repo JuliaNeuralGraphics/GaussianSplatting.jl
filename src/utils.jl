@@ -17,6 +17,15 @@ Base.@kwdef struct OptimizationParams
     depth_loss_weight::Float32 = 2f0
     depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
     depth_loss_steps::Int = 30_000 # Weight decays to 2% by this step.
+
+    # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
+    # per-train-image low-res affine color grids applied to the render before
+    # the photometric loss, absorbing exposure / white-balance drift.
+    use_bilateral_grid::Bool = false
+    bilateral_grid_size::NTuple{3, Int} = (16, 16, 8) # (x, y, guidance)
+    bilateral_grid_lr::Float32 = 2f-3
+    bilateral_grid_lr_steps::Int = 30_000 # LR decays to 1% by this step.
+    tv_loss_weight::Float32 = 10f0
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)
