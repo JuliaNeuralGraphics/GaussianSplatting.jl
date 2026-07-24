@@ -1,14 +1,15 @@
 """
-Bilateral grid appearance modeling (as implemented in LichtFeld Studio,
-after "Bilateral Guided Radiance Field Processing"): each train image owns a
-low-res `(x, y, guidance)` grid of 3×4 affine color transforms, applied to the
-render before the photometric loss. Per-view exposure / white-balance drift is
-absorbed by the grids instead of being baked into the Gaussians as color-shift
-floaters. Training-time only: evaluation & viewing use the raw render.
+Bilateral grid appearance modeling:
+each train image owns a low-res `(x, y, guidance)` grid of 3×4 affine color transforms,
+applied to the render before the photometric loss.
 
-The grids are trained jointly with the Gaussians (see `step!`): the current
-view's grid via [`bilateral_slice`](@ref), all grids via the [`tv_loss`](@ref)
-smoothness prior.
+Per-view exposure / white-balance drift is absorbed by the grids
+instead of being baked into the Gaussians as color-shift floaters.
+Training-time only: evaluation & viewing use the raw render.
+
+The grids are trained jointly with the Gaussians (see `step!`):
+the current view's grid via [`bilateral_slice`](@ref),
+all grids via the [`tv_loss`](@ref) smoothness prior.
 """
 struct BilateralGrid{G <: AbstractArray{Float32, 5}, F}
     # (x, y, guidance, 12 affine coefficients, train image).
@@ -90,9 +91,8 @@ end
 
 """
 Total variation prior over all grids: mean squared difference between
-neighboring cells along each grid axis, averaged over axes, coefficients &
-images (LichtFeld's normalization). Keeps the affine transforms smooth in
-image space & across guidance levels. Zygote-differentiable.
+neighboring cells along each grid axis, averaged over axes, coefficients & images (LichtFeld's normalization).
+Keeps the affine transforms smooth in image space & across guidance levels.
 """
 function tv_loss(grids::AbstractArray{Float32, 5})
     gx, gy, gz, _, n = size(grids)
@@ -102,7 +102,8 @@ function tv_loss(grids::AbstractArray{Float32, 5})
     return (
         sum(abs2, Δx) / max(1, (gx - 1) * gy * gz) +
         sum(abs2, Δy) / max(1, gx * (gy - 1) * gz) +
-        sum(abs2, Δz) / max(1, gx * gy * (gz - 1))) / (12f0 * n)
+        sum(abs2, Δz) / max(1, gx * gy * (gz - 1))
+    ) / (12f0 * n)
 end
 
 # Interpolation state shared by the forward & backward kernels: sanitized rgb
