@@ -1,10 +1,9 @@
 """
-Densification from "3D Gaussian Splatting as Markov Chain Monte Carlo"
-(as implemented in LichtFeld Studio): instead of heuristic clone/split/prune
-& opacity resets, the number of Gaussians only grows (up to `max_cap`) and
-dead Gaussians (opacity ≤ `min_opacity` or scale above `max_scale`·extent)
-are relocated onto alive ones with an opacity/scale correction (Eq. 9) that
-preserves the render.
+Densification from "3D Gaussian Splatting as Markov Chain Monte Carlo":
+instead of heuristic clone/split/prune & opacity resets,
+the number of Gaussians only grows (up to `max_cap`)
+and dead Gaussians (opacity ≤ `min_opacity` or scale above `max_scale`·extent)
+are relocated onto alive ones with an opacity/scale correction (Eq. 9) that preserves the render.
 Position noise scaled by each Gaussian's covariance & opacity keeps the chain
 exploring, while opacity & scale L1 regularization (see [`regularization_loss`](@ref))
 provides the pressure that produces dead Gaussians to recycle.

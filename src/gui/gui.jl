@@ -172,7 +172,8 @@ const STRATEGIES = (:default, :mcmc)
 
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
-    strategy::Symbol = :default, gl_kwargs...,
+    strategy::Symbol = :default, use_bilateral_grid::Bool = false,
+    gl_kwargs...,
 )
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
@@ -187,7 +188,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams()
+    opt_params = OptimizationParams(; use_bilateral_grid)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
@@ -232,11 +233,12 @@ in `apply_dataset!`.
 """
 function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
+    use_bilateral_grid::Bool = false,
 )
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams()
+    opt_params = OptimizationParams(; use_bilateral_grid)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
@@ -428,6 +430,13 @@ function open_dataset_modal!(gui::GSGUI)
         end
     end
 
+    CImGui.Checkbox("Bilateral grid appearance modeling", ui_state.dataset_bilateral_grid)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Per-train-image color correction absorbing exposure / " *
+            "white-balance drift.\nRecommended for casual (phone) captures.")
+    end
+
     # Always occupy the error line to keep the window height constant.
     if isempty(ui_state.dataset_error)
         CImGui.Text(" ")
@@ -445,9 +454,10 @@ function open_dataset_modal!(gui::GSGUI)
         kab = get_backend(gui.rasterizer)
         scale = Int(ui_state.dataset_scale[])
         strategy = STRATEGIES[ui_state.dataset_strategy[] + 1]
+        use_bilateral_grid = ui_state.dataset_bilateral_grid[]
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
-            kab, dataset_path; scale, width, height, strategy)
+            kab, dataset_path; scale, width, height, strategy, use_bilateral_grid)
     end
     can_open || disabled_end()
 

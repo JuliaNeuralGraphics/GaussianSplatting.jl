@@ -5,22 +5,22 @@
 # ENV["GSP_TEST_AMDGPU"] = true
 # ENV["GSP_TEST_CUDA"] = true
 
-# import Pkg
-# if get(ENV, "GSP_TEST_AMDGPU", "false") == "true"
-#     @info "`GSP_TEST_AMDGPU` is `true`, importing AMDGPU.jl."
-#     Pkg.add("AMDGPU")
-#     using AMDGPU
-#
-#     kab = ROCBackend()
-# elseif get(ENV, "GSP_TEST_CUDA", "false") == "true"
-#     @info "`GSP_TEST_CUDA` is `true`, importing CUDA.jl."
-#     Pkg.add(["CUDA", "cuDNN"])
-#     using CUDA, cuDNN
-#
-#     kab = CUDABackend()
-# else
-#     error("No GPU backend was specified.")
-# end
+import Pkg
+if get(ENV, "GSP_TEST_AMDGPU", "false") == "true"
+    @info "`GSP_TEST_AMDGPU` is `true`, importing AMDGPU.jl."
+    Pkg.add("AMDGPU")
+    using AMDGPU
+
+    kab = ROCBackend()
+elseif get(ENV, "GSP_TEST_CUDA", "false") == "true"
+    @info "`GSP_TEST_CUDA` is `true`, importing CUDA.jl."
+    Pkg.add(["CUDA", "cuDNN"])
+    using CUDA, cuDNN
+
+    kab = CUDABackend()
+else
+    error("No GPU backend was specified.")
+end
 
 using Adapt
 using Test
@@ -39,8 +39,6 @@ using ImageFiltering
 using GaussianSplatting: i32, u32
 
 import KernelAbstractions as KA
-
-kab = KA.CPU()
 
 struct SSIM{W <: Flux.Conv}
     window::W
@@ -408,43 +406,74 @@ end
     @test isfinite(coeff) && coeff > 0f0
 end
 
-# @testset "Tile ranges" begin
-#     gaussian_keys = adapt(kab,
-#         UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
-#
-#     ranges = KA.allocate(kab, UInt32, 2, 4)
-#     fill!(ranges, 0u32)
-#
-#     GaussianSplatting.identify_tile_range!(kab, 256)(
-#         ranges, gaussian_keys; ndrange=length(gaussian_keys))
-#     @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
-# end
-#
-# @testset "SSIM" begin
-#     ssim = SSIM(kab)
-#
-#     x = KA.ones(kab, Float32, (16, 16, 3, 1))
-#     ref = KA.zeros(kab, Float32, (16, 16, 3, 1))
-#     @test ssim(x, ref) ≈ 0f0 atol=1f-4 rtol=1f-4
-#     ref = KA.ones(kab, Float32, (16, 16, 3, 1))
-#     @test ssim(x, ref) ≈ 1f0
-#
-#     x = zeros(Float32, (16, 16, 3, 1))
-#     x[1:4, 1:4, :, :] .= 0.25f0
-#     x[5:8, 1:4, :, :] .= 0.5f0
-#     x[9:12, 13:16, :, :] .= 0.75f0
-#     x[13:16, 13:16, :, :] .= 1f0
-#     @test ssim(adapt(kab, x), ref) ≈ 0.1035 atol=1f-3 rtol=1f-3
-#
-#     x = adapt(kab, rand(Float32, 128, 128, 3, 2))
-#     ref = adapt(kab, rand(Float32, 128, 128, 3, 2))
-#     @test ssim(x, ref) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
-#
-#     y, ∇ = Zygote.withgradient(x -> ssim(x, ref), x)
-#     yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
-#     @test y ≈ yf
-#     @test ∇[1] ≈ ∇f[1]
-# end
+@testset "Tile ranges" begin
+    gaussian_keys = adapt(kab, UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
+    ranges = KA.allocate(kab, UInt32, 2, 4)
+    fill!(ranges, 0u32)
+
+    GaussianSplatting.identify_tile_range!(kab, 256)(
+        ranges, gaussian_keys; ndrange=length(gaussian_keys))
+    @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
+end
+
+@testset "SSIM" begin
+    ssim = SSIM(kab)
+
+    x = KA.ones(kab, Float32, (16, 16, 3, 1))
+    ref = KA.zeros(kab, Float32, (16, 16, 3, 1))
+    @test ssim(x, ref) ≈ 0f0 atol=1f-4 rtol=1f-4
+    ref = KA.ones(kab, Float32, (16, 16, 3, 1))
+    @test ssim(x, ref) ≈ 1f0
+
+    x = zeros(Float32, (16, 16, 3, 1))
+    x[1:4, 1:4, :, :] .= 0.25f0
+    x[5:8, 1:4, :, :] .= 0.5f0
+    x[9:12, 13:16, :, :] .= 0.75f0
+    x[13:16, 13:16, :, :] .= 1f0
+    @test ssim(adapt(kab, x), ref) ≈ 0.1035 atol=1f-3 rtol=1f-3
+
+    x = adapt(kab, rand(Float32, 128, 128, 3, 2))
+    ref = adapt(kab, rand(Float32, 128, 128, 3, 2))
+    @test ssim(x, ref) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
+
+    y, ∇ = Zygote.withgradient(x -> ssim(x, ref), x)
+    yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
+    @test y ≈ yf
+    @test ∇[1] ≈ ∇f[1]
+end
+
+@testset "Bilateral grid" begin
+    w, h, n_images = 64, 48, 4
+    idx = 2 # Current "train view".
+
+    opt_params = GaussianSplatting.OptimizationParams(;
+        use_bilateral_grid=true, bilateral_grid_size=(8, 8, 4))
+    bgrid = GaussianSplatting.BilateralGrid(kab, n_images, opt_params)
+    image = adapt(kab, rand(Float32, 3, w, h))
+
+    # Identity grids leave the image unchanged & have no variation.
+    out = GaussianSplatting.bilateral_slice(image, bgrid.grids[:, :, :, :, idx])
+    @test Array(out) ≈ Array(image)
+    @test GaussianSplatting.tv_loss(bgrid.grids) ≈ 0f0
+
+    # Gradients through slice + TV, as in `step!`.
+    target = adapt(kab, rand(Float32, 3, w, h))
+    loss, ∇ = Zygote.withgradient(bgrid.grids, image) do grids, img
+        corrected = GaussianSplatting.bilateral_slice(img, grids[:, :, :, :, idx])
+        mean(abs.(corrected .- target)) + opt_params.tv_loss_weight * GaussianSplatting.tv_loss(grids)
+    end
+    ∇grids, ∇image = ∇
+    @test isfinite(loss)
+    @test size(∇grids) == size(bgrid.grids)
+    @test size(∇image) == size(image)
+    @test isfinite(sum(∇grids))
+    @test isfinite(sum(∇image))
+    # Identity grids are constant along guidance, so the z-path cancels &
+    # only the sliced view receives a photometric gradient.
+    other = [i for i in 1:n_images if i != idx]
+    @test all(iszero, Array(∇grids[:, :, :, :, other]))
+    @test maximum(abs.(Array(∇grids[:, :, :, :, idx]))) > 0f0
+end
 
 # @testset "Dataset loading" begin
 #     dataset_dir = joinpath(@__DIR__, "..", "assets", "bicycle-smol")

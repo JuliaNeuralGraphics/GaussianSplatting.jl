@@ -63,6 +63,7 @@ include("dataset.jl")
 include("depth_supervision.jl")
 
 include("gaussians.jl")
+include("bilateral_grid.jl")
 include("strategy.jl")
 include("densification.jl")
 include("mcmc.jl")
@@ -186,8 +187,10 @@ function benchmark(kab, dataset_path::String;
     eval_every::Int = 1_000,
     seed::Int = 42,
     configs = [
-        (name="default",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false)),
-        (name="default+depth", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true)),
+        (name="default",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=false)),
+        (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
+        (name="default+depth", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
+        (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
         (name="mcmc",          strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
         (name="mcmc+depth",    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
     ],
