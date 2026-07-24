@@ -270,6 +270,10 @@ end
 """
 Application entry point: starts with an empty scene,
 datasets are loaded via the `File` menu.
+
+Training & rasterization run on a background thread (see
+`RenderWorker`), so Julia must be started with at least 2 threads,
+e.g. `julia -t 2,1` or `julia -t auto`.
 """
 function app(kab; fullscreen::Bool = false)
     maybe_debug()

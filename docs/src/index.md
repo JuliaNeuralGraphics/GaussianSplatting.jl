@@ -30,7 +30,13 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
    ] add Metal  # for Apple GPU
    ```
 
-2. Run:
+2. Start Julia with at least 2 threads (training runs on a background
+   thread to keep the UI responsive):
+   ```bash
+   julia -t auto # or `julia -t 2,1`
+   ```
+
+3. Run:
    ```julia
    julia> using AMDGPU; kab = ROCBackend()  # for AMD GPU
    julia> using CUDA; kab = CUDABackend()   # for Nvidia GPU

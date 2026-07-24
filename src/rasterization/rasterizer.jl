@@ -89,6 +89,8 @@ include("spherical_harmonics.jl")
 include("render.jl")
 
 # OpenGL convertions.
+# Both return the rasterizer-owned `host_image`, which the next render
+# overwrites: callers must copy it out if they keep it around.
 
 function gl_texture(r::GaussianRasterizer)
     r.pinned_image .= @view(r.image[1:3, :, :])

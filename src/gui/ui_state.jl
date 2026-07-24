@@ -15,6 +15,12 @@ Base.@kwdef mutable struct UIState
     selected_mode::Ref{Int32} = Ref{Int32}(0)
     render_modes::Vector{String} = ["Color", "Depth"]
 
+    # UI-side caches of worker-owned state (set on scene install).
+    max_sh_degree::Int = 0
+    is_mcmc::Bool = false
+    # Last error reported by the render worker; empty when none.
+    worker_error::String = ""
+
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]
 
@@ -28,4 +34,7 @@ Base.@kwdef mutable struct UIState
     dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)
     dataset_error::String = ""
     dataset_load_task::Maybe{Task} = nothing
+
+    # `Open BSON` checkpoint loading (see `load_bson` / `poll_bson_load!`).
+    bson_load_task::Maybe{Task} = nothing
 end
