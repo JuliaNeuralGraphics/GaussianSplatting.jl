@@ -2,7 +2,7 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 
-ENV["GSP_TEST_AMDGPU"] = true
+# ENV["GSP_TEST_AMDGPU"] = true
 # ENV["GSP_TEST_CUDA"] = true
 
 import Pkg
@@ -440,6 +440,39 @@ end
     yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
     @test y ≈ yf
     @test ∇[1] ≈ ∇f[1]
+end
+
+@testset "Bilateral grid" begin
+    w, h, n_images = 64, 48, 4
+    idx = 2 # Current "train view".
+
+    opt_params = GaussianSplatting.OptimizationParams(;
+        use_bilateral_grid=true, bilateral_grid_size=(8, 8, 4))
+    bgrid = GaussianSplatting.BilateralGrid(kab, n_images, opt_params)
+    image = adapt(kab, rand(Float32, 3, w, h))
+
+    # Identity grids leave the image unchanged & have no variation.
+    out = GaussianSplatting.bilateral_slice(image, bgrid.grids[:, :, :, :, idx])
+    @test Array(out) ≈ Array(image)
+    @test GaussianSplatting.tv_loss(bgrid.grids) ≈ 0f0
+
+    # Gradients through slice + TV, as in `step!`.
+    target = adapt(kab, rand(Float32, 3, w, h))
+    loss, ∇ = Zygote.withgradient(bgrid.grids, image) do grids, img
+        corrected = GaussianSplatting.bilateral_slice(img, grids[:, :, :, :, idx])
+        mean(abs.(corrected .- target)) + opt_params.tv_loss_weight * GaussianSplatting.tv_loss(grids)
+    end
+    ∇grids, ∇image = ∇
+    @test isfinite(loss)
+    @test size(∇grids) == size(bgrid.grids)
+    @test size(∇image) == size(image)
+    @test isfinite(sum(∇grids))
+    @test isfinite(sum(∇image))
+    # Identity grids are constant along guidance, so the z-path cancels &
+    # only the sliced view receives a photometric gradient.
+    other = [i for i in 1:n_images if i != idx]
+    @test all(iszero, Array(∇grids[:, :, :, :, other]))
+    @test maximum(abs.(Array(∇grids[:, :, :, :, idx]))) > 0f0
 end
 
 # @testset "Dataset loading" begin
