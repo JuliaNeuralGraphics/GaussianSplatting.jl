@@ -7,8 +7,7 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
     agents:
-      queue: "juliagpu"
-      rocm: "*"
+      queue: "rocm"
       rocmgpu: "*"
     if: build.message !~ /\[skip tests\]/
     command: |
@@ -29,8 +28,7 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
     agents:
-      queue: "juliagpu"
-      cuda: "*"
+      queue: "cuda"
     if: build.message !~ /\[skip tests\]/
     command: |
       apt-get update && apt-get install -y xvfb
