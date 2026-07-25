@@ -45,7 +45,7 @@ function DefaultStrategy(gs::GaussianModel;
     densify_until_iter::Int = 15_000,
     densification_interval::Int = 100,
     densify_grad_threshold::Float32 = 2f-4,
-    opacity_reset_interval::Int = 30_000,
+    opacity_reset_interval::Int = 3_000,
     min_opacity::Float32 = 0.05f0,
 )
     kab = get_backend(gs)
