@@ -1,6 +1,7 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
 include("ui_state.jl")
 include("render_state.jl")
+include("worker.jl")
 include("camera_path.jl")
 include("capture_mode.jl")
 
@@ -95,10 +96,15 @@ mutable struct GSGUI
     capture_mode::CaptureMode
 
     camera::Camera
-    # `nothing` on empty startup (`app`), until a dataset/model is loaded.
+    # Owned by the render worker while it runs: the UI thread must not
+    # touch the GPU state behind these (see `RenderWorker`).
+    # Reads of the references themselves (e.g. `viewer_only`) are benign: they
+    # only change via installs the UI itself initiated.
     gaussians::Maybe{GaussianModel}
     rasterizer::GaussianRasterizer
     trainer::Maybe{Trainer}
+
+    worker::RenderWorker
 end
 
 const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
@@ -123,15 +129,15 @@ function resize_scene!(gui::GSGUI; width::Int, height::Int)
     end
 
     set_resolution!(gui.camera; width, height)
-    kab = get_backend(gui.rasterizer)
-    # TODO free the old one before creating new one.
-    gui.rasterizer = GaussianRasterizer(kab, gui.camera; mode=gui.rasterizer.mode)
+    # The worker rebuilds its rasterizer from the camera resolution of
+    # the next published snapshot.
     gui.render_state.need_render = true
     return
 end
 
 # Viewer-only mode.
 function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs...)
+    check_worker_threads()
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -149,20 +155,22 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
 
     render_state = RenderState(;
-        surface=NGL.RenderSurface(;
-            internal_format=GL_RGB32F, data_type=GL_FLOAT,
-            resolution(camera)...),
+        surface=NGL.RenderSurface(; internal_format=GL_RGB32F, data_type=GL_FLOAT, resolution(camera)...),
         framebuffer=NGL.Framebuffer(; resolution(camera)...))
     control_settings = ControlSettings()
     ui_state = UIState()
+    ui_state.max_sh_degree = gaussians ≡ nothing ? 0 : gaussians.max_sh_degree
 
     capture_mode = CaptureMode()
+
+    worker = RenderWorker(; resolution(camera)...)
+    worker.n_gaussians[] = gaussians ≡ nothing ? 0 : length(gaussians)
 
     trainer = nothing
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, rasterizer, trainer)
+        gaussians, rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -175,6 +183,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_bilateral_grid::Bool = false,
     gl_kwargs...,
 )
+    check_worker_threads()
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
@@ -210,13 +219,18 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     control_settings = ControlSettings()
     control_settings.up_vec = estimate_up_vec(dataset.train_cameras)
     ui_state = UIState()
+    ui_state.max_sh_degree = gaussians.max_sh_degree
+    ui_state.is_mcmc = trainer.strategy isa MCMCStrategy
 
     capture_mode = CaptureMode()
+
+    worker = RenderWorker(; resolution(camera)...)
+    worker.n_gaussians[] = length(gaussians)
 
     gsgui = GSGUI(
         context, MainScreen, NGL.Frustum(), render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, gui_rasterizer, trainer)
+        gaussians, gui_rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -252,47 +266,72 @@ function load_dataset(kab, dataset_path::String;
     gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
 
     up_vec = estimate_up_vec(dataset.train_cameras)
+    # H2D copies above run on this task's stream: make sure they are
+    # done before the worker task touches the new arrays.
+    KA.synchronize(kab)
     return (; camera, gaussians, gui_rasterizer, trainer, up_vec)
 end
 
 # Replace the current scene, keeping the GL context & render surface.
+# UI-side part runs here; the GPU state is installed by the worker.
 function apply_dataset!(gui::GSGUI, loaded)
     gui.camera = loaded.camera
-    gui.gaussians = loaded.gaussians
-    gui.rasterizer = loaded.gui_rasterizer
-    gui.trainer = loaded.trainer
     # Yaw rotates around the estimated scene up: keeps the horizon level.
     gui.control_settings.up_vec = loaded.up_vec
 
     reset_ui!(gui.ui_state)
+    gui.ui_state.max_sh_degree = loaded.gaussians.max_sh_degree
+    gui.ui_state.is_mcmc = loaded.trainer.strategy isa MCMCStrategy
+    sync_worker_flags!(gui)
+
+    submit!(gui.worker, (:install_scene, loaded))
     gui.render_state.need_render = true
     return
 end
 
 """
-Load a `.bson` model checkpoint at runtime in viewer-only mode
-(no trainer), replacing the current scene.
-"""
-function load_bson!(gui::GSGUI, state_file::String)
-    kab = get_backend(gui.rasterizer)
+Load a `.bson` model checkpoint for viewer-only mode (no trainer).
 
+Runs on a background thread (see `menu_bar!`), so it must not touch
+OpenGL state: the results are applied on the render thread in
+`apply_bson!`.
+"""
+function load_bson(kab, state_file::String)
     θ = BSON.load(state_file)
     gaussians = GaussianModel(kab)
     set_from_bson!(gaussians, θ[:gaussians])
+    # H2D copies above run on this task's stream: make sure they are
+    # done before the worker task touches the new arrays.
+    KA.synchronize(kab)
+    return (; camera=θ[:camera]::Camera, gaussians)
+end
 
+# Replace the current scene with a loaded checkpoint (viewer-only).
+function apply_bson!(gui::GSGUI, loaded)
     # Keep the current render resolution.
-    camera = θ[:camera]
+    camera = loaded.camera
     set_resolution!(camera; resolution(gui.camera)...)
-    # TODO free the old one before creating new one.
-    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
-
     gui.camera = camera
-    gui.gaussians = gaussians
-    gui.rasterizer = gui_rasterizer
-    gui.trainer = nothing
 
     reset_ui!(gui.ui_state)
+    gui.ui_state.max_sh_degree = loaded.gaussians.max_sh_degree
+    gui.ui_state.is_mcmc = false
+    sync_worker_flags!(gui)
+
+    submit!(gui.worker, (:install_bson, loaded.gaussians))
     gui.render_state.need_render = true
+    return
+end
+
+function poll_bson_load!(gui::GSGUI)
+    task = gui.ui_state.bson_load_task
+    (task ≡ nothing || !istaskdone(task)) && return
+    gui.ui_state.bson_load_task = nothing
+    try
+        apply_bson!(gui, fetch(task))
+    catch err
+        @error "Failed to load BSON checkpoint:" exception=(err, catch_backtrace())
+    end
     return
 end
 
@@ -303,6 +342,7 @@ function reset_ui!(ui_state::UIState)
     ui_state.selected_view[] = 0
     ui_state.selected_mode[] = 0
     ui_state.sh_degree[] = -1
+    ui_state.worker_error = ""
     return
 end
 
@@ -320,11 +360,10 @@ function menu_bar!(gui::GSGUI)
         if CImGui.MenuItem("Open BSON...")
             state_file = pick_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
-                try
-                    load_bson!(gui, state_file)
-                catch err
-                    @error "Failed to load BSON checkpoint from `$state_file`:" exception=(err, catch_backtrace())
-                end
+                # Only the backend type is read here: safe from the UI thread.
+                kab = get_backend(gui.rasterizer)
+                gui.ui_state.bson_load_task =
+                    Threads.@spawn load_bson(kab, state_file)
             end
         end
 
@@ -335,11 +374,9 @@ function menu_bar!(gui::GSGUI)
             state_file = save_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
                 endswith(state_file, ".bson") || (state_file *= ".bson")
-                try
-                    save_state(gui.trainer, state_file)
-                catch err
-                    @error "Failed to save BSON checkpoint to `$state_file`:" exception=(err, catch_backtrace())
-                end
+                # Saving reads GPU arrays: run on the worker so it is
+                # ordered with training steps.
+                submit!(gui.worker, (:save_bson, state_file))
             end
         end
         CImGui.EndMenu()
@@ -470,22 +507,36 @@ function open_dataset_modal!(gui::GSGUI)
 end
 
 function launch!(gui::GSGUI)
-    NGL.render_loop(gui.context) do
-        if gui.screen == MainScreen
-            loop!(gui)
-        else gui.screen == CaptureScreen
-            loop!(gui.capture_mode; gui)
+    start_worker!(gui)
+    try
+        NGL.render_loop(gui.context) do
+            if gui.screen == MainScreen
+                loop!(gui)
+            else gui.screen == CaptureScreen
+                loop!(gui.capture_mode; gui)
+            end
+            return true
         end
-        return true
+    finally
+        stop_worker!(gui.worker)
     end
 end
 
 function loop!(gui::GSGUI)
+    w = gui.worker
     frame_time = update_time!(gui.render_state)
     NGL.imgui_begin()
     menu_bar!(gui)
     open_dataset_modal!(gui)
+    poll_bson_load!(gui)
     dockspace_id = dockspace!()
+
+    # Worker results: stats, errors, orbit-target picks.
+    gui.ui_state.loss = w.loss[]
+    err = take_error!(w)
+    err ≡ nothing || (gui.ui_state.worker_error = err)
+    target = take_pick_result!(w)
+    target ≡ nothing || (gui.control_settings.orbiting_target = target)
 
     # Handle controls.
     # `scene_hovered` lags one frame, same as ImGui's `WantCaptureMouse`.
@@ -501,17 +552,12 @@ function loop!(gui::GSGUI)
             gui.control_settings, gui.camera; controller_id)
     end
 
-    do_train = gui.ui_state.train[] && !mouse_in_ui
-    if do_train
-        try
-            gui.ui_state.loss = step!(gui.trainer)
-        catch err
-            # E.g. non-finite loss: stop training instead of crashing
-            # the app; the scene stays viewable.
-            gui.ui_state.train[] = false
-            @error "Training step failed, stopping training." exception=(err, catch_backtrace())
-        end
-        gui.render_state.need_render = true
+    # Publish the latest camera & render settings: the worker
+    # rasterizes in the background and hands back a host frame,
+    # which `scene_window!` → `upload_frame!` displays.
+    if gui.render_state.need_render
+        gui.render_state.need_render = false
+        publish_view!(gui)
     end
 
     NGL.clear()
@@ -537,48 +583,14 @@ function loop!(gui::GSGUI)
     NGL.imgui_end()
     GLFW.SwapBuffers(gui.context.window)
     GLFW.PollEvents()
+
+    # Load-bearing: only the main thread services Julia's libuv event loop.
+    # GPU synchronization on the worker (every device -> host copy) waits on
+    # a libuv `AsyncCondition` signalled from a HIP/CUDA callback, so without
+    # this the worker blocks forever in its first rasterization, regardless
+    # of how many threads are available.
+    yield()
     return
-end
-
-"""
-Pick a new orbiting target by unprojecting the rendered depth under
-the `(px, py)` pixel (1-based, top-left origin).
-Depth is averaged over a small window around the pixel to be robust
-to outliers at fuzzy silhouettes; background pixels (nothing rendered
-there, so the blended depth is ≈ 0) are excluded.
-Return `nothing` when the click hit only background.
-"""
-function pick_orbit_target(
-    gui::GSGUI, px::Integer, py::Integer,
-)::Maybe{SVector{3, Float32}}
-    gs = gui.gaussians
-    (gs ≡ nothing || length(gs) == 0) && return nothing
-
-    rast = gui.rasterizer
-    rast.mode == :rgbd || return nothing
-
-    (; width, height) = resolution(gui.camera)
-    (1 ≤ px ≤ width && 1 ≤ py ≤ height) || return nothing
-
-    δ = 4 # Window half-size.
-    depths = Array(@view(rast.image[4,
-        max(1, px - δ):min(width, px + δ),
-        max(1, py - δ):min(height, py + δ)]))
-    valid = depths .> 1f-2 # Near plane: rejects background pixels.
-    any(valid) || return nothing
-    z = mean(depths[valid])
-
-    # Unproject through the camera intrinsics
-    # (COLMAP frame: x right, y down, z forward).
-    fx, fy = gui.camera.intrinsics.focal
-    cx = gui.camera.intrinsics.principal[1] * width
-    cy = gui.camera.intrinsics.principal[2] * height
-    p_cam = SVector{3, Float32}(
-        (px - 0.5f0 - cx) * z / fx,
-        (py - 0.5f0 - cy) * z / fy,
-        z)
-    R = SMatrix{3, 3, Float32}(@view(gui.camera.c2w[1:3, 1:3]))
-    return R * p_cam .+ view_pos(gui.camera)
 end
 
 """
@@ -610,7 +622,14 @@ function scene_window!(
         end
     end
 
-    (force_render || gui.ui_state.render[]) && render!(gui)
+    # if force_render
+    #     # Capture mode: synchronous render on the GUI thread
+    #     # (the worker is expected to be paused).
+    #     render!(gui)
+    # else
+    upload_frame!(gui)
+    # end
+
     if visible
         draw_scene!(extra_draws, gui)
 
@@ -625,17 +644,17 @@ function scene_window!(
 
         # Double-click in orbiting mode: set the orbiting target to the
         # point under the cursor. The image is drawn 1:1, so the offset
-        # from its top-left corner is the pixel position.
+        # from its top-left corner is the pixel position. The pick runs
+        # on the worker (it reads the rendered depth); the result is
+        # applied in `loop!` one frame later.
         if gui.ui_state.controller_mode[] == 1 &&
             CImGui.IsItemHovered() && CImGui.IsMouseDoubleClicked(0)
 
             rect_min = CImGui.GetItemRectMin()
             mouse_pos = CImGui.GetMousePos()
-            target = pick_orbit_target(gui,
+            submit!(gui.worker, (:pick_orbit,
                 floor(Int, mouse_pos.x - rect_min.x) + 1,
-                floor(Int, mouse_pos.y - rect_min.y) + 1)
-            target ≢ nothing &&
-                (gui.control_settings.orbiting_target = target)
+                floor(Int, mouse_pos.y - rect_min.y) + 1))
         end
     end
     CImGui.End()
@@ -662,15 +681,21 @@ function draw_scene!(extra_draws::Function, gui::GSGUI)
 end
 
 function handle_ui!(gui::GSGUI; frame_time)
+    w = gui.worker
     if CImGui.Begin("GaussianSplatting")
         if CImGui.BeginTabBar("bar")
             if CImGui.BeginTabItem("Controls")
                 (; width, height) = resolution(gui.camera)
                 CImGui.Text("Render Resolution: $width x $height")
-                n_gaussians = gui.gaussians ≡ nothing ? 0 : length(gui.gaussians)
-                CImGui.Text("N Gaussians: $n_gaussians")
+                CImGui.Text("N Gaussians: $(w.n_gaussians[])")
 
-                CImGui.Checkbox("Render", gui.ui_state.render)
+                isempty(gui.ui_state.worker_error) || CImGui.TextColored(
+                    (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
+
+                if CImGui.Checkbox("Render", gui.ui_state.render)
+                    w.render[] = gui.ui_state.render[]
+                    notify(w.wakeup)
+                end
 
                 CImGui.PushItemWidth(-100)
                 if CImGui.Combo("Controller", gui.ui_state.controller_mode,
@@ -678,10 +703,8 @@ function handle_ui!(gui::GSGUI; frame_time)
                 ) && gui.ui_state.controller_mode[] == 1
                     # Entering orbit mode: place the target in front of the
                     # camera, at a scene-sized distance.
-                    d = viewer_only(gui) ?
-                        10f0 : Float32(gui.trainer.dataset.camera_extent)
-                    gui.control_settings.orbiting_target =
-                        view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+                    d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
+                    gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
                 end
 
                 # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
@@ -715,8 +738,7 @@ function handle_ui!(gui::GSGUI; frame_time)
                 has_dataset || disabled_end()
 
                 CImGui.PushItemWidth(-100)
-                max_sh_degree = gui.gaussians ≡ nothing ?
-                    0 : gui.gaussians.max_sh_degree
+                max_sh_degree = gui.ui_state.max_sh_degree
                 if max_sh_degree > 0 && CImGui.SliderInt(
                     "SH degree", gui.ui_state.sh_degree,
                     -1, max_sh_degree, "%d / $max_sh_degree",
@@ -724,13 +746,12 @@ function handle_ui!(gui::GSGUI; frame_time)
                     gui.render_state.need_render = true
                 end
 
-                if gui.rasterizer.mode == :rgbd
-                    CImGui.PushItemWidth(-100)
-                    if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-                        gui.ui_state.render_modes, length(gui.ui_state.render_modes),
-                    )
-                        gui.render_state.need_render = true
-                    end
+                # GUI rasterizers always render in `:rgbd` mode.
+                CImGui.PushItemWidth(-100)
+                if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+                    gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+                )
+                    gui.render_state.need_render = true
                 end
 
                 if !viewer_only(gui)
@@ -741,16 +762,21 @@ function handle_ui!(gui::GSGUI; frame_time)
                     # Row 1.
                     CImGui.TableNextRow()
                     CImGui.TableNextColumn()
-                    CImGui.Text("Steps: $(gui.trainer.step)")
+                    CImGui.Text("Steps: $(w.step[])")
                     CImGui.TableNextColumn()
                     CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
 
                     # Row 2.
                     CImGui.TableNextRow()
                     CImGui.TableNextColumn()
+                    # Reflect worker-side stops (e.g. training error)
+                    # before drawing the checkbox.
+                    gui.ui_state.train[] = w.train[]
                     if CImGui.Checkbox("Train", gui.ui_state.train)
                         GC.gc(false)
                         GC.gc(true)
+                        w.train[] = gui.ui_state.train[]
+                        notify(w.wakeup)
                     end
                     CImGui.TableNextColumn()
                     CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
@@ -759,18 +785,21 @@ function handle_ui!(gui::GSGUI; frame_time)
                     CImGui.TableNextRow()
                     CImGui.TableNextColumn()
                     if CImGui.Checkbox("Densify", gui.ui_state.densify)
-                        gui.trainer.densify = gui.ui_state.densify[]
+                        w.densify[] = gui.ui_state.densify[]
                     end
                     CImGui.TableNextColumn()
 
                     CImGui.EndTable()
 
-                    if gui.trainer.strategy isa MCMCStrategy
+                    if gui.ui_state.is_mcmc
+                        # Benign cross-thread write: `max_cap` is a
+                        # word-sized Int the worker only reads at
+                        # densification time.
                         strategy = gui.trainer.strategy
                         max_cap_ref = Ref{Int32}(strategy.max_cap)
                         CImGui.PushItemWidth(-100)
                         if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
-                            strategy.max_cap = max(length(gui.gaussians), Int(max_cap_ref[]))
+                            strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
                         end
                     end
 
@@ -791,12 +820,10 @@ function handle_ui!(gui::GSGUI; frame_time)
             end
 
             if CImGui.BeginTabItem("Utils")
-                if CImGui.Button("Capture Video", CImGui.ImVec2(-1, 0))
-                    GC.gc(false)
-                    GC.gc(true)
-                    gui.screen = CaptureScreen
-                    NGL.set_resizable_window!(gui.context, false)
-                end
+                # TODO Capture mode is temporarily disabled: it renders synchronously on the UI thread
+                disabled_begin()
+                CImGui.Button("Capture Video", CImGui.ImVec2(-1, 0))
+                disabled_end()
                 CImGui.EndTabItem()
             end
 
@@ -833,13 +860,22 @@ function render!(gui::GSGUI)
 
     gs = gui.gaussians
     rast = gui.rasterizer
+    (; width, height) = resolution(gui.camera)
 
     # Empty scene (no dataset loaded yet): display background color.
     if gs ≡ nothing || length(gs) == 0
-        (; width, height) = resolution(gui.camera)
         NGL.set_data!(gui.render_state.surface,
             zeros(Float32, 3, width, height))
         return
+    end
+
+    # The worker normally rebuilds the rasterizer on resolution change;
+    # this synchronous path (capture mode) has to do it itself.
+    if size(rast.image)[2:3] != (width, height)
+        kab = get_backend(rast)
+        # TODO free the old one before creating new one.
+        gui.rasterizer = rast =
+            GaussianRasterizer(kab, gui.camera; fused=true, mode=:rgbd)
     end
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]
