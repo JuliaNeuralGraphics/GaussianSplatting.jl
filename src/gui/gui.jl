@@ -97,8 +97,8 @@ mutable struct GSGUI
 
     camera::Camera
     # Owned by the render worker while it runs: the UI thread must not
-    # touch the GPU state behind these (see `RenderWorker`). Reads of
-    # the references themselves (e.g. `viewer_only`) are benign: they
+    # touch the GPU state behind these (see `RenderWorker`).
+    # Reads of the references themselves (e.g. `viewer_only`) are benign: they
     # only change via installs the UI itself initiated.
     gaussians::Maybe{GaussianModel}
     rasterizer::GaussianRasterizer
@@ -155,9 +155,7 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     rasterizer = GaussianRasterizer(kab, camera; fused=true)
 
     render_state = RenderState(;
-        surface=NGL.RenderSurface(;
-            internal_format=GL_RGB32F, data_type=GL_FLOAT,
-            resolution(camera)...),
+        surface=NGL.RenderSurface(; internal_format=GL_RGB32F, data_type=GL_FLOAT, resolution(camera)...),
         framebuffer=NGL.Framebuffer(; resolution(camera)...))
     control_settings = ControlSettings()
     ui_state = UIState()
@@ -585,6 +583,13 @@ function loop!(gui::GSGUI)
     NGL.imgui_end()
     GLFW.SwapBuffers(gui.context.window)
     GLFW.PollEvents()
+
+    # Load-bearing: only the main thread services Julia's libuv event loop.
+    # GPU synchronization on the worker (every device -> host copy) waits on
+    # a libuv `AsyncCondition` signalled from a HIP/CUDA callback, so without
+    # this the worker blocks forever in its first rasterization, regardless
+    # of how many threads are available.
+    yield()
     return
 end
 
@@ -617,13 +622,14 @@ function scene_window!(
         end
     end
 
-    if force_render
-        # Capture mode: synchronous render on the GUI thread
-        # (the worker is expected to be paused).
-        render!(gui)
-    else
-        upload_frame!(gui)
-    end
+    # if force_render
+    #     # Capture mode: synchronous render on the GUI thread
+    #     # (the worker is expected to be paused).
+    #     render!(gui)
+    # else
+    upload_frame!(gui)
+    # end
+
     if visible
         draw_scene!(extra_draws, gui)
 
@@ -697,10 +703,8 @@ function handle_ui!(gui::GSGUI; frame_time)
                 ) && gui.ui_state.controller_mode[] == 1
                     # Entering orbit mode: place the target in front of the
                     # camera, at a scene-sized distance.
-                    d = viewer_only(gui) ?
-                        10f0 : Float32(gui.trainer.dataset.camera_extent)
-                    gui.control_settings.orbiting_target =
-                        view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+                    d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
+                    gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
                 end
 
                 # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
@@ -816,10 +820,7 @@ function handle_ui!(gui::GSGUI; frame_time)
             end
 
             if CImGui.BeginTabItem("Utils")
-                # TODO Capture mode is temporarily disabled: it renders
-                # synchronously on the UI thread and needs the
-                # `paused`/`pause_ack` handshake with the render worker
-                # before it can be re-enabled.
+                # TODO Capture mode is temporarily disabled: it renders synchronously on the UI thread
                 disabled_begin()
                 CImGui.Button("Capture Video", CImGui.ImVec2(-1, 0))
                 disabled_end()

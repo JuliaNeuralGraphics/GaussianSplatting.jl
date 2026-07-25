@@ -1,5 +1,3 @@
-# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-
 # Immutable view request published by the UI thread.
 # The camera is a deepcopy: the worker treats it as read-only.
 struct ViewSnapshot
@@ -26,15 +24,11 @@ concurrent render and all GPU work stays on one task-local stream.
 
 The UI thread owns the OpenGL context, `gui.camera` & the UI state.
 It communicates with the worker only through this struct:
-- UI → worker: a `ViewSnapshot` (camera + render settings) under
-  `lock`, atomic control flags and a `commands` channel for one-shot
-  operations (scene install, checkpoint save, orbit-target picking).
-- worker → UI: rendered host frames via a double buffer swapped under
-  `lock`, atomic stats and error / pick-result slots under `lock`.
-
-Note that Julia's GC is stop-the-world across threads, so occasional
-UI hitches during allocation-heavy phases (densification) are still
-possible; `GPUArrays.AllocCache` in `step!` keeps them rare.
+- UI → worker: a `ViewSnapshot` (camera + render settings) under `lock`,
+  atomic control flags and a `commands` channel for one-shot operations
+  (scene install, checkpoint save, orbit-target picking).
+- worker → UI: rendered host frames via a double buffer swapped under `lock`,
+  atomic stats and error / pick-result slots under `lock`.
 """
 mutable struct RenderWorker
     task::Maybe{Task}
@@ -50,10 +44,7 @@ mutable struct RenderWorker
     train::Threads.Atomic{Bool}
     densify::Threads.Atomic{Bool}
     render::Threads.Atomic{Bool}
-    # Pause handshake (for code that must use the GPU from the UI
-    # thread, e.g. capture mode once it is re-enabled).
-    paused::Threads.Atomic{Bool}
-    pause_ack::Threads.Atomic{Bool}
+
     running::Threads.Atomic{Bool}
 
     # worker → UI frames (under `lock`).
@@ -192,6 +183,7 @@ function upload_frame!(gui)
         # The surface was resized after this frame was rendered: drop
         # it, the worker renders a matching one from the next snapshot.
         (frame.width == width && frame.height == height) || return
+
         NGL.set_data!(gui.render_state.surface, frame.data)
         w.has_new_frame = false
         return
@@ -200,21 +192,13 @@ function upload_frame!(gui)
 end
 
 function worker_loop!(gui, w::RenderWorker)
-    println("WORKER: loop entered, thread=$(Threads.threadid()) pool=$(Threads.threadpool())")
     last_version = UInt64(0)
     last_view_time = 0.0
     while w.running[]
         try
             # A scene install invalidates the last rendered frame.
-            drain_commands!(gui, w) && (last_version = UInt64(0))
-
-            if w.paused[]
-                # Retire all GPU work so the UI thread can safely use
-                # the rasterizer & gaussians from its own task.
-                KA.synchronize(get_backend(gui.rasterizer))
-                w.pause_ack[] = true
-                wait(w.wakeup)
-                continue
+            if drain_commands!(gui, w)
+                last_version = UInt64(0)
             end
 
             did_train = false
@@ -228,8 +212,8 @@ function worker_loop!(gui, w::RenderWorker)
                     w.n_gaussians[] = length(gui.gaussians)
                     did_train = true
                 catch err
-                    # E.g. non-finite loss: stop training instead of
-                    # killing the worker; the scene stays viewable.
+                    # E.g. non-finite loss:
+                    # stop training instead of killing the worker, the scene stays viewable.
                     w.train[] = false
                     set_error!(w, "Training step failed, stopping training. See logs for details.")
                     @error "Training step failed, stopping training." exception=(err, catch_backtrace())
@@ -239,16 +223,13 @@ function worker_loop!(gui, w::RenderWorker)
             snap, version = lock(w.lock) do
                 w.snapshot, w.snapshot_version
             end
+
             did_render = false
             if w.render[] && snap ≢ nothing
-                # Re-render on camera/settings change; during training
-                # refresh the view at ≤ 30 FPS to not starve `step!`.
-                if version != last_version ||
-                    (did_train && time() - last_view_time > 0.033)
-
-                    println("WORKER: rendering v$version")
+                # Re-render on camera/settings change;
+                # during training refresh the view at ≤ 10 FPS to not starve `step!`.
+                if version != last_version || (did_train && time() - last_view_time > 0.1)
                     render_view!(gui, w, snap)
-                    println("WORKER: rendered v$version")
                     last_version = version
                     last_view_time = time()
                     did_render = true
@@ -256,9 +237,7 @@ function worker_loop!(gui, w::RenderWorker)
             end
 
             if !(did_train || did_render)
-                println("WORKER: waiting")
                 wait(w.wakeup)
-                println("WORKER: woke up")
             end
         catch err
             set_error!(w, "Render worker error. See logs for details.")
@@ -284,6 +263,10 @@ function drain_commands!(gui, w::RenderWorker)
     return scene_changed
 end
 
+"""
+Handle commands send by GUI.
+Return `true` if any of the commands requires re-rendering of the scene.
+"""
 function handle_command!(gui, w::RenderWorker, cmd::Tuple)
     tag = cmd[1]::Symbol
     if tag ≡ :install_scene
@@ -309,7 +292,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         return false
     elseif tag ≡ :pick_orbit
         handle_pick!(gui, w, cmd[2]::Int, cmd[3]::Int)
-        return false
+        return true
     end
     error("Unknown worker command: `$tag`.")
 end
@@ -343,8 +326,8 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot)
             gs.rotations, gs.features_dc, gs.features_rest;
             camera, sh_degree)
         tex = snap.mode == 1 ? gl_depth(rast) : gl_texture(rast)
-        # `tex` is the rasterizer-owned host buffer, overwritten by the
-        # next render: copy it out before publishing.
+        # `tex` is the rasterizer-owned host buffer, overwritten by the next render,
+        # so copy it out before publishing.
         copyto!(back.data, tex)
     end
 

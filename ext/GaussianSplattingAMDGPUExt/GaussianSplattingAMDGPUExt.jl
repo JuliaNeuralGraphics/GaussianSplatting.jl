@@ -21,6 +21,9 @@ end
 # Unregistered automatically in the array dtor.
 GaussianSplatting.unpin_memory(::ROCArray) = return
 
+GaussianSplatting.blocking_synchronize(::ROCBackend) =
+    AMDGPU.synchronize(; blocking=true)
+
 # @setup_workload let
 #     kab = GaussianSplatting.gpu_backend()
 

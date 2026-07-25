@@ -75,6 +75,24 @@ base_array_type(backend) = error("Not implemented for backend: `$backend`.")
 
 allocate_pinned(kab, T, shape) = error("Pinned memory not supported for `$kab`.")
 
+"""
+Synchronize `kab` without going through Julia's event loop.
+
+GPU backends synchronize non-blockingly by default: they wait on a libuv
+callback, which only the **main** thread services.
+That is fine on the main thread, but when the render worker (`RenderWorker`) waits that way
+it stalls until the GUI's next frame - one full vsync interval (~17ms) per synchronization,
+dwarfing the render itself.
+Backends that can wait without the event loop override this.
+
+Reserve it for waits long enough to escape the backend's spin-wait budget, i.e.
+the frame readback: measured on the worker, 3.6ms/frame blocking vs 19.1ms
+nonblocking. Training steps synchronize within the spin and see no benefit
+(6.7 vs 7.4ms/step), so they stay on the default path - a thread blocked in the
+driver never reaches a GC safepoint and would stall the UI thread instead.
+"""
+blocking_synchronize(kab) = KA.synchronize(kab)
+
 unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
