@@ -30,6 +30,60 @@ function disabled_end()
     CImGui.igPopItemFlag()
 end
 
+# How long the worker must be busy with the same operation before the
+# UI shows a spinner: long enough not to flicker on regular renders &
+# training steps, short enough to appear before the app feels stuck.
+const SPINNER_DELAY = 0.5
+# Past this point the wait is dominated by GPU kernel compilation
+# (or a densification pass): explain it instead of just spinning.
+const SPINNER_HINT_DELAY = 3.0
+
+"""
+Rotating arc, animated off `CImGui.GetTime()` (wall clock), so it keeps
+spinning at a steady rate regardless of the UI frame rate.
+"""
+function draw_spinner(draw_list, center, radius::Float32, thickness::Float32, color)
+    t = Float32(CImGui.GetTime())
+    from = 3f0 * t
+    # Pulsing arc length: reads as motion even when the arc is symmetric.
+    to = from + 1.1f0 * Float32(π) + 0.6f0 * Float32(π) * sin(2f0 * t)
+
+    CImGui.PathClear(draw_list)
+    CImGui.PathArcTo(draw_list, center, radius, from, to, 32)
+    CImGui.PathStroke(draw_list, color, 0, thickness)
+    return
+end
+
+# Inline spinner widget: occupies layout space like any other item.
+function spinner!(; radius::Float32 = 7f0, thickness::Float32 = 3f0)
+    pos = CImGui.GetCursorScreenPos()
+    size = 2f0 * (radius + thickness)
+    draw_spinner(
+        CImGui.GetWindowDrawList(),
+        (pos.x + 0.5f0 * size, pos.y + 0.5f0 * size),
+        radius, thickness, CImGui.GetColorU32(CImGui.ImGuiCol_Text))
+    CImGui.Dummy(CImGui.ImVec2(size, size))
+    return
+end
+
+"""
+Compact `<spinner> Rendering...` status line for the controls window.
+Always occupies exactly one line, so the widgets below do not jump when
+the worker goes busy / idle.
+"""
+function worker_busy_line!(w::RenderWorker)
+    radius, thickness = 6f0, 2.5f0
+    status = busy_status(w)
+    if status ≢ nothing && status.elapsed ≥ SPINNER_DELAY
+        spinner!(; radius, thickness)
+        CImGui.SameLine()
+        CImGui.Text("$(activity_label(status.activity))...")
+    else
+        CImGui.Dummy(CImGui.ImVec2(0f0, 2f0 * (radius + thickness)))
+    end
+    return
+end
+
 function is_mouse_in_ui()
     CImGui.IsMousePosValid() && unsafe_load(CImGui.GetIO().WantCaptureMouse)
 end
@@ -428,11 +482,9 @@ function open_dataset_modal!(gui::GSGUI)
                 @error "Failed to load COLMAP dataset:" exception=(err, catch_backtrace())
             end
         else
+            spinner!()
+            CImGui.SameLine()
             CImGui.Text("Loading dataset. Please wait...")
-            # Negative fraction switches ProgressBar into indeterminate mode.
-            CImGui.ProgressBar(
-                -1f0 * Float32(CImGui.GetTime()),
-                CImGui.ImVec2(-1f0, 0f0), "Loading...")
         end
         CImGui.EndPopup()
         return
@@ -641,6 +693,9 @@ function scene_window!(
             (Float32(res.width), Float32(res.height)),
             (0f0, 1f0), (1f0, 0f0))
         hovered = CImGui.IsWindowHovered()
+        # Drawn after the image, so it is on top of it. Submits no
+        # items, leaving the image as the current one for the pick below.
+        worker_busy_overlay!(gui, CImGui.GetItemRectMin())
 
         # Double-click in orbiting mode: set the orbiting target to the
         # point under the cursor. The image is drawn 1:1, so the offset
@@ -660,6 +715,57 @@ function scene_window!(
     CImGui.End()
 
     gui.ui_state.scene_hovered = hovered
+    return
+end
+
+"""
+Spinner badge over the `Scene` view while the worker has been busy with
+the same operation for longer than `SPINNER_DELAY`.
+
+The UI thread stays responsive while the worker blocks (the scene keeps
+showing its last frame), so without this the app looks frozen for the
+~30 s the first render / training step spends compiling GPU kernels.
+
+`rect_min` is the top-left screen position of the scene image; the
+badge is drawn into the current window's draw list, in its corner.
+"""
+function worker_busy_overlay!(gui::GSGUI, rect_min)
+    status = busy_status(gui.worker)
+    status ≡ nothing && return
+    (; activity, elapsed) = status
+    elapsed < SPINNER_DELAY && return
+
+    label = "$(activity_label(activity))... ($(round(elapsed; digits=1)) s)"
+    hint = elapsed < SPINNER_HINT_DELAY ? "" :
+        "GPU kernels are compiled on first use: this can take ~30 s."
+
+    pad, radius, thickness = 8f0, 7f0, 3f0
+    line_height = CImGui.GetTextLineHeight()
+    text_width = CImGui.CalcTextSize(label).x
+    text_height = line_height
+    if !isempty(hint)
+        text_width = max(text_width, CImGui.CalcTextSize(hint).x)
+        text_height += line_height
+    end
+
+    diameter = 2f0 * radius
+    width = 3f0 * pad + diameter + text_width
+    height = 2f0 * pad + max(diameter, text_height)
+
+    draw_list = CImGui.GetWindowDrawList()
+    x, y = rect_min.x + pad, rect_min.y + pad
+    CImGui.AddRectFilled(draw_list, (x, y), (x + width, y + height),
+        CImGui.GetColorU32((0f0, 0f0, 0f0, 0.6f0)), 6f0)
+    draw_spinner(draw_list,
+        (x + pad + radius, y + 0.5f0 * height),
+        radius, thickness, CImGui.GetColorU32(CImGui.ImGuiCol_Text))
+
+    text_x = x + 2f0 * pad + diameter
+    text_y = y + 0.5f0 * (height - text_height)
+    CImGui.AddText(draw_list, (text_x, text_y),
+        CImGui.GetColorU32(CImGui.ImGuiCol_Text), label)
+    isempty(hint) || CImGui.AddText(draw_list, (text_x, text_y + line_height),
+        CImGui.GetColorU32(CImGui.ImGuiCol_TextDisabled), hint)
     return
 end
 
@@ -688,6 +794,7 @@ function handle_ui!(gui::GSGUI; frame_time)
                 (; width, height) = resolution(gui.camera)
                 CImGui.Text("Render Resolution: $width x $height")
                 CImGui.Text("N Gaussians: $(w.n_gaussians[])")
+                worker_busy_line!(w)
 
                 isempty(gui.ui_state.worker_error) || CImGui.TextColored(
                     (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
