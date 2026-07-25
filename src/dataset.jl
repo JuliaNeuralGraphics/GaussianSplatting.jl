@@ -45,15 +45,15 @@ function ColmapDataset(kab;
     scale::Int = 1, images_dir::String, train_test_split::Real = 0.8, permute::Bool = true,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
-    depths_dir = joinpath(dirname(images_dir), scale > 1 ? "depths_$scale" : "depths")
+    depths_dir = joinpath(dirname(images_dir), "depths")
     has_depth_dir = isdir(depths_dir)
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)
     points = NU.COLMAP.load_points_data(points_file)
 
-    # Create intrinsics.
-    cam = colmap_cameras[1] # All cameras share intrinsics.
+    # NOTE: All cameras share intrinsics.
+    cam = colmap_cameras[1]
     width, height = cam.resolution
     fx, fy, cx, cy = cam.intrinsics
 
@@ -64,13 +64,12 @@ function ColmapDataset(kab;
     new_resolution = 16u32 .* cld.(resolution, 16u32)
     new_focal = Float32(new_resolution[2] / resolution[2]) .* focal
 
-    intrinsics = NU.CameraIntrinsics(nothing, # TODO no distortion for now
-        new_focal, principal, new_resolution)
+    # NOTE: no distortion.
+    intrinsics = NU.CameraIntrinsics(nothing, new_focal, principal, new_resolution)
 
-    # Load cameras and images.
+    # Load cameras and images & depths priors if they exist.
     camera_centers = SVector{3, Float32}[]
     cameras = Camera[]
-    # Load depths priors if exist.
     depth_priors_count = 0
     depth_maps = Maybe{Matrix{Float32}}[]
     depth_qsteps = Float32[]
@@ -102,8 +101,7 @@ function ColmapDataset(kab;
 
         if has_depth_dir
             depth_path = joinpath(depths_dir, "$(splitext(img.name)[1]).png")
-            depth, qstep = load_depth_prior(
-                depth_path, Int(new_resolution[1]), Int(new_resolution[2]))
+            depth, qstep = load_depth_prior(depth_path, Int(new_resolution[1]), Int(new_resolution[2]))
             push!(depth_maps, depth)
             push!(depth_qsteps, qstep)
             depth_priors_count += 1

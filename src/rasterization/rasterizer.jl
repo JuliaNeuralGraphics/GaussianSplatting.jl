@@ -89,10 +89,12 @@ include("spherical_harmonics.jl")
 include("render.jl")
 
 # OpenGL convertions.
+# Both return the rasterizer-owned `host_image`, which the next render
+# overwrites: callers must copy it out if they keep it around.
 
 function gl_texture(r::GaussianRasterizer)
     r.pinned_image .= @view(r.image[1:3, :, :])
-    KA.synchronize(get_backend(r))
+    blocking_synchronize(get_backend(r))
     clamp01!(r.host_image)
     reverse!(r.host_image; dims=3)
     return r.host_image
@@ -101,7 +103,7 @@ end
 function gl_depth(r::GaussianRasterizer)
     # Copying just 1 single element is 5x slower, so we copy 3.
     r.pinned_image .= @view(r.image[2:4, :, :])
-    KA.synchronize(get_backend(r))
+    blocking_synchronize(get_backend(r))
 
     r.host_image[1:2, :, :] .= @view(r.host_image[[3], :, :])
 
