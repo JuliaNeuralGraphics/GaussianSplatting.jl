@@ -17,6 +17,28 @@ FrameBuffer(width::Int, height::Int) =
     FrameBuffer(zeros(Float32, 3, width, height), width, height)
 
 """
+What the worker is currently doing, published to the UI so it can show
+a spinner while an operation blocks for long: the first render and the
+first training step JIT-compile all GPU kernels (~30 s), during which
+the app would otherwise look frozen.
+"""
+@enum WorkerActivity::Int32 begin
+    ActivityIdle
+    ActivityTraining
+    ActivityRendering
+    ActivityLoadingScene
+    ActivitySaving
+end
+
+function activity_label(activity::WorkerActivity)
+    activity ≡ ActivityTraining && return "Training step"
+    activity ≡ ActivityRendering && return "Rendering"
+    activity ≡ ActivityLoadingScene && return "Installing scene"
+    activity ≡ ActivitySaving && return "Saving checkpoint"
+    return "Working"
+end
+
+"""
 Background worker owning all GPU work: training steps and view
 rasterization run sequentially on a single task, so densification
 (which reallocates the `GaussianModel` arrays) can never race a
@@ -57,6 +79,10 @@ mutable struct RenderWorker
     step::Threads.Atomic{Int}
     n_gaussians::Threads.Atomic{Int}
 
+    # worker → UI activity (see `with_activity` & `busy_status`).
+    activity::Threads.Atomic{Int32} # A `WorkerActivity`.
+    activity_since::Threads.Atomic{Float64} # `time()` when it started.
+
     # worker → UI, rare (under `lock`).
     error_msg::String # Empty when no error.
     pick_result::Maybe{SVector{3, Float32}}
@@ -77,7 +103,36 @@ function RenderWorker(; width::Int, height::Int)
         FrameBuffer(width, height), FrameBuffer(width, height), false,
         Threads.Atomic{Float32}(0f0), Threads.Atomic{Int}(0),
         Threads.Atomic{Int}(0),
+        # activity, activity_since
+        Threads.Atomic{Int32}(Int32(ActivityIdle)), Threads.Atomic{Float64}(0.0),
         "", nothing, nothing)
+end
+
+"""
+Run `f` while publishing `activity` to the UI.
+`activity_since` is stored before the activity becomes visible, so that
+the UI can never pair a just-started activity with a stale (older)
+timestamp, which would flash the spinner.
+"""
+function with_activity(f, w::RenderWorker, activity::WorkerActivity)
+    w.activity_since[] = time()
+    w.activity[] = Int32(activity)
+    try
+        return f()
+    finally
+        w.activity[] = Int32(ActivityIdle)
+    end
+end
+
+"""
+What the worker is busy with and for how long (in seconds);
+`nothing` when it is idle.
+Read from the UI thread, hence only atomics are touched.
+"""
+function busy_status(w::RenderWorker)
+    activity = WorkerActivity(w.activity[])
+    activity ≡ ActivityIdle && return nothing
+    return (; activity, elapsed=time() - w.activity_since[])
 end
 
 """
@@ -207,7 +262,9 @@ function worker_loop!(gui, w::RenderWorker)
             if w.train[] && trainer ≢ nothing
                 trainer.densify = w.densify[]
                 try
-                    loss = step!(trainer)
+                    loss = with_activity(w, ActivityTraining) do
+                        step!(trainer)
+                    end
                     w.loss[] = loss
                     w.step[] = trainer.step
                     w.n_gaussians[] = length(gui.gaussians)
@@ -230,7 +287,9 @@ function worker_loop!(gui, w::RenderWorker)
                 # Re-render on camera/settings change;
                 # during training refresh the view at ≤ 10 FPS to not starve `step!`.
                 if version != last_version || (did_train && time() - last_view_time > 0.1)
-                    render_view!(gui, w, snap)
+                    with_activity(w, ActivityRendering) do
+                        render_view!(gui, w, snap)
+                    end
                     last_version = version
                     last_view_time = time()
                     did_render = true
@@ -255,13 +314,22 @@ function drain_commands!(gui, w::RenderWorker)
     while isready(w.commands)
         cmd = take!(w.commands)::Tuple
         try
-            scene_changed |= handle_command!(gui, w, cmd)
+            scene_changed |= with_activity(w, command_activity(cmd[1]::Symbol)) do
+                handle_command!(gui, w, cmd)
+            end
         catch err
             set_error!(w, "`$(first(cmd))` failed. See logs for details.")
             @error "Worker command failed:" cmd=first(cmd) exception=(err, catch_backtrace())
         end
     end
     return scene_changed
+end
+
+# What the UI shows while a command is being handled.
+function command_activity(tag::Symbol)
+    (tag ≡ :install_scene || tag ≡ :install_bson) && return ActivityLoadingScene
+    tag ≡ :save_bson && return ActivitySaving
+    return ActivityRendering # `:pick_orbit` reads the rendered depth.
 end
 
 """
