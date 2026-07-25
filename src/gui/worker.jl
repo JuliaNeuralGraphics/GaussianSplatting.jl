@@ -70,9 +70,10 @@ function RenderWorker(; width::Int, height::Int)
     RenderWorker(
         nothing, ReentrantLock(), Base.Event(true), Channel{Any}(32),
         nothing, UInt64(0),
-        Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(true),
-        Threads.Atomic{Bool}(true), Threads.Atomic{Bool}(false),
-        Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false),
+        # train, densify, render
+        Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(true), Threads.Atomic{Bool}(true),
+        # running
+        Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
         Threads.Atomic{Float32}(0f0), Threads.Atomic{Int}(0),
         Threads.Atomic{Int}(0),
