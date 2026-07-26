@@ -35,6 +35,24 @@ function GaussianRasterizer(kab, camera::Camera; kwargs...)
     GaussianRasterizer(kab; width, height, kwargs...)
 end
 
+"""
+Number of blended feature channels rendered by `mode`:
+`:rgb` → 3, `:rgbd` → + depth & alpha, `:rgbdn` → + camera-space normal.
+See `GeometryState` for the channel layout.
+"""
+n_color_features(mode::Symbol) =
+    mode == :rgb ? 3 :
+    mode == :rgbd ? 5 :
+    mode == :rgbdn ? 8 :
+    error("Invalid render mode: `$mode`.")
+
+"""
+Rasterizer mode a `Trainer` needs for the given optimization params:
+the depth-normal consistency loss requires a rendered normal channel.
+"""
+training_rasterizer_mode(opt_params::OptimizationParams) =
+    opt_params.use_normal_loss ? :rgbdn : :rgbd
+
 function GaussianRasterizer(kab;
     width::Int, height::Int,
     fused::Bool = true,
@@ -46,12 +64,14 @@ function GaussianRasterizer(kab;
         "`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
     # TODO support :d
-    modes = (:rgb, :rgbd)
+    modes = (:rgb, :rgbd, :rgbdn)
     mode in modes || error("Invalid render: $mode ∉ $modes")
+    mode == :rgbdn && !fused && error(
+        "`mode=:rgbdn` requires `fused=true` for GaussianRasterizer.")
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
     istate = ImageState(kab; width, height, grid_size=Int(prod(grid)))
-    gstate = GeometryState(kab, 0; extended=mode == :rgbd)
+    gstate = GeometryState(kab, 0; n_features=n_color_features(mode))
     bstate = BinningState(kab, 0)
 
     # TODO organize in a render cache/state
@@ -59,8 +79,7 @@ function GaussianRasterizer(kab;
     scales_act = KA.allocate(kab, Float32, (3, 0))
     opacities_act = KA.allocate(kab, Float32, (1, 0))
 
-    # :rgbd renders 5 channels: rgb, depth & the alpha map (see `GeometryState`).
-    image = KA.allocate(kab, Float32, (mode == :rgbd ? 5 : 3, width, height))
+    image = KA.allocate(kab, Float32, (n_color_features(mode), width, height))
     host_image, pinned_image = allocate_pinned(kab, Float32, (3, width, height))
 
     rast = GaussianRasterizer(
@@ -236,14 +255,16 @@ function rasterize(
     covisibilities::Maybe{AbstractVector{Bool}} = nothing,
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
 )
-    render_depth = rast.mode == :rgbd
+    channels = n_color_features(rast.mode)
+    render_depth = channels > 3
+    render_normals = channels > 5
     render_depth && @assert rast.gstate.color_features ≢ nothing
 
     kab = get_backend(rast)
     n = size(means_3d, 2)
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = GPUArrays.@uncached GeometryState(kab, n; extended=render_depth)
+        rast.gstate = GPUArrays.@uncached GeometryState(kab, n; n_features=channels)
     end
 
     (; width, height) = resolution(camera)
@@ -271,6 +292,7 @@ function rasterize(
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
         nothing, # compensations
+        render_normals ? rast.gstate.normals : nothing,
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
@@ -346,14 +368,18 @@ function rasterize(
         rast.istate.ranges, rast.bstate.gaussian_keys_sorted;
         ndrange=n_rendered)
 
-    color_features = if render_depth
+    if render_depth
         rast.gstate.color_features[1:3, :] .= reshape(reinterpret(Float32, rast.gstate.rgbs), 3, :)
         rast.gstate.color_features[4, :] .= rast.gstate.depths
         rast.gstate.color_features[5, :] .= 1f0 # Constant feature: renders the alpha map.
-        _as_T(SVector{5, Float32}, rast.gstate.color_features)
-    else
-        rast.gstate.rgbs
+        render_normals && (rast.gstate.color_features[6:8, :] .=
+            reshape(reinterpret(Float32, rast.gstate.normals), 3, :))
     end
+    # Literal channel counts: `render!` is specialized on them.
+    color_features =
+        render_normals ? _as_T(SVector{8, Float32}, rast.gstate.color_features) :
+        render_depth ? _as_T(SVector{5, Float32}, rast.gstate.color_features) :
+        rast.gstate.rgbs
 
     render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
@@ -367,11 +393,16 @@ function rasterize(
         color_features,
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        # Zero background for the depth & alpha channels.
-        render_depth ? SVector{5, Float32}(background..., 0f0, 0f0) : background,
+        feature_background(background, channels),
         BLOCK, Val(BLOCK_SIZE))
     return rast.image
 end
+
+# Zero background for the depth, alpha & normal channels.
+feature_background(background::SVector{3, Float32}, channels::Int) =
+    channels == 8 ? SVector{8, Float32}(background..., 0f0, 0f0, 0f0, 0f0, 0f0) :
+    channels == 5 ? SVector{5, Float32}(background..., 0f0, 0f0) :
+    background
 
 function ∇rasterize(
     vpixels::AbstractArray{Float32, 3},
@@ -385,14 +416,16 @@ function ∇rasterize(
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
 )
-    render_depth = rast.mode == :rgbd
+    channels = n_color_features(rast.mode)
+    render_depth = channels > 3
+    render_normals = channels > 5
     kab = get_backend(rast)
     n = size(means_3d, 2)
 
     (; width, height) = resolution(camera)
     @assert width % 16 == 0 && height % 16 == 0
 
-    vcolor_features = KA.zeros(kab, Float32, (render_depth ? 5 : 3, n))
+    vcolor_features = KA.zeros(kab, Float32, (channels, n))
     vconics = KA.zeros(kab, Float32, (3, n))
     vcov = KA.zeros(kab, Float32, (6, n))
 
@@ -406,9 +439,14 @@ function ∇rasterize(
     K = camera.intrinsics
     (; width, height) = resolution(camera)
 
-    color_features = render_depth ?
-        _as_T(SVector{5, Float32}, rast.gstate.color_features) :
+    color_features =
+        render_normals ? _as_T(SVector{8, Float32}, rast.gstate.color_features) :
+        render_depth ? _as_T(SVector{5, Float32}, rast.gstate.color_features) :
         rast.gstate.rgbs
+    vpixel_features =
+        render_normals ? reshape(reinterpret(SVector{8, Float32}, vpixels), size(vpixels)[2:3]) :
+        render_depth ? reshape(reinterpret(SVector{5, Float32}, vpixels), size(vpixels)[2:3]) :
+        reshape(reinterpret(SVector{3, Float32}, vpixels), size(vpixels)[2:3])
 
     ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
         # Outputs.
@@ -417,9 +455,7 @@ function ∇rasterize(
         vconics,
         reshape(reinterpret(Float32, rast.gstate.∇means_2d), 2, :),
         # Inputs.
-        reshape(
-            reinterpret(SVector{render_depth ? 5 : 3, Float32}, vpixels),
-            size(vpixels)[2:3]),
+        vpixel_features,
         rast.istate.n_contrib,
         rast.istate.accum_α,
 
@@ -431,7 +467,7 @@ function ∇rasterize(
 
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
-        render_depth ? SVector{5, Float32}(background..., 0f0, 0f0) : background,
+        feature_background(background, channels),
         rast.grid, BLOCK, Val(BLOCK_SIZE))
 
     # Row 5 of `vcolor_features` is the cotangent of the constant-1 alpha
@@ -443,6 +479,9 @@ function ∇rasterize(
     else
         vcolor_features, nothing
     end
+    vnormals_buf = render_normals ? vcolor_features[6:8, :] : nothing
+    vnormals = isnothing(vnormals_buf) ?
+        nothing : _as_T(SVector{3, Float32}, vnormals_buf)
 
     R, t, vR, vt = if R_w2c ≡ nothing
         tmp_R = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
@@ -467,6 +506,7 @@ function ∇rasterize(
         _as_T(SVector{3, Float32}, vconics),
         nothing, # vcompensations
         vdepths,
+        vnormals,
 
         rast.gstate.conic_opacities,
         rast.gstate.radii,
@@ -495,6 +535,7 @@ function ∇rasterize(
     KA.unsafe_free!(vcov)
     KA.unsafe_free!(vrgbs)
     isnothing(vdepths) || KA.unsafe_free!(vdepths)
+    isnothing(vnormals_buf) || KA.unsafe_free!(vnormals_buf)
 
     return vmeans, vshs, vopacities, vscales, vrot, vR, vt
 end

@@ -26,6 +26,16 @@ Base.@kwdef struct OptimizationParams
     bilateral_grid_lr::Float32 = 2f-3
     bilateral_grid_lr_steps::Int = 30_000 # LR decays to 1% by this step.
     tv_loss_weight::Float32 = 10f0
+
+    # Geometry regularization (see `geometry_regularization.jl`): depth-normal
+    # consistency + flattening along the thinnest axis.
+    # Requires a `:rgbdn` rasterizer, which renders the extra normal channels.
+    use_normal_loss::Bool = true
+    normal_consistency_weight::Float32 = 0.05f0
+    normal_flatten_weight::Float32 = 1f0
+    # Both terms start once the geometry is roughly in place
+    # (LichtFeld's 20% start fraction of a 30k run).
+    normal_from_iter::Int = 6_000
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)

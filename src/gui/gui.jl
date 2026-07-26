@@ -254,7 +254,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     opt_params = OptimizationParams(; use_bilateral_grid)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
-    rasterizer = GaussianRasterizer(kab, camera; fused=true)
+    rasterizer = GaussianRasterizer(kab, camera;
+        fused=true, mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
@@ -309,7 +310,8 @@ function load_dataset(kab, dataset_path::String;
     opt_params = OptimizationParams(; use_bilateral_grid)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
-    rasterizer = GaussianRasterizer(kab, camera; fused=true)
+    rasterizer = GaussianRasterizer(kab, camera;
+        fused=true, mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 

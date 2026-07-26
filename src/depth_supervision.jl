@@ -377,11 +377,14 @@ function ssi_depth_loss(
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
-    α = clamp.(alpha, 0f0, 1f0)
+    α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
 
-    p = 1f0 ./ (depth_img ./ max.(α, 1f-6) .+ depth_floor)
+    # NOTE: the differentiable path uses `alpha`, not the clamped `α`. Zygote's
+    # `clamp` adjoint is zero *at* the bound, so a fully opaque pixel would
+    # silently lose the alpha cotangent this loss exists to produce.
+    p = 1f0 ./ (depth_img ./ max.(alpha, 1f-6) .+ depth_floor)
 
     σ = ignore_derivatives() do
         Σw = max(sum(w), 1f-6)
