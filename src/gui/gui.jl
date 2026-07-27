@@ -234,7 +234,8 @@ const STRATEGIES = (:default, :mcmc)
 
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
-    strategy::Symbol = :default, use_bilateral_grid::Bool = false,
+    strategy::Symbol = :default, use_depth_loss::Bool = true,
+    use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
     gl_kwargs...,
 )
     check_worker_threads()
@@ -251,7 +252,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams(; use_bilateral_grid)
+    opt_params = OptimizationParams(;
+        use_depth_loss, use_bilateral_grid, use_normal_loss)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -302,12 +304,14 @@ in `apply_dataset!`.
 """
 function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
-    use_bilateral_grid::Bool = false,
+    use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
+    use_normal_loss::Bool = false,
 )
     dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams(; use_bilateral_grid)
+    opt_params = OptimizationParams(;
+        use_depth_loss, use_bilateral_grid, use_normal_loss)
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -521,11 +525,27 @@ function open_dataset_modal!(gui::GSGUI)
         end
     end
 
+    CImGui.Checkbox("Monocular depth supervision", ui_state.dataset_depth_loss)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Scale- & shift-invariant loss against depth maps stored next " *
+            "to the dataset images.\nSilently disabled when the dataset has " *
+            "none.")
+    end
+
     CImGui.Checkbox("Bilateral grid appearance modeling", ui_state.dataset_bilateral_grid)
     if CImGui.IsItemHovered()
         CImGui.SetTooltip(
             "Per-train-image color correction absorbing exposure / " *
             "white-balance drift.\nRecommended for casual (phone) captures.")
+    end
+
+    CImGui.Checkbox("Geometry regularization", ui_state.dataset_normal_loss)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Depth-normal consistency + flattening along the thinnest axis.\n" *
+            "Improves surface geometry at the cost of ~3 extra blended " *
+            "channels per step.")
     end
 
     # Always occupy the error line to keep the window height constant.
@@ -545,10 +565,13 @@ function open_dataset_modal!(gui::GSGUI)
         kab = get_backend(gui.rasterizer)
         scale = Int(ui_state.dataset_scale[])
         strategy = STRATEGIES[ui_state.dataset_strategy[] + 1]
+        use_depth_loss = ui_state.dataset_depth_loss[]
         use_bilateral_grid = ui_state.dataset_bilateral_grid[]
+        use_normal_loss = ui_state.dataset_normal_loss[]
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
-            kab, dataset_path; scale, width, height, strategy, use_bilateral_grid)
+            kab, dataset_path; scale, width, height, strategy,
+            use_depth_loss, use_bilateral_grid, use_normal_loss)
     end
     can_open || disabled_end()
 

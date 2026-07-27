@@ -1,6 +1,6 @@
 """
-Geometry regularization: two terms that constrain the *shape* of the surface
-where depth supervision only constrains its *location*.
+Geometry regularization constrains shape of the surface
+where depth supervision only constrains its location.
 
 - [`depth_normal_consistency_loss`](@ref) pins surface orientation: normals
   derived from the rendered depth map must agree with the alpha-blended
@@ -9,11 +9,10 @@ where depth supervision only constrains its *location*.
 - [`flatten_loss`](@ref) pins surface flatness: L1 on the smallest scale axis,
   which is what makes that min-axis normal well-defined in the first place.
 
-Both are training-time only & are enabled together by
-`OptimizationParams.use_normal_loss` (see `step!`).
+Both are training-time only & are enabled together by `OptimizationParams.use_normal_loss` (see `step!`).
 """
 
-# Thresholds ported from LichtFeld's `normal_consistency_loss.hpp` / `normal_loss.hpp`.
+# Thresholds taken from LichtFeld.
 const NORMAL_MIN_ALPHA = 0.5f0
 const NORMAL_MAX_REL_DEPTH_JUMP = 0.05f0
 const NORMAL_MIN_EXPECTED_DEPTH = 1f-6
@@ -27,9 +26,8 @@ Per-axis camera-space ray components for every pixel of `camera`:
 `(rx, ry)` such that the ray through the 1-based pixel `(x, y)` is
 `(rx[x], ry[y], 1)`.
 
-The half-pixel offset & 1-based convention match `collect_anchor_samples`
-in `depth_supervision.jl`, so the depth channel is interpreted the same way
-by both losses.
+The half-pixel offset & 1-based convention match `collect_anchor_samples` in `depth_supervision.jl`,
+so the depth channel is interpreted the same way by both losses.
 """
 function pixel_rays(kab, camera::Camera)
     (; width, height) = resolution(camera)
@@ -43,29 +41,30 @@ function pixel_rays(kab, camera::Camera)
 end
 
 """
-Depth-normal consistency loss on the rendered blended depth `depth`, alpha map
-`alpha` and normal map `normals` (a `(3, width, height)` array of camera-space
-normals), with `rays` from [`pixel_rays`](@ref).
+Depth-normal consistency loss on the rendered blended depth `depth`, alpha map `alpha`
+and normal map `normals` (a `(3, width, height)` array of camera-space normals),
+with `rays` from [`pixel_rays`](@ref).
 
-The alpha-normalized expected depth `e = D / α` is back-projected along the
-pixel rays; central differences give two surface tangents whose cross product
-is the depth-implied normal `n_d`. The loss is the alpha-weighted angular
-disagreement `1 - cos(n_d, n_r)` against the rendered Gaussian normals.
+The alpha-normalized expected depth `e = D / α` is back-projected along the pixel rays;
+central differences give two surface tangents whose cross product
+is the depth-implied normal `n_d`.
+The loss is the alpha-weighted angular disagreement `1 - cos(n_d, n_r)`
+against the rendered Gaussian normals.
 
-Both `D` and `α` are differentiable, so the term shapes geometry *and* opacity;
-the weights & the normalizer built from `α` stay detached, as in
-[`ssi_depth_loss`](@ref) — supervision pressure should not leak in through its
-own weighting. The `argmin`/flip sign inside `n_d`'s orientation is detached
-too, mirroring the rasterizer's own normal flip.
+Both `D` and `α` are differentiable, so the term shapes geometry and opacity;
+the weights & the normalizer built from `α` stay detached,
+supervision pressure should not leak in through its own weighting.
 
-Pixels are used only where the geometry is unambiguous: the interior of the
-image, opaque center & 4-neighborhood (`α ≥ 0.5`), and no relative depth jump
-above `NORMAL_MAX_REL_DEPTH_JUMP` — i.e. not across a silhouette. A view with
-too few valid pixels contributes nothing.
+The `argmin` / flip sign inside `n_d`'s orientation is detached too,
+mirroring the rasterizer's own normal flip.
+
+Pixels are used only where the geometry is unambiguous:
+the interior of the image, opaque center & 4-neighborhood (`α ≥ 0.5`),
+and no relative depth jump above `NORMAL_MAX_REL_DEPTH_JUMP` (not across a silhouette).
+A view with too few valid pixels contributes nothing.
 """
 function depth_normal_consistency_loss(
-    depth::AbstractMatrix{Float32},
-    alpha::AbstractMatrix{Float32},
+    depth::AbstractMatrix{Float32}, alpha::AbstractMatrix{Float32},
     normals::AbstractArray{Float32, 3};
     rays::Tuple{AbstractVector{Float32}, AbstractVector{Float32}},
 )
@@ -73,6 +72,7 @@ function depth_normal_consistency_loss(
     (width > 2 && height > 2) || return 0f0
 
     rx, ry = rays
+
     # Interior pixels & their 4-neighborhood, as (w-2, h-2) blocks.
     ix, iy = 2:(width - 1), 2:(height - 1)
     Rx_c = reshape(rx[ix], :, 1)
@@ -82,13 +82,14 @@ function depth_normal_consistency_loss(
     Ry_p = reshape(ry[3:height], 1, :)
     Ry_m = reshape(ry[1:(height - 2)], 1, :)
 
-    # Expected depth `e = D / α`. Every denominator below is clamped, so `cos`
-    # stays finite even where the validity mask is zero & `0 · NaN` cannot
-    # poison the sum.
+    # Expected depth `e = D / α`.
+    # Every denominator below is clamped, so `cos` stays finite
+    # even where the validity mask is zero & `0 · NaN` cannot poison the sum.
     #
-    # NOTE: `α` is deliberately not `clamp`ed here. Zygote's `clamp` adjoint is
-    # zero *at* the bound, so clamping to `[0, 1]` would silently drop the alpha
-    # cotangent on fully opaque pixels — exactly the ones this term trusts most.
+    # NOTE: `α` is deliberately not `clamp`ed here.
+    # Zygote's `clamp` adjoint is zero *at* the bound,
+    # so clamping to `[0, 1]` would silently drop the alpha cotangent on fully opaque pixels,
+    # exactly the ones this term trusts most.
     # The lower bound below is all the division needs.
     e = max.(depth, 0f0) ./ max.(alpha, 1f-6)
 
@@ -152,8 +153,8 @@ function depth_normal_consistency_loss(
         ifelse.(ok, α_c, 0f0), Float32(sum(ok))
     end
 
-    # Too little evidence in this view: a handful of pixels would make the
-    # normalized mean pure noise.
+    # Too little evidence in this view:
+    # a handful of pixels would make the normalized mean pure noise.
     Σw = ignore_derivatives(sum(w))
     (count ≥ NORMAL_MIN_VALID_COUNT && Σw ≥ NORMAL_MIN_VALID_WEIGHT) || return 0f0
 
@@ -162,22 +163,20 @@ end
 
 """
 L1 on the smallest scale axis: `mean(exp(min(scales)))` over Gaussians,
-flattening each one along its thinnest axis (PGSR-style) so that its min-axis
-normal is well-defined.
+flattening each one along its thinnest axis so that its min-axis normal is well-defined.
 
-`scales` are raw (pre-`exp`) and the `argmin` is treated as a constant, as in
-LichtFeld's `add_flatten_regularization_grads`, so only the winning axis
-receives a gradient.
+`scales` are raw (pre-`exp`) and the `argmin` is treated as a constant,
+as in LichtFeld's `add_flatten_regularization_grads`, so only the winning axis receives a gradient.
 """
 function flatten_loss(scales::AbstractMatrix{Float32})
     n = size(scales, 2)
     n == 0 && return 0f0
 
-    # One-hot on the argmin, built outside AD. A bare
-    # `scales .== minimum(scales; dims=1)` mask would be wrong: `compute_scales`
-    # initializes all three axes identically, so ties are the common case early
-    # in training & every tied axis would be counted. The `cumsum` keeps only
-    # the first tied axis — LichtFeld's tie-break.
+    # One-hot on the argmin, built outside AD.
+    # A bare `scales .== minimum(scales; dims=1)` mask would be wrong:
+    # `compute_scales` initializes all three axes identically,
+    # so ties are the common case early in training & every tied axis would be counted.
+    # The `cumsum` keeps only the first tied axis — LichtFeld's tie-break.
     mask = ignore_derivatives() do
         hit = scales .== minimum(scales; dims=1)
         Float32.(hit .& (cumsum(hit; dims=1) .== 1))

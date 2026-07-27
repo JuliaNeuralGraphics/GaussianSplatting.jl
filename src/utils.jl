@@ -30,7 +30,7 @@ Base.@kwdef struct OptimizationParams
     # Geometry regularization (see `geometry_regularization.jl`): depth-normal
     # consistency + flattening along the thinnest axis.
     # Requires a `:rgbdn` rasterizer, which renders the extra normal channels.
-    use_normal_loss::Bool = true
+    use_normal_loss::Bool = false
     normal_consistency_weight::Float32 = 0.05f0
     normal_flatten_weight::Float32 = 1f0
     # Both terms start once the geometry is roughly in place
