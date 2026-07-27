@@ -452,22 +452,30 @@ end
     end
 end
 
-function quat_scale_to_cov(q::SVector{4, Float32}, scale::SVector{3, Float32})
-    S = sdiagm(scale...)
-    R = unnorm_quat2rot(q)
-    M = R * S
+quat_scale_to_cov(q::SVector{4, Float32}, scale::SVector{3, Float32}) =
+    quat_scale_to_cov(unnorm_quat2rot(q), scale)
+
+function quat_scale_to_cov(R::SMatrix{3, 3, Float32, 9}, scale::SVector{3, Float32})
+    M = R * sdiagm(scale...)
     return M * M'
 end
 
+"""
+`vR_extra` is an additional cotangent on the rotation matrix, coming from
+consumers of `R` other than the covariance (the rendered normal channel uses
+one of its columns): it is added to the covariance path's own `vR` so both
+share a single quaternion pullback.
+"""
 function ∇quat_scale_to_cov(
     q::SVector{4, Float32}, scale::SVector{3, Float32},
     R::SMatrix{3, 3, Float32, 9}, vΣ::SMatrix{3, 3, Float32, 9},
+    vR_extra::SMatrix{3, 3, Float32, 9} = zeros(SMatrix{3, 3, Float32, 9}),
 )
     S = sdiagm(scale...)
     M = R * S
 
     vM = (vΣ + vΣ') * M
-    vR = vM * S
+    vR = vM * S + vR_extra
 
     vq = ∇unnorm_quat2rot(q, vR)
     vscale = SVector{3, Float32}(

@@ -1,24 +1,24 @@
-# Depth supervision: scale-and-shift-invariant loss with monocular depth
-# priors (Depth Anything, MiDaS, or any relative depth/disparity maps).
-#
-# The affine alignment between a prior and the scene is NOT re-fitted
-# against the render every iteration. Instead a fixed per-camera *anchor*
-# is fitted once at startup against the SfM point cloud, which keeps the
-# supervision target absolute and multi-view consistent instead of
-# letting the model drag the target along with its own errors.
+"""
+Depth supervision: scale-and-shift-invariant loss with monocular depth priors.
 
-# Loss.
+The affine alignment between a prior and the scene is not
+re-fitted against the render every iteration.
+Instead a fixed per-camera "anchor" is fitted once at startup
+against the SfM point cloud, which keeps the supervision target absolute
+and multi-view consistent instead of letting the model drag the target
+along with its own errors.
+"""
+
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
 const DEPTH_LOSS_GRADIENT_WEIGHT = 1f0
 const DEPTH_LOSS_FINAL_SCALE = 0.02f0
 
 """
-Load a depth prior as a `(width, height)` Float32 map, resized to the
-training resolution. Also return the quantization step of the source
-encoding (1/255 for 8-bit, 1/65535 for 16-bit, 0 for float formats):
-it sizes the loss deadband so the model is not pulled onto the prior's
-quantization staircase.
+Load a depth prior as a `(width, height)` Float32 map, resized to the training resolution.
+Also return the quantization step of the source encoding
+(1/255 for 8-bit, 1/65535 for 16-bit, 0 for float formats):
+it sizes the loss deadband so the model is not pulled onto the prior's quantization staircase.
 """
 function load_depth_prior(path::String, width::Int, height::Int)
     raw = load(path)
@@ -34,8 +34,9 @@ end
 
 """
 Affine alignment of a relative depth prior to the scene:
-`a·t + b` maps the prior value `t` to inverse depth `1/(z + floor)`
-when `disparity` is set, to depth `z` otherwise.
+`a·t + b` maps the prior value `t` to:
+- inverse depth `1 / (z + floor)` when `disparity` is set;
+- to depth `z` otherwise.
 """
 struct DepthAnchor
     a::Float32
@@ -44,6 +45,7 @@ struct DepthAnchor
     disparity::Float32
 end
 
+# Helper structure used by ransac_affine_fit.
 struct AnchorFit
     a::Float32
     b::Float32
@@ -53,11 +55,11 @@ struct AnchorFit
 end
 
 """
-Least-squares affine fit `y ≈ a·t + b` over paired samples `ts`, `ys`,
-returning `(a, b)`. `var_ridge` regularizes the slope: it shrinks toward
-zero when the prior's variance approaches the quantization noise floor,
-so a near-constant prior yields a flat (uninformative) fit instead of an
-arbitrary steep one.
+Least-squares affine fit `y ≈ a·t + b` over paired samples `ts`, `ys`, returning `(a, b)`.
+
+`var_ridge` regularizes the slope:
+it shrinks toward zero when the prior's variance approaches the quantization noise floor,
+so a near-constant prior yields a flat fit instead of an arbitrary steep one.
 """
 function ls_affine_fit(ts, ys; var_ridge::Float32 = 1.5f-5)
     μt, μy = mean(ts), mean(ys)
@@ -71,9 +73,9 @@ end
 """
 RANSAC affine regression `y ≈ a·t + b`, designed to survive the heavily
 contaminated sparse SfM clouds that break least-squares + trimming:
-LS init for the residual scale (from Median Absolute Deviation),
-2-point hypotheses scored by inlier count on a subset,
-then two LS refits on the consensus set.
+- LS init for the residual scale (from Median Absolute Deviation);
+- 2-point hypotheses scored by inlier count on a subset;
+- then two LS refits on the final set.
 """
 function ransac_affine_fit(
     ts::Vector{Float32}, ys::Vector{Float32};
@@ -354,17 +356,21 @@ Scale-and-shift-invariant depth loss on the rendered blended depth `D`
 and the rendered alpha map `alpha`.
 
 The rendered value is the alpha-normalized expected depth `e = D / α`
-mapped to softened inverse depth `p = 1/(e + floor)`. Both `D` and `α`
-are differentiable rasterizer outputs, so the quotient rule feeds an
-alpha cotangent back into the backward and the depth loss shapes Gaussian opacity directly.
+mapped to softened inverse depth `p = 1/(e + floor)`.
+Both `D` and `α` are differentiable rasterizer outputs,
+so the quotient rule feeds an alpha cotangent back into the backward
+and the depth loss shapes Gaussian opacity directly.
 
 The weights & normalizations built from `α` stay detached:
 supervision pressure should not leak in through its own weighting.
 
-Data term: alpha-weighted Geman-McClure penalty on the deadbanded
-residual, scaled by the alpha-weighted std of `p` (detached).
-Gradient term: same penalty on the mismatch of forward-difference
-gradients (MiDaS-style), aligning depth edges rather than absolute values.
+Data term:
+alpha-weighted Geman-McClure penalty on the deadbanded residual,
+scaled by the alpha-weighted std of `p` (detached).
+
+Gradient term:
+same penalty on the mismatch of forward-difference gradients,
+aligning depth edges rather than absolute values.
 
 The sum is normalized by the total alpha.
 """
@@ -377,11 +383,14 @@ function ssi_depth_loss(
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
-    α = clamp.(alpha, 0f0, 1f0)
+    α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
 
-    p = 1f0 ./ (depth_img ./ max.(α, 1f-6) .+ depth_floor)
+    # NOTE: the differentiable path uses `alpha`, not the clamped `α`. Zygote's
+    # `clamp` adjoint is zero *at* the bound, so a fully opaque pixel would
+    # silently lose the alpha cotangent this loss exists to produce.
+    p = 1f0 ./ (depth_img ./ max.(alpha, 1f-6) .+ depth_floor)
 
     σ = ignore_derivatives() do
         Σw = max(sum(w), 1f-6)

@@ -8,6 +8,7 @@ struct GeometryState{
     O <: AbstractVector{SVector{3, Float32}},
     I <: AbstractVector{Int32},
     F <: Maybe{AbstractMatrix{Float32}},
+    N <: Maybe{AbstractVector{SVector{3, Float32}}},
 }
     depths::D
     means_2d::M
@@ -18,23 +19,32 @@ struct GeometryState{
     points_offset::T
     conic_opacities::O
     radii::I
+    # Blended feature channels, `n_color_features(mode)` rows:
+    #   rgb (1:3), depth (4), constant-1 alpha feature (5), camera-space
+    #   normal (6:8, `:rgbdn` only).
+    # The constant-1 channel blends to `Σᵢ 1·αᵢ·Tᵢ = 1 - T_final`, so it
+    # renders the alpha map & the standard per-channel backward yields its
+    # exact gradient (the `grad_alpha` path).
     color_features::F
+    # Staging buffer for the per-Gaussian normals written by `project!`,
+    # copied into rows 6:8 of `color_features` (`:rgbdn` only).
+    normals::N
 end
 
-GeometryState(kab, n::Int; extended::Bool = false) = GeometryState(
-    KA.zeros(kab, Float32, n),
-    KA.zeros(kab, SVector{2, Float32}, n),
-    KA.zeros(kab, SVector{2, Float32}, n),
-    KA.zeros(kab, SVector{3, Float32}, n),
-    KA.zeros(kab, SVector{3, Bool}, n),
-    KA.zeros(kab, Int32, n),
-    KA.zeros(kab, Int32, n),
-    KA.zeros(kab, SVector{3, Float32}, n),
-    KA.zeros(kab, Int32, n),
-    # rgb + depth + constant-1 alpha feature: `Σᵢ 1·αᵢ·Tᵢ = 1 - T_final`,
-    # so the 5th channel renders the alpha map & the standard per-channel
-    # backward yields its exact gradient (the `grad_alpha` path).
-    extended ? KA.zeros(kab, Float32, (5, n)) : nothing)
+function GeometryState(kab, n::Int; n_features::Int = 0)
+    GeometryState(
+        KA.zeros(kab, Float32, n),
+        KA.zeros(kab, SVector{2, Float32}, n),
+        KA.zeros(kab, SVector{2, Float32}, n),
+        KA.zeros(kab, SVector{3, Float32}, n),
+        KA.zeros(kab, SVector{3, Bool}, n),
+        KA.zeros(kab, Int32, n),
+        KA.zeros(kab, Int32, n),
+        KA.zeros(kab, SVector{3, Float32}, n),
+        KA.zeros(kab, Int32, n),
+        n_features > 3 ? KA.zeros(kab, Float32, (n_features, n)) : nothing,
+        n_features > 5 ? KA.zeros(kab, SVector{3, Float32}, n) : nothing)
+end
 
 Base.length(gstate::GeometryState) = length(gstate.depths)
 
@@ -49,6 +59,7 @@ function KA.unsafe_free!(gstate::GeometryState)
     KA.unsafe_free!(gstate.conic_opacities)
     KA.unsafe_free!(gstate.radii)
     isnothing(gstate.color_features) || KA.unsafe_free!(gstate.color_features)
+    isnothing(gstate.normals) || KA.unsafe_free!(gstate.normals)
     return
 end
 

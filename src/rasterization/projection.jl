@@ -23,7 +23,8 @@ function project(
 
     if length(rast.gstate) < n
         KA.unsafe_free!(rast.gstate)
-        rast.gstate = GPUArrays.@uncached GeometryState(kab, n; extended=rast.mode == :rgbd)
+        rast.gstate = GPUArrays.@uncached GeometryState(
+            kab, n; n_features=n_color_features(rast.mode))
     end
 
     project!(kab)(
@@ -33,6 +34,7 @@ function project(
         _as_T(SVector{2, Float32}, means_2d),
         _as_T(SVector{3, Float32}, conics),
         rast.antialias ? compensations : nothing,
+        nothing, # normals: `:rgbdn` requires the fused path.
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
@@ -86,6 +88,7 @@ function ∇project(
         _as_T(SVector{3, Float32}, vconics),
         vcompensations isa ZeroTangent ? nothing : vcompensations,
         vdepths isa ZeroTangent ? nothing : vdepths,
+        nothing, # vnormals: `:rgbdn` requires the fused path.
 
         _as_T(SVector{3, Float32}, conics),
         rast.gstate.radii,
@@ -129,6 +132,44 @@ function ChainRulesCore.rrule(::typeof(project),
     return (means_2d, conics, compensations, depths), _project_pullback
 end
 
+"""
+Camera-space unit normal of a Gaussian: the rotation column of its smallest
+axis, flipped to face the camera (PGSR-style, mirroring LichtFeld's
+`primitive_normals`). The column of a rotation matrix is already unit-length,
+so no normalization is needed.
+
+The flip test uses `n_cam ⋅ mean_cam`, which equals LichtFeld's world-space
+`axis ⋅ (mean - camera_center)` because `R_w2c` is orthonormal — and `mean_cam`
+is already at hand in both projection kernels.
+
+Returns `(n_cam, k, sign)`. Both `k` (the argmin) and `sign` are treated as
+constants in the backward, so the only gradient is onto column `k` of `R_g`.
+"""
+@inline function gaussian_normal(
+    R_w2c::SMatrix{3, 3, Float32, 9}, R_g::SMatrix{3, 3, Float32, 9},
+    scale::SVector{3, Float32}, mean_cam::SVector{3, Float32},
+)
+    k = (scale[1] ≤ scale[2] && scale[1] ≤ scale[3]) ? 1i32 :
+        (scale[2] ≤ scale[3]) ? 2i32 : 3i32
+    axis =
+        k == 1i32 ? SVector{3, Float32}(R_g[1, 1], R_g[2, 1], R_g[3, 1]) :
+        k == 2i32 ? SVector{3, Float32}(R_g[1, 2], R_g[2, 2], R_g[3, 2]) :
+                    SVector{3, Float32}(R_g[1, 3], R_g[2, 3], R_g[3, 3])
+    n_cam = R_w2c * axis
+    sign = (n_cam ⋅ mean_cam) > 0f0 ? -1f0 : 1f0
+    return sign .* n_cam, k, sign
+end
+
+# Cotangent on `R_g` from the normal channel: `g` lands in column `k`.
+@inline function ∇gaussian_normal_column(k::Int32, g::SVector{3, Float32})
+    z = 0f0
+    return k == 1i32 ?
+        SMatrix{3, 3, Float32, 9}(g[1], g[2], g[3], z, z, z, z, z, z) :
+        k == 2i32 ?
+        SMatrix{3, 3, Float32, 9}(z, z, z, g[1], g[2], g[3], z, z, z) :
+        SMatrix{3, 3, Float32, 9}(z, z, z, z, z, z, g[1], g[2], g[3])
+end
+
 @kernel cpu=false inbounds=true function project!(
     # Output.
     depths::AbstractVector{Float32},
@@ -136,6 +177,7 @@ end
     means_2D::AbstractVector{SVector{2, Float32}},
     conics::AbstractVector{SVector{3, Float32}},
     compensations::C,
+    normals::N,
 
     # Input Gaussians.
     means::AbstractVector{SVector{3, Float32}},
@@ -153,7 +195,11 @@ end
     far_plane::Float32,
     radius_clip::Int32,
     blur_ϵ::Float32,
-) where {C <: Maybe{AbstractMatrix{Float32}}, RM}
+) where {
+    C <: Maybe{AbstractMatrix{Float32}},
+    N <: Maybe{AbstractVector{SVector{3, Float32}}},
+    RM,
+}
     i = @index(Global)
 
     R, t = if RM <: StaticArray
@@ -171,7 +217,9 @@ end
 
     # Project Gaussian onto image plane.
     cov_rotation = vload(pointer(cov_rotations, i)) # SIMD load
-    Σ = quat_scale_to_cov(cov_rotation, cov_scales[i])
+    cov_scale = cov_scales[i]
+    R_g = unnorm_quat2rot(cov_rotation)
+    Σ = quat_scale_to_cov(R_g, cov_scale)
     Σ_cam = covar_world_to_cam(R, Σ)
     Σ_2D, mean_2D = perspective_projection(
         mean_cam, Σ_cam, focal, resolution, principal)
@@ -210,6 +258,9 @@ end
     if C <: AbstractMatrix{Float32}
         compensations[i] = compensation
     end
+    if N <: AbstractVector{SVector{3, Float32}}
+        normals[i], _, _ = gaussian_normal(R, R_g, cov_scale, mean_cam)
+    end
 end
 
 @kernel cpu=false inbounds=true function ∇project!(
@@ -225,6 +276,7 @@ end
     vconics::AbstractArray{SVector{3, Float32}},
     vcompensations::VC,
     vdepths::VD,
+    vnormals::VN,
 
     conics::AbstractVector{SVector{3, Float32}},
     radii::AbstractVector{Int32},
@@ -245,6 +297,7 @@ end
     C <: Maybe{AbstractMatrix{Float32}},
     VC <: Maybe{AbstractVector{Float32}},
     VD <: Maybe{AbstractVector{Float32}},
+    VN <: Maybe{AbstractVector{SVector{3, Float32}}},
     RM,
     RG <: Maybe{AbstractMatrix{Float32}},
 }
@@ -285,7 +338,8 @@ end
 
     cov_rotation = vload(pointer(cov_rotations, i))
     cov_scale = cov_scales[i]
-    Σ = quat_scale_to_cov(cov_rotation, cov_scale)
+    R_g = unnorm_quat2rot(cov_rotation)
+    Σ = quat_scale_to_cov(R_g, cov_scale)
     Σ_cam = covar_world_to_cam(R, Σ)
 
     vmean_2d = vmeans_2d[i]
@@ -303,8 +357,17 @@ end
 
     vR, vt, vmean = ∇pos_world_to_cam(R, t, mean, vmean_cam)
     vR, vΣ = ∇covar_world_to_cam(R, Σ, vΣ_cam, vR)
-    vq, vscale = ∇quat_scale_to_cov(
-        cov_rotation, cov_scale, unnorm_quat2rot(cov_rotation), vΣ)
+
+    # Rendered-normal channel: `n_cam = sign · R_w2c · R_g[:, k]`, so the
+    # cotangent lands on that one column of `R_g` (`k` & `sign` are constants).
+    # `vR_w2c` gets no contribution: pose optimization does not see the normals.
+    vR_g = if VN <: AbstractVector{SVector{3, Float32}}
+        _, k, sign = gaussian_normal(R, R_g, cov_scale, mean_cam)
+        ∇gaussian_normal_column(k, sign .* (R' * vnormals[i]))
+    else
+        zeros(SMatrix{3, 3, Float32, 9})
+    end
+    vq, vscale = ∇quat_scale_to_cov(cov_rotation, cov_scale, R_g, vΣ, vR_g)
 
     vmeans[i] = vmean
     vcov_scales[i] = vscale

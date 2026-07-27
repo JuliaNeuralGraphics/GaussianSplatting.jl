@@ -27,6 +27,8 @@ mutable struct Trainer{
     depth_anchors::Vector{Maybe{DepthAnchor}}
     # Per train camera appearance grids; `nothing` when disabled.
     bilateral_grid::Maybe{BilateralGrid}
+    # Whether geometry regularization is active (see `geometry_regularization.jl`).
+    normals::Bool
 end
 
 function Trainer(
@@ -69,17 +71,31 @@ function Trainer(
         nothing
     end
 
+    normals = setup_normal_supervision(rast, opt_params)
+
     Trainer(
         rast, gs, dataset, optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
-        depth_anchors, bilateral_grid)
+        depth_anchors, bilateral_grid, normals)
+end
+
+function setup_normal_supervision(
+    rast::GaussianRasterizer, opt_params::OptimizationParams,
+)
+    opt_params.use_normal_loss || return false
+    if rast.mode != :rgbdn
+        @warn "Geometry regularization requires a `:rgbdn` rasterizer, disabling."
+        return false
+    end
+    @info "Use geometry regularization (depth-normal consistency & flattening)."
+    return true
 end
 
 function setup_depth_supervision(
     rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams,
 )
     disabled = Maybe{DepthAnchor}[]
-    if rast.mode != :rgbd
+    if rast.mode != :rgbd && rast.mode != :rgbdn
         @warn "Depth supervision requires a `:rgbd` rasterizer, disabling."
         return disabled
     end
@@ -187,10 +203,10 @@ function validate(trainer::Trainer)
             gs.rotations, gs.features_dc, gs.features_rest;
             camera, sh_degree=gs.sh_degree)
 
-        image = if rast.mode == :rgbd
-            image_features[1:3, :, :]
-        else
+        image = if rast.mode == :rgb
             image_features
+        else
+            image_features[1:3, :, :]
         end
 
         # From (c, w, h) to (w, h, c, 1) for SSIM.
@@ -282,19 +298,27 @@ function step!(trainer::Trainer)
 
     kab = get_backend(rast)
     GPUArrays.@cached trainer.cache begin
-        # Depth supervision target for this view (constant w.r.t. AD).
+        # Depth supervision target for this view.
         depth_data = if anchor ≡ nothing
             nothing
         else
             prior = adapt(kab, trainer.dataset.train_depths[idx])
             target, half_band, valid = depth_target(
                 anchor, prior, trainer.dataset.train_depth_qsteps[idx])
-            # Depth dominates early geometry formation;
+            # Depth dominates early geometry formation,
             # photometric loss wins fine detail late.
             decay = DEPTH_LOSS_FINAL_SCALE^clamp(
                 Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
             weight = params.depth_loss_weight * decay
             (; target, half_band, valid, weight)
+        end
+
+        # Geometry regularization starts once the geometry is roughly in place:
+        # depth-implied normals are meaningless while the scene is still forming.
+        normal_data = if !trainer.normals || trainer.step < params.normal_from_iter
+            nothing
+        else
+            (; rays=pixel_rays(kab, camera))
         end
 
         loss, ∇ = Zygote.withgradient(
@@ -304,15 +328,25 @@ function step!(trainer::Trainer)
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
 
-            # NOTE: Unconditional slice (a no-op for `:rgb`): a branch whose
+            # NOTE:
+            # Unconditional slice (a no-op for `:rgb`), a branch whose
             # else-arm aliases `image_features` unsliced makes Zygote
             # mis-route the gradient of the alias past the `getindex`
             # pullback once the depth term adds a second use, crashing
             # gradient accumulation with a shape mismatch.
             image = image_features[1:3, :, :]
 
-            # Per-view appearance correction before the photometric loss;
-            # evaluation & viewing use the raw render.
+            # Sliced once & shared by the depth & normal terms, for the same reason:
+            # re-slicing a channel for a second consumer trips the
+            # gradient mis-routing described above.
+            # Both terms imply a `:rgbd`/`:rgbdn` rasterizer, so the rows exist whenever they run.
+            depth_img, alpha_img = if depth_data ≡ nothing && normal_data ≡ nothing
+                nothing, nothing
+            else
+                image_features[4, :, :], image_features[5, :, :]
+            end
+
+            # Per-view appearance correction before the photometric loss.
             if bgrids ≢ nothing
                 image = bilateral_slice(image, bgrids[:, :, :, :, idx])
             end
@@ -333,11 +367,20 @@ function step!(trainer::Trainer)
             end
 
             if depth_data ≢ nothing
-                depth_img = image_features[4, :, :]
-                alpha_img = image_features[5, :, :]
-                total += depth_data.weight * ssi_depth_loss(depth_img, alpha_img;
-                    depth_data.target, depth_data.half_band, depth_data.valid,
-                    depth_floor=anchor.floor)
+                total +=
+                    depth_data.weight *
+                    ssi_depth_loss(
+                        depth_img, alpha_img;
+                        depth_data.target, depth_data.half_band,
+                        depth_data.valid, depth_floor=anchor.floor)
+            end
+
+            if normal_data ≢ nothing
+                total +=
+                    params.normal_flatten_weight * flatten_loss(scales) +
+                    params.normal_consistency_weight *
+                    depth_normal_consistency_loss(
+                        depth_img, alpha_img, image_features[6:8, :, :]; normal_data.rays)
             end
             total
         end

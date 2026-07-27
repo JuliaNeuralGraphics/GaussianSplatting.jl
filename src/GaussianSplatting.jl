@@ -64,6 +64,7 @@ include("depth_supervision.jl")
 
 include("gaussians.jl")
 include("bilateral_grid.jl")
+include("geometry_regularization.jl")
 include("strategy.jl")
 include("densification.jl")
 include("mcmc.jl")
@@ -126,7 +127,8 @@ function main(kab, dataset_path::String;
     gaussians = GaussianModel(
         dataset.points, dataset.colors, dataset.scales;
         max_sh_degree=3, isotropic=false)
-    rasterizer = GaussianRasterizer(kab, camera; antialias=false, fused=true, mode=:rgbd)
+    rasterizer = GaussianRasterizer(kab, camera;
+        antialias=false, fused=true, mode=training_rasterizer_mode(opt_params))
 
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
@@ -201,16 +203,19 @@ was actually used).
 function benchmark(kab, dataset_path::String;
     scale::Int,
     n_steps::Int = 10_000,
+    # TODO better control number of GS
     densify_until::Int = 3_000,
     eval_every::Int = 1_000,
     seed::Int = 42,
+    # TODO add geometry_regularization
     configs = [
-        (name="default",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=false)),
+        (name="default",                 strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=false)),
         (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
-        (name="default+depth", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
+        (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
         (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
-        (name="mcmc",          strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
-        (name="mcmc+depth",    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
+        (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
+        (name="mcmc",                    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
+        (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
     ],
 )
     maybe_debug()
@@ -229,7 +234,8 @@ function benchmark(kab, dataset_path::String;
         gaussians = GaussianModel(
             dataset.points, dataset.colors, dataset.scales;
             max_sh_degree=3, isotropic=false)
-        rasterizer = GaussianRasterizer(kab, camera; antialias=false, fused=true, mode=:rgbd)
+        rasterizer = GaussianRasterizer(kab, camera; antialias=false, fused=true,
+            mode=training_rasterizer_mode(config.opt_params))
         trainer = Trainer(rasterizer, gaussians, dataset, config.opt_params;
             strategy=create_strategy(config.strategy, gaussians))
         use_depth = !isempty(trainer.depth_anchors)

@@ -2,7 +2,7 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 
-# ENV["GSP_TEST_AMDGPU"] = true
+ENV["GSP_TEST_AMDGPU"] = true
 # ENV["GSP_TEST_CUDA"] = true
 
 import Pkg
@@ -473,6 +473,199 @@ end
     other = [i for i in 1:n_images if i != idx]
     @test all(iszero, Array(∇grids[:, :, :, :, other]))
     @test maximum(abs.(Array(∇grids[:, :, :, :, idx]))) > 0f0
+end
+
+@testset "gaussian_normal" begin
+    for _ in 1:100
+        q = SVector{4, Float32}(randn(Float32, 4)...) * (0.3f0 + 2f0 * rand(Float32))
+        scale = exp.(0.5f0 .* SVector{3, Float32}(randn(Float32, 3)...))
+        R_w2c = SMatrix{3, 3, Float32, 9}(rand(RotMatrix{3, Float32}))
+        R_g = GaussianSplatting.unnorm_quat2rot(q)
+        mean_cam = SVector{3, Float32}(
+            randn(Float32), randn(Float32), 1f0 + 5f0 * rand(Float32))
+
+        n, k, s = @inferred GaussianSplatting.gaussian_normal(
+            R_w2c, R_g, scale, mean_cam)
+
+        # A rotation column is already unit-length: the thinnest axis, in
+        # camera space, always oriented back toward the camera.
+        @test norm(n) ≈ 1f0
+        @test n ⋅ mean_cam ≤ 0f0
+        @test scale[k] == minimum(scale)
+        @test abs(s) == 1f0
+        @test n ≈ s .* (R_w2c * R_g[:, k])
+    end
+end
+
+@testset "∇gaussian_normal vs finite differences" begin
+    fdm = central_fdm(5, 1; factor=1e10, max_range=0.05)
+    for _ in 1:100
+        norm_scale = 0.3f0 + 2f0 * rand(Float32)
+        q = SVector{4, Float32}(randn(Float32, 4)...) * norm_scale
+        # Well-separated axes: the argmin must not flip under the perturbation.
+        scale = exp.(
+            SVector{3, Float32}(0f0, 1f0, 2f0) .+
+            0.1f0 .* SVector{3, Float32}(randn(Float32, 3)...))
+        R_w2c = SMatrix{3, 3, Float32, 9}(rand(RotMatrix{3, Float32}))
+        mean_cam = SVector{3, Float32}(
+            randn(Float32), randn(Float32), 2f0 + 5f0 * rand(Float32))
+        vnormal = SVector{3, Float32}(randn(Float32, 3)...)
+
+        R_g = GaussianSplatting.unnorm_quat2rot(q)
+        n, k, s = GaussianSplatting.gaussian_normal(R_w2c, R_g, scale, mean_cam)
+        # The flip sign is detached, so it is a step discontinuity for FD:
+        # skip configurations sitting on the boundary.
+        abs(n ⋅ normalize(mean_cam)) > 0.1f0 || continue
+
+        vR_g = GaussianSplatting.∇gaussian_normal_column(k, s .* (R_w2c' * vnormal))
+        vq, vscale = GaussianSplatting.∇quat_scale_to_cov(
+            q, scale, R_g, zeros(SMatrix{3, 3, Float32, 9}), vR_g)
+        # `argmin` is a constant: the normal path gives no scale gradient.
+        @test all(iszero, vscale)
+
+        loss = q̂ -> begin
+            R̂ = GaussianSplatting.unnorm_quat2rot(SVector{4, Float32}(q̂))
+            n̂, _, _ = GaussianSplatting.gaussian_normal(R_w2c, R̂, scale, mean_cam)
+            sum(SVector{3, Float64}(vnormal) .* n̂)
+        end
+        fd_q = FiniteDifferences.grad(fdm, loss, Vector{Float64}(q))[1]
+        @test vq ≈ SVector{4, Float64}(fd_q) atol=1e-3 rtol=5e-3
+    end
+end
+
+@testset "flatten_loss" begin
+    # Column minima: 0, 1, 3.
+    scales = adapt(kab, Float32[
+        1f0 2f0 3f0;
+        0f0 5f0 4f0;
+        2f0 1f0 6f0])
+    @test GaussianSplatting.flatten_loss(scales) ≈ mean(exp.(Float32[0, 1, 3]))
+
+    _, (∇,) = Zygote.withgradient(GaussianSplatting.flatten_loss, scales)
+    g = Array(∇)
+    @test count(!iszero, g) == 3 # Only the thinnest axis is pulled.
+    @test g[2, 1] ≈ exp(0f0) / 3
+    @test g[3, 2] ≈ exp(1f0) / 3
+    @test g[1, 3] ≈ exp(3f0) / 3
+
+    # All axes tied is the initialization case (`compute_scales`): exactly one
+    # axis per Gaussian must win, otherwise the term is counted three times.
+    tied = adapt(kab, ones(Float32, 3, 4))
+    @test GaussianSplatting.flatten_loss(tied) ≈ exp(1f0)
+    _, (∇tied,) = Zygote.withgradient(GaussianSplatting.flatten_loss, tied)
+    @test count(!iszero, Array(∇tied)) == 4
+
+    @test GaussianSplatting.flatten_loss(adapt(kab, zeros(Float32, 3, 0))) == 0f0
+end
+
+@testset "Depth-normal consistency loss" begin
+    width, height = 64, 48
+    camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width, height)
+    rx, ry = GaussianSplatting.pixel_rays(kab, camera)
+    rxh, ryh = Array(rx), Array(ry)
+    @test length(rxh) == width && length(ryh) == height
+
+    # A slanted plane `n ⋅ X = d` in camera space, sampled along the pixel
+    # rays: `X = e · (rx, ry, 1)` ⇒ `e = d / (n ⋅ ray)`. `n` faces the camera
+    # (negative z) & `d < 0` keeps the plane in front of it.
+    n = normalize(SVector{3, Float32}(0.2f0, -0.3f0, -1f0))
+    d = -5f0
+    depth = Float32[
+        d / (n[1] * rxh[x] + n[2] * ryh[y] + n[3])
+        for x in 1:width, y in 1:height]
+    @test all(>(0f0), depth)
+
+    alpha = ones(Float32, width, height)
+    plane_normals = zeros(Float32, 3, width, height)
+    for c in 1:3
+        plane_normals[c, :, :] .= n[c]
+    end
+
+    D, A = adapt(kab, depth), adapt(kab, alpha)
+    N = adapt(kab, plane_normals)
+    loss = c -> GaussianSplatting.depth_normal_consistency_loss(
+        D, A, c; rays=(rx, ry))
+
+    # Central differences of points sampled on a plane are chords *in* that
+    # plane, so their cross product recovers the plane normal exactly.
+    @test abs(loss(N)) < 1f-4
+
+    # A fronto-parallel guess disagrees by exactly the plane's tilt.
+    flat = zeros(Float32, 3, width, height)
+    flat[3, :, :] .= -1f0
+    @test loss(adapt(kab, flat)) ≈ 1f0 - (n ⋅ SVector{3, Float32}(0f0, 0f0, -1f0)) rtol=1e-3
+
+    # Transparent views carry no geometry: below `NORMAL_MIN_ALPHA` the term
+    # is gated off entirely.
+    @test GaussianSplatting.depth_normal_consistency_loss(
+        D, adapt(kab, fill(0.4f0, width, height)), N; rays=(rx, ry)) == 0f0
+
+    # Gradients flow to depth, alpha & the rendered normals.
+    _, ∇ = Zygote.withgradient(D, A, adapt(kab, flat)) do d, a, nn
+        GaussianSplatting.depth_normal_consistency_loss(d, a, nn; rays=(rx, ry))
+    end
+    for g in ∇
+        @test all(isfinite, Array(g))
+        @test maximum(abs, Array(g)) > 0f0
+    end
+
+    # `e = D / α` ⇒ the two cotangents must satisfy the quotient rule exactly.
+    # This is what a `clamp.(alpha, 0f0, 1f0)` on the differentiable path
+    # would break: Zygote's `clamp` adjoint is zero *at* the bound, silently
+    # dropping the alpha gradient on exactly the fully opaque pixels this
+    # term trusts most.
+    @test Array(∇[2]) ≈ -(depth ./ alpha) .* Array(∇[1]) rtol=1f-4
+end
+
+@testset "Rasterizer `:rgbdn` normal channel" begin
+    width, height = 64, 48
+    camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width, height)
+
+    # A grid of Gaussians on a fronto-parallel plane at `z = 3`, all with an
+    # identity rotation & a thin 3rd axis, so every camera-space normal is
+    # `-e₃` and the blended normal map must equal `-alpha`.
+    xs = range(-0.6f0, 0.6f0; length=8)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n_points = size(points, 2)
+    colors = adapt(kab, rand(Float32, 3, n_points))
+    scales = adapt(kab, repeat(Float32[log(0.2f0), log(0.2f0), log(0.01f0)], 1, n_points))
+
+    gaussians = GaussianSplatting.GaussianModel(
+        points, colors, scales; max_sh_degree=0, isotropic=false)
+    gaussians.opacities .= 5f0 # ≈ 0.993 after the sigmoid.
+
+    rast = GaussianSplatting.GaussianRasterizer(kab, camera;
+        antialias=false, fused=true, mode=:rgbdn)
+    image = rast(
+        gaussians.points, gaussians.opacities, gaussians.scales,
+        gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+        camera, sh_degree=0)
+    @test size(image) == (8, width, height)
+
+    img = Array(image)
+    α = img[5, :, :]
+    covered = α .> 0.5f0
+    @test any(covered)
+    @test maximum(abs, img[6, :, :]) < 1f-4 # nx
+    @test maximum(abs, img[7, :, :]) < 1f-4 # ny
+    @test all(isapprox.(img[8, :, :][covered], -α[covered]; atol=1f-3))
+
+    # The normal channel's cotangent must reach the rotations.
+    weights = adapt(kab, randn(Float32, 3, width, height))
+    _, (∇rot,) = Zygote.withgradient(gaussians.rotations) do rotations
+        features = rast(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            rotations, gaussians.features_dc, gaussians.features_rest;
+            camera, sh_degree=0)
+        sum(features[6:8, :, :] .* weights)
+    end
+    @test size(∇rot) == size(gaussians.rotations)
+    @test all(isfinite, Array(∇rot))
+    @test maximum(abs, Array(∇rot)) > 0f0
+
+    @test_throws ErrorException GaussianSplatting.GaussianRasterizer(kab, camera;
+        antialias=false, fused=false, mode=:rgbdn)
 end
 
 # @testset "Dataset loading" begin
