@@ -395,6 +395,29 @@ function poll_bson_load!(gui::GSGUI)
     return
 end
 
+"""
+Whether a scene is loaded, i.e. whether `Close Scene` has anything to do.
+Reads the worker's atomic gaussian count rather than `gui.gaussians`, whose
+arrays the worker replaces on every densification.
+"""
+scene_loaded(gui::GSGUI) = gui.trainer ≢ nothing || gui.worker.n_gaussians[] > 0
+
+"""
+Unload the current scene, freeing the memory it holds.
+UI-side part runs here; the GPU state is released by the worker
+(`handle_close_scene!`), leaving an empty scene behind.
+"""
+function close_scene!(gui::GSGUI)
+    reset_ui!(gui.ui_state)
+    gui.ui_state.max_sh_degree = 0
+    gui.ui_state.is_mcmc = false
+    sync_worker_flags!(gui)
+
+    submit!(gui.worker, (:close_scene,))
+    gui.render_state.need_render = true
+    return
+end
+
 function reset_ui!(ui_state::UIState)
     ui_state.train[] = false
     ui_state.densify[] = true
@@ -402,6 +425,7 @@ function reset_ui!(ui_state::UIState)
     ui_state.selected_view[] = 0
     ui_state.selected_mode[] = 0
     ui_state.sh_degree[] = -1
+    ui_state.draw_cameras[] = false
     ui_state.worker_error = ""
     return
 end
@@ -439,6 +463,14 @@ function menu_bar!(gui::GSGUI)
                 submit!(gui.worker, (:save_bson, state_file))
             end
         end
+
+        CImGui.Separator()
+
+        if CImGui.MenuItem("Close Scene", C_NULL, false, scene_loaded(gui))
+            close_scene!(gui)
+        end
+        CImGui.SetItemTooltip(
+            "Unload the gaussians & the dataset, freeing their GPU memory.")
         CImGui.EndMenu()
     end
 

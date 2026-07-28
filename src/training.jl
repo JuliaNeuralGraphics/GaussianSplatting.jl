@@ -79,6 +79,17 @@ function Trainer(
         depth_anchors, bilateral_grid, normals)
 end
 
+function KA.unsafe_free!(trainer::Trainer)
+    foreach(free_optimizer!, values(trainer.optimizers))
+    GPUArrays.unsafe_free!(trainer.cache)
+    KA.unsafe_free!(trainer.strategy)
+    KA.unsafe_free!(trainer.dataset)
+    KA.unsafe_free!(trainer.rast)
+    isnothing(trainer.bilateral_grid) ||
+        KA.unsafe_free!(trainer.bilateral_grid)
+    return
+end
+
 function setup_normal_supervision(
     rast::GaussianRasterizer, opt_params::OptimizationParams,
 )

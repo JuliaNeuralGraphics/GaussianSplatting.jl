@@ -63,6 +63,13 @@ function DefaultStrategy(gs::GaussianModel;
         min_opacity)
 end
 
+function KA.unsafe_free!(strategy::DefaultStrategy)
+    KA.unsafe_free!(strategy.max_radii)
+    KA.unsafe_free!(strategy.accum_∇means_2d)
+    KA.unsafe_free!(strategy.denom)
+    return
+end
+
 function post_train_step!(
     strategy::DefaultStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;

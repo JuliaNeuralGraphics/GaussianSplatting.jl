@@ -95,6 +95,38 @@ end
 
 KernelAbstractions.get_backend(r::GaussianRasterizer) = get_backend(r.image)
 
+"""
+Release the scene-sized scratch buffers: they grow with the number of
+Gaussians & rendered tile instances and are never shrunk, so they are what
+a closed scene leaves behind.
+
+The rasterizer stays usable — the next render reallocates them for the new scene.
+"""
+function release_scene_buffers!(rast::GaussianRasterizer)
+    kab = get_backend(rast)
+
+    KA.unsafe_free!(rast.gstate)
+    KA.unsafe_free!(rast.bstate)
+    rast.gstate = GeometryState(kab, 0; n_features=n_color_features(rast.mode))
+    rast.bstate = BinningState(kab, 0)
+
+    cache!(rast, :shs, (3, 0, 0))
+    cache!(rast, :scales_act, (3, 0))
+    cache!(rast, :opacities_act, (1, 0))
+    return
+end
+
+function KA.unsafe_free!(rast::GaussianRasterizer)
+    KA.unsafe_free!(rast.istate)
+    KA.unsafe_free!(rast.gstate)
+    KA.unsafe_free!(rast.bstate)
+    KA.unsafe_free!(rast.shs)
+    KA.unsafe_free!(rast.scales_act)
+    KA.unsafe_free!(rast.opacities_act)
+    KA.unsafe_free!(rast.image)
+    return
+end
+
 include("projection.jl")
 include("spherical_harmonics.jl")
 include("render.jl")

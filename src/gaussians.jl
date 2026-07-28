@@ -63,6 +63,17 @@ end
 
 KernelAbstractions.get_backend(gs::GaussianModel) = get_backend(gs.points)
 
+function KA.unsafe_free!(gs::GaussianModel)
+    KA.unsafe_free!(gs.points)
+    KA.unsafe_free!(gs.features_dc)
+    KA.unsafe_free!(gs.features_rest)
+    KA.unsafe_free!(gs.scales)
+    KA.unsafe_free!(gs.rotations)
+    KA.unsafe_free!(gs.opacities)
+    isnothing(gs.ids) || KA.unsafe_free!(gs.ids)
+    return
+end
+
 function bson_params(m::GaussianModel)
     return (;
         points=adapt(CPU(), m.points),

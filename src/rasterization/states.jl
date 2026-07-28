@@ -109,3 +109,10 @@ ImageState(kab; width::Int, height::Int, grid_size::Int) = ImageState(
     KA.zeros(kab, UInt32, (2, grid_size)),
     KA.zeros(kab, UInt32, (width, height)),
     KA.zeros(kab, Float32, (width, height)))
+
+function KA.unsafe_free!(istate::ImageState)
+    KA.unsafe_free!(istate.ranges)
+    KA.unsafe_free!(istate.n_contrib)
+    KA.unsafe_free!(istate.accum_α)
+    return
+end

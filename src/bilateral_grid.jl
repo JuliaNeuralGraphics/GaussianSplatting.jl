@@ -33,6 +33,12 @@ function BilateralGrid(kab, n_images::Int, opt_params)
     return BilateralGrid(grids, optimizer, scheduler)
 end
 
+function KA.unsafe_free!(bg::BilateralGrid)
+    KA.unsafe_free!(bg.grids)
+    free_optimizer!(bg.optimizer)
+    return
+end
+
 """
 LichtFeld's bilateral grid schedule: linear warmup from 1% of `lr` over the
 first 1000 steps (the grids stay near-identity while the Gaussians are still

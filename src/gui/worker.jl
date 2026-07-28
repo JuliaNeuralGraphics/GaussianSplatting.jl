@@ -28,6 +28,7 @@ the app would otherwise look frozen.
     ActivityRendering
     ActivityLoadingScene
     ActivitySaving
+    ActivityClosingScene
 end
 
 function activity_label(activity::WorkerActivity)
@@ -35,6 +36,7 @@ function activity_label(activity::WorkerActivity)
     activity ≡ ActivityRendering && return "Rendering"
     activity ≡ ActivityLoadingScene && return "Installing scene"
     activity ≡ ActivitySaving && return "Saving checkpoint"
+    activity ≡ ActivityClosingScene && return "Closing scene"
     return "Working"
 end
 
@@ -329,6 +331,7 @@ end
 function command_activity(tag::Symbol)
     (tag ≡ :install_scene || tag ≡ :install_bson) && return ActivityLoadingScene
     tag ≡ :save_bson && return ActivitySaving
+    tag ≡ :close_scene && return ActivityClosingScene
     return ActivityRendering # `:pick_orbit` reads the rendered depth.
 end
 
@@ -355,6 +358,8 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         w.step[] = 0
         w.n_gaussians[] = length(gaussians)
         return true
+    elseif tag ≡ :close_scene
+        return handle_close_scene!(gui, w)
     elseif tag ≡ :save_bson
         # Reads GPU arrays: must be ordered with training, hence here.
         gui.trainer ≡ nothing || save_state(gui.trainer, cmd[2]::String)
@@ -364,6 +369,31 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         return true
     end
     error("Unknown worker command: `$tag`.")
+end
+
+"""
+Drop the current scene & release the device memory it holds.
+Returns `true` to signal `handle_command!` that the scene needs to be redrawn.
+"""
+function handle_close_scene!(gui, w::RenderWorker)
+    w.train[] = false
+
+    trainer, gaussians = gui.trainer, gui.gaussians
+    gui.trainer, gui.gaussians = nothing, nothing
+
+    trainer ≡ nothing || KA.unsafe_free!(trainer)
+    gaussians ≡ nothing || KA.unsafe_free!(gaussians)
+    release_scene_buffers!(gui.rasterizer)
+
+    w.loss[] = 0f0
+    w.step[] = 0
+    w.n_gaussians[] = 0
+    # `rast.image` no longer holds the depth an orbit pick would unproject.
+    w.last_snapshot = nothing
+
+    GC.gc(false)
+    GC.gc(true)
+    return true
 end
 
 # Render the view described by `snap` into the back buffer & swap.

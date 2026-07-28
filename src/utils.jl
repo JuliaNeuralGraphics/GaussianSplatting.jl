@@ -48,6 +48,13 @@ function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)
     return _scheduler
 end
 
+# Not a `KA.unsafe_free!` method — `NU.Adam` is not ours to extend.
+function free_optimizer!(opt::NU.Adam)
+    foreach(KA.unsafe_free!, opt.μ)
+    foreach(KA.unsafe_free!, opt.ν)
+    return
+end
+
 mse(x, y) = mean((x .- y).^2)
 
 psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))

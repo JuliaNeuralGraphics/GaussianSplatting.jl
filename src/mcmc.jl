@@ -57,6 +57,9 @@ function mcmc_binom_coefficients(n_max::Int)
     return binoms
 end
 
+# All of the strategy's state (the binomial table) lives on the host.
+KA.unsafe_free!(::MCMCStrategy) = return
+
 function regularization_loss(strategy::MCMCStrategy, opacities, scales)
     return strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +
         strategy.scale_reg * mean(exp.(scales))

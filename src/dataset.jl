@@ -186,6 +186,13 @@ end
 
 Base.length(d::ColmapDataset) = length(d.train_cameras)
 
+function KA.unsafe_free!(d::ColmapDataset)
+    KA.unsafe_free!(d.points)
+    KA.unsafe_free!(d.colors)
+    KA.unsafe_free!(d.scales)
+    return
+end
+
 function get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol)
     image = if set == :train
         dataset.train_images[:, :, :, idx]
