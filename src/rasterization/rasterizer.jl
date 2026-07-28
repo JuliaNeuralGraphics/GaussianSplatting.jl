@@ -25,8 +25,6 @@ mutable struct GaussianRasterizer{
 
     grid::SVector{2, Int32}
 
-    antialias::Bool
-    fused::Bool
     mode::Symbol
 end
 
@@ -55,19 +53,13 @@ training_rasterizer_mode(opt_params::OptimizationParams) =
 
 function GaussianRasterizer(kab;
     width::Int, height::Int,
-    fused::Bool = true,
     mode::Symbol = :rgbd,
-    antialias::Bool = false,
 )
     @assert width % 16 == 0 && height % 16 == 0
-    antialias && fused && error(
-        "`antialias=true` requires `fused=false` for GaussianRasterizer.")
 
     # TODO support :d
     modes = (:rgb, :rgbd, :rgbdn)
     mode in modes || error("Invalid render: $mode ∉ $modes")
-    mode == :rgbdn && !fused && error(
-        "`mode=:rgbdn` requires `fused=true` for GaussianRasterizer.")
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
     istate = ImageState(kab; width, height, grid_size=Int(prod(grid)))
@@ -86,7 +78,7 @@ function GaussianRasterizer(kab;
         istate, gstate, bstate,
         shs, scales_act, opacities_act,
         image, pinned_image, host_image,
-        grid, antialias, fused, mode)
+        grid, mode)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
 end
@@ -206,40 +198,9 @@ function (rast::GaussianRasterizer)(
         end
     end
 
-    if rast.fused
-        return rasterize(
-            means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
-            rast, camera, sh_degree, background, covisibilities, uncertainties)
-    else
-        means_2d, conics, compensations, depths = project(
-            means_3d, scales_act, rotations;
-            rast, camera, near_plane=0.2f0, far_plane=1000f0,
-            radius_clip=Int32(3), blur_ϵ=0.3f0)
-
-        colors = spherical_harmonics(means_3d, shs; rast, camera, sh_degree)
-
-        color_features = if rast.mode == :rgbd
-            # Constant-1 row renders the alpha map (see `GeometryState`);
-            # `ignore_derivatives` stops its (meaningless) cotangent from the
-            # `vcat` pullback, while its effect on opacities/means/conics
-            # flows through the `vα` path of `∇render!`.
-            ones_row = ignore_derivatives(
-                KA.ones(get_backend(rast), Float32, (1, length(depths))))
-            vcat(colors, reshape(depths, 1, :), ones_row)
-        else
-            colors
-        end
-
-        opacities_scaled = if rast.antialias
-            opacities_act .* compensations
-        else
-            opacities_act
-        end
-
-        return render(
-            means_2d, conics, opacities_scaled, color_features;
-            rast, camera, background, depths, covisibilities, uncertainties)
-    end
+    return rasterize(
+        means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
+        rast, camera, sh_degree, background, covisibilities, uncertainties)
 end
 
 function rasterize(

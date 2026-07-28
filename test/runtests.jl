@@ -635,8 +635,7 @@ end
         points, colors, scales; max_sh_degree=0, isotropic=false)
     gaussians.opacities .= 5f0 # ≈ 0.993 after the sigmoid.
 
-    rast = GaussianSplatting.GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgbdn)
+    rast = GaussianSplatting.GaussianRasterizer(kab, camera; mode=:rgbdn)
     image = rast(
         gaussians.points, gaussians.opacities, gaussians.scales,
         gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
@@ -663,9 +662,6 @@ end
     @test size(∇rot) == size(gaussians.rotations)
     @test all(isfinite, Array(∇rot))
     @test maximum(abs, Array(∇rot)) > 0f0
-
-    @test_throws ErrorException GaussianSplatting.GaussianRasterizer(kab, camera;
-        antialias=false, fused=false, mode=:rgbdn)
 end
 
 # @testset "Dataset loading" begin
@@ -714,7 +710,7 @@ end
 #     end
 # end
 
-# @testset "Fused rasterizer" begin
+# @testset "Rasterizer" begin
 #     global DATASET
 #     global GAUSSIANS
 #     dataset = DATASET
@@ -726,7 +722,7 @@ end
 #     (; width, height) = GaussianSplatting.resolution(camera)
 
 #     rasterizer = GaussianSplatting.GaussianRasterizer(kab, camera;
-#         antialias=false, fused=true, mode=:rgbd)
+#         mode=:rgbd)
 
 #     image_features = rasterizer(
 #         gaussians.points, gaussians.opacities, gaussians.scales,
@@ -735,7 +731,7 @@ end
 #     @test size(image_features) == (4, width, height)
 # end
 
-# @testset "Un-fused rasterizer" begin
+# @testset "Trainer" begin
 #     global DATASET
 #     global GAUSSIANS
 #     dataset = DATASET
@@ -747,49 +743,7 @@ end
 #     (; width, height) = GaussianSplatting.resolution(camera)
 
 #     rasterizer = GaussianSplatting.GaussianRasterizer(kab, camera;
-#         antialias=false, fused=false, mode=:rgbd)
-
-#     image_features = rasterizer(
-#         gaussians.points, gaussians.opacities, gaussians.scales,
-#         gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
-#         camera, sh_degree=gaussians.sh_degree)
-#     @test size(image_features) == (4, width, height)
-# end
-
-# @testset "Trainer w/ fused rasterizer" begin
-#     global DATASET
-#     global GAUSSIANS
-#     dataset = DATASET
-#     @assert dataset ≢ nothing
-#     gaussians = GAUSSIANS
-#     @assert gaussians ≢ nothing
-
-#     camera = dataset.train_cameras[1]
-#     (; width, height) = GaussianSplatting.resolution(camera)
-
-#     rasterizer = GaussianSplatting.GaussianRasterizer(kab, camera;
-#         antialias=false, fused=true, mode=:rgbd)
-
-#     opt_params = GaussianSplatting.OptimizationParams()
-#     trainer = GaussianSplatting.Trainer(rasterizer, gaussians, dataset, opt_params)
-
-#     loss = GaussianSplatting.step!(trainer)
-#     @test loss > 0
-# end
-
-# @testset "Trainer w/ un-fused rasterizer" begin
-#     global DATASET
-#     global GAUSSIANS
-#     dataset = DATASET
-#     @assert dataset ≢ nothing
-#     gaussians = GAUSSIANS
-#     @assert gaussians ≢ nothing
-
-#     camera = dataset.train_cameras[1]
-#     (; width, height) = GaussianSplatting.resolution(camera)
-
-#     rasterizer = GaussianSplatting.GaussianRasterizer(kab, camera;
-#         antialias=false, fused=false, mode=:rgbd)
+#         mode=:rgbd)
 
 #     opt_params = GaussianSplatting.OptimizationParams()
 #     trainer = GaussianSplatting.Trainer(rasterizer, gaussians, dataset, opt_params)

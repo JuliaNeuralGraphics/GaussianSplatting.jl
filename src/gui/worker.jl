@@ -375,7 +375,7 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot)
     if size(rast.image)[2:3] != (width, height)
         kab = get_backend(rast)
         # TODO free the old one before creating new one.
-        gui.rasterizer = rast = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+        gui.rasterizer = rast = GaussianRasterizer(kab, camera; mode=:rgbd)
     end
 
     back = w.back

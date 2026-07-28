@@ -12,7 +12,7 @@ function benchmark(kab, dataset_path::String; scale::Int)
     gaussians = GSP.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
     rasterizer = GSP.GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgb)
+        mode=:rgb)
     trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
 
     println("Benchmarking `$dataset_path` dataset at `$scale` scale.")

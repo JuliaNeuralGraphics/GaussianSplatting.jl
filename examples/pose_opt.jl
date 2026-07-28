@@ -33,7 +33,7 @@ function main(dataset_path::String, state_path::String; scale::Int)
     gaussians = GSP.GaussianModel(
         dataset.points, dataset.colors, dataset.scales)
     rasterizer = GSP.GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=:rgb)
+        mode=:rgb)
     trainer = GSP.Trainer(rasterizer, gaussians, dataset, opt_params)
     GSP.load_state!(trainer, state_path)
 

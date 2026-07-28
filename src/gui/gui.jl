@@ -206,7 +206,7 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    rasterizer = GaussianRasterizer(kab, camera; fused=true)
+    rasterizer = GaussianRasterizer(kab, camera)
 
     render_state = RenderState(;
         surface=NGL.RenderSurface(; internal_format=GL_RGB32F, data_type=GL_FLOAT, resolution(camera)...),
@@ -257,7 +257,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
-        fused=true, mode=training_rasterizer_mode(opt_params))
+        mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
@@ -266,7 +266,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
-    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+    gui_rasterizer = GaussianRasterizer(kab, camera; mode=:rgbd)
 
     render_state = RenderState(;
         surface=NGL.RenderSurface(;
@@ -315,7 +315,7 @@ function load_dataset(kab, dataset_path::String;
     gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
-        fused=true, mode=training_rasterizer_mode(opt_params))
+        mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
@@ -323,7 +323,7 @@ function load_dataset(kab, dataset_path::String;
     camera = deepcopy(camera)
     set_resolution!(camera; width, height)
     # TODO free the old one before creating new one.
-    gui_rasterizer = GaussianRasterizer(kab, camera; fused=true, mode=:rgbd)
+    gui_rasterizer = GaussianRasterizer(kab, camera; mode=:rgbd)
 
     up_vec = estimate_up_vec(dataset.train_cameras)
     # H2D copies above run on this task's stream: make sure they are
@@ -1007,7 +1007,7 @@ function render!(gui::GSGUI)
         kab = get_backend(rast)
         # TODO free the old one before creating new one.
         gui.rasterizer = rast =
-            GaussianRasterizer(kab, gui.camera; fused=true, mode=:rgbd)
+            GaussianRasterizer(kab, gui.camera; mode=:rgbd)
     end
 
     ui_sh_degree::Int = gui.ui_state.sh_degree[]

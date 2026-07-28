@@ -128,7 +128,7 @@ function main(kab, dataset_path::String;
         dataset.points, dataset.colors, dataset.scales;
         max_sh_degree=3, isotropic=false)
     rasterizer = GaussianRasterizer(kab, camera;
-        antialias=false, fused=true, mode=training_rasterizer_mode(opt_params))
+        mode=training_rasterizer_mode(opt_params))
 
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
@@ -234,7 +234,7 @@ function benchmark(kab, dataset_path::String;
         gaussians = GaussianModel(
             dataset.points, dataset.colors, dataset.scales;
             max_sh_degree=3, isotropic=false)
-        rasterizer = GaussianRasterizer(kab, camera; antialias=false, fused=true,
+        rasterizer = GaussianRasterizer(kab, camera;
             mode=training_rasterizer_mode(config.opt_params))
         trainer = Trainer(rasterizer, gaussians, dataset, config.opt_params;
             strategy=create_strategy(config.strategy, gaussians))
