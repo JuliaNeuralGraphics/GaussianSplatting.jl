@@ -216,13 +216,10 @@ UI thread must not do it itself. Called wherever the scene changes size —
 after a train step & on install/close.
 """
 function refresh_memory!(gui, w::RenderWorker)
-    t1 = time()
     w.memory[] =
         memory_usage(gui.gaussians) +
         memory_usage(gui.trainer) +
         memory_usage(gui.rasterizer)
-    t2 = time()
-    @show t2 - t1
     return
 end
 

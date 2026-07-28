@@ -38,6 +38,9 @@ const SPINNER_DELAY = 0.5
 # (or a densification pass): explain it instead of just spinning.
 const SPINNER_HINT_DELAY = 3.0
 
+# Visible rows of the `Camera view` list; the rest is scrolled to.
+const VIEW_LIST_ROWS = 8
+
 """
 Rotating arc, animated off `CImGui.GetTime()` (wall clock), so it keeps
 spinning at a steady rate regardless of the UI frame rate.
@@ -867,7 +870,7 @@ function handle_ui!(gui::GSGUI; frame_time)
 
         CImGui.PushItemWidth(-100)
         if CImGui.Combo("Controller", gui.ui_state.controller_mode,
-            gui.ui_state.controller_modes, length(gui.ui_state.controller_modes),
+            gui.ui_state.controller_modes,
         ) && gui.ui_state.controller_mode[] == 1
             # Entering orbit mode: place the target in front of the
             # camera, at a scene-sized distance.
@@ -917,7 +920,7 @@ function handle_ui!(gui::GSGUI; frame_time)
         # GUI rasterizers always render in `:rgbd` mode.
         CImGui.PushItemWidth(-100)
         if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-            gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+            gui.ui_state.render_modes,
         )
             gui.render_state.need_render = true
         end
@@ -975,7 +978,7 @@ function handle_ui!(gui::GSGUI; frame_time)
             CImGui.Text("Camera view:")
             CImGui.PushItemWidth(-1)
             if CImGui.ListBox("##views", gui.ui_state.selected_view,
-                image_filenames, length(image_filenames),
+                image_filenames, VIEW_LIST_ROWS,
             )
                 vid = gui.ui_state.selected_view[] + 1
                 set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
