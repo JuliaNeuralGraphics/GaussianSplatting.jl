@@ -63,6 +63,11 @@ function DefaultStrategy(gs::GaussianModel;
         min_opacity)
 end
 
+memory_usage(strategy::DefaultStrategy) =
+    memory_usage(strategy.max_radii) +
+    memory_usage(strategy.accum_∇means_2d) +
+    memory_usage(strategy.denom)
+
 function KA.unsafe_free!(strategy::DefaultStrategy)
     KA.unsafe_free!(strategy.max_radii)
     KA.unsafe_free!(strategy.accum_∇means_2d)

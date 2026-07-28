@@ -110,6 +110,10 @@ ImageState(kab; width::Int, height::Int, grid_size::Int) = ImageState(
     KA.zeros(kab, UInt32, (width, height)),
     KA.zeros(kab, Float32, (width, height)))
 
+# All fields are arrays (or `nothing`), so this stays correct as they change.
+memory_usage(s::Union{GeometryState, BinningState, ImageState}) =
+    sum(f -> memory_usage(getfield(s, f)), fieldnames(typeof(s)); init=0)
+
 function KA.unsafe_free!(istate::ImageState)
     KA.unsafe_free!(istate.ranges)
     KA.unsafe_free!(istate.n_contrib)

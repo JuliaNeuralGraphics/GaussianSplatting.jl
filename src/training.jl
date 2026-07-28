@@ -79,6 +79,16 @@ function Trainer(
         depth_anchors, bilateral_grid, normals)
 end
 
+# `gaussians` is excluded, as in `unsafe_free!`: the model is shared with
+# whoever built the trainer and is accounted for there.
+memory_usage(trainer::Trainer) =
+    sum(memory_usage, values(trainer.optimizers); init=0) +
+    Int(sizeof(trainer.cache)) +
+    memory_usage(trainer.strategy) +
+    memory_usage(trainer.dataset) +
+    memory_usage(trainer.rast) +
+    memory_usage(trainer.bilateral_grid)
+
 function KA.unsafe_free!(trainer::Trainer)
     foreach(free_optimizer!, values(trainer.optimizers))
     GPUArrays.unsafe_free!(trainer.cache)

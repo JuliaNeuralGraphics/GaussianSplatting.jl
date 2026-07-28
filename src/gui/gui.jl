@@ -846,167 +846,143 @@ end
 function handle_ui!(gui::GSGUI; frame_time)
     w = gui.worker
     if CImGui.Begin("GaussianSplatting")
-        if CImGui.BeginTabBar("bar")
-            if CImGui.BeginTabItem("Controls")
-                (; width, height) = resolution(gui.camera)
-                CImGui.Text("Render Resolution: $width x $height")
-                CImGui.Text("N Gaussians: $(w.n_gaussians[])")
-                worker_busy_line!(w)
+        (; width, height) = resolution(gui.camera)
+        CImGui.Text("Render Resolution: $width x $height")
+        CImGui.Text("Backend: $(backend_name(get_backend(gui.rasterizer)))")
+        CImGui.Text("GPU Memory: $(Base.format_bytes(w.memory[]))")
+        CImGui.SetItemTooltip(
+            "Device memory held by the gaussians, the optimizers & the " *
+            "rasterizers.\nThe backend's memory pool keeps freed blocks " *
+            "around, so the process always holds at least this much.")
+        CImGui.Text("Number of Gaussians: $(w.n_gaussians[])")
+        worker_busy_line!(w)
 
-                isempty(gui.ui_state.worker_error) || CImGui.TextColored(
-                    (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
+        isempty(gui.ui_state.worker_error) || CImGui.TextColored(
+            (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
 
-                if CImGui.Checkbox("Render", gui.ui_state.render)
-                    w.render[] = gui.ui_state.render[]
-                    notify(w.wakeup)
-                end
+        if CImGui.Checkbox("Render", gui.ui_state.render)
+            w.render[] = gui.ui_state.render[]
+            notify(w.wakeup)
+        end
 
+        CImGui.PushItemWidth(-100)
+        if CImGui.Combo("Controller", gui.ui_state.controller_mode,
+            gui.ui_state.controller_modes, length(gui.ui_state.controller_modes),
+        ) && gui.ui_state.controller_mode[] == 1
+            # Entering orbit mode: place the target in front of the
+            # camera, at a scene-sized distance.
+            d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
+            gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+        end
+
+        # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
+        CImGui.BeginTable("##up-vec-buttons-table", 2)
+        CImGui.TableNextRow()
+        CImGui.TableNextColumn()
+        if CImGui.Button("Set Up From View", CImGui.ImVec2(-1, 0))
+            gui.control_settings.up_vec = -view_up(gui.camera)
+        end
+        CImGui.SetItemTooltip(
+            "Use the current camera up as the scene up: " *
+            "yaw will rotate around it.")
+        CImGui.TableNextColumn()
+        if CImGui.Button("Level Horizon", CImGui.ImVec2(-1, 0))
+            level_horizon!(gui.camera, gui.control_settings.up_vec)
+            gui.render_state.need_render = true
+        end
+        CImGui.SetItemTooltip(
+            "Remove accumulated roll: align the camera with the scene up.")
+        CImGui.EndTable()
+
+        has_dataset = !viewer_only(gui)
+        has_dataset || disabled_begin()
+        if CImGui.Button("Reset Up From Dataset", CImGui.ImVec2(-1, 0))
+            gui.control_settings.up_vec =
+                estimate_up_vec(gui.trainer.dataset.train_cameras)
+        end
+        CImGui.SetItemTooltip(
+            "Re-estimate the scene up from the dataset cameras, " *
+            "discarding manual calibration.")
+        has_dataset || disabled_end()
+
+        CImGui.PushItemWidth(-100)
+        max_sh_degree = gui.ui_state.max_sh_degree
+        if max_sh_degree > 0 && CImGui.SliderInt(
+            "SH degree", gui.ui_state.sh_degree,
+            -1, max_sh_degree, "%d / $max_sh_degree",
+        )
+            gui.render_state.need_render = true
+        end
+
+        # GUI rasterizers always render in `:rgbd` mode.
+        CImGui.PushItemWidth(-100)
+        if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+            gui.ui_state.render_modes, length(gui.ui_state.render_modes),
+        )
+            gui.render_state.need_render = true
+        end
+
+        if !viewer_only(gui)
+            CImGui.Separator()
+
+            CImGui.BeginTable("##checkbox-table", 2)
+
+            # Row 1.
+            CImGui.TableNextRow()
+            CImGui.TableNextColumn()
+            CImGui.Text("Steps: $(w.step[])")
+            CImGui.TableNextColumn()
+            CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
+
+            # Row 2.
+            CImGui.TableNextRow()
+            CImGui.TableNextColumn()
+            # Reflect worker-side stops (e.g. training error)
+            # before drawing the checkbox.
+            gui.ui_state.train[] = w.train[]
+            if CImGui.Checkbox("Train", gui.ui_state.train)
+                GC.gc(false)
+                GC.gc(true)
+                w.train[] = gui.ui_state.train[]
+                notify(w.wakeup)
+            end
+            CImGui.TableNextColumn()
+            CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+
+            # Row 3.
+            CImGui.TableNextRow()
+            CImGui.TableNextColumn()
+            if CImGui.Checkbox("Densify", gui.ui_state.densify)
+                w.densify[] = gui.ui_state.densify[]
+            end
+            CImGui.TableNextColumn()
+
+            CImGui.EndTable()
+
+            if gui.ui_state.is_mcmc
+                # Benign cross-thread write: `max_cap` is a
+                # word-sized Int the worker only reads at
+                # densification time.
+                strategy = gui.trainer.strategy
+                max_cap_ref = Ref{Int32}(strategy.max_cap)
                 CImGui.PushItemWidth(-100)
-                if CImGui.Combo("Controller", gui.ui_state.controller_mode,
-                    gui.ui_state.controller_modes, length(gui.ui_state.controller_modes),
-                ) && gui.ui_state.controller_mode[] == 1
-                    # Entering orbit mode: place the target in front of the
-                    # camera, at a scene-sized distance.
-                    d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
-                    gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+                if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
+                    strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
                 end
-
-                # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
-                CImGui.BeginTable("##up-vec-buttons-table", 2)
-                CImGui.TableNextRow()
-                CImGui.TableNextColumn()
-                if CImGui.Button("Set Up From View", CImGui.ImVec2(-1, 0))
-                    gui.control_settings.up_vec = -view_up(gui.camera)
-                end
-                CImGui.SetItemTooltip(
-                    "Use the current camera up as the scene up: " *
-                    "yaw will rotate around it.")
-                CImGui.TableNextColumn()
-                if CImGui.Button("Level Horizon", CImGui.ImVec2(-1, 0))
-                    level_horizon!(gui.camera, gui.control_settings.up_vec)
-                    gui.render_state.need_render = true
-                end
-                CImGui.SetItemTooltip(
-                    "Remove accumulated roll: align the camera with the scene up.")
-                CImGui.EndTable()
-
-                has_dataset = !viewer_only(gui)
-                has_dataset || disabled_begin()
-                if CImGui.Button("Reset Up From Dataset", CImGui.ImVec2(-1, 0))
-                    gui.control_settings.up_vec =
-                        estimate_up_vec(gui.trainer.dataset.train_cameras)
-                end
-                CImGui.SetItemTooltip(
-                    "Re-estimate the scene up from the dataset cameras, " *
-                    "discarding manual calibration.")
-                has_dataset || disabled_end()
-
-                CImGui.PushItemWidth(-100)
-                max_sh_degree = gui.ui_state.max_sh_degree
-                if max_sh_degree > 0 && CImGui.SliderInt(
-                    "SH degree", gui.ui_state.sh_degree,
-                    -1, max_sh_degree, "%d / $max_sh_degree",
-                )
-                    gui.render_state.need_render = true
-                end
-
-                # GUI rasterizers always render in `:rgbd` mode.
-                CImGui.PushItemWidth(-100)
-                if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-                    gui.ui_state.render_modes, length(gui.ui_state.render_modes),
-                )
-                    gui.render_state.need_render = true
-                end
-
-                if !viewer_only(gui)
-                    CImGui.Separator()
-
-                    CImGui.BeginTable("##checkbox-table", 2)
-
-                    # Row 1.
-                    CImGui.TableNextRow()
-                    CImGui.TableNextColumn()
-                    CImGui.Text("Steps: $(w.step[])")
-                    CImGui.TableNextColumn()
-                    CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
-
-                    # Row 2.
-                    CImGui.TableNextRow()
-                    CImGui.TableNextColumn()
-                    # Reflect worker-side stops (e.g. training error)
-                    # before drawing the checkbox.
-                    gui.ui_state.train[] = w.train[]
-                    if CImGui.Checkbox("Train", gui.ui_state.train)
-                        GC.gc(false)
-                        GC.gc(true)
-                        w.train[] = gui.ui_state.train[]
-                        notify(w.wakeup)
-                    end
-                    CImGui.TableNextColumn()
-                    CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
-
-                    # Row 3.
-                    CImGui.TableNextRow()
-                    CImGui.TableNextColumn()
-                    if CImGui.Checkbox("Densify", gui.ui_state.densify)
-                        w.densify[] = gui.ui_state.densify[]
-                    end
-                    CImGui.TableNextColumn()
-
-                    CImGui.EndTable()
-
-                    if gui.ui_state.is_mcmc
-                        # Benign cross-thread write: `max_cap` is a
-                        # word-sized Int the worker only reads at
-                        # densification time.
-                        strategy = gui.trainer.strategy
-                        max_cap_ref = Ref{Int32}(strategy.max_cap)
-                        CImGui.PushItemWidth(-100)
-                        if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
-                            strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
-                        end
-                    end
-
-                    image_filenames = gui.trainer.dataset.train_image_filenames
-                    CImGui.Text("Camera view:")
-                    CImGui.PushItemWidth(-1)
-                    if CImGui.ListBox("##views", gui.ui_state.selected_view,
-                        image_filenames, length(image_filenames),
-                    )
-                        vid = gui.ui_state.selected_view[] + 1
-                        set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
-                        # A dataset photo's pose is level: use it to calibrate the yaw axis.
-                        gui.control_settings.up_vec = -view_up(gui.camera)
-                        gui.render_state.need_render = true
-                    end
-                end
-                CImGui.EndTabItem()
             end
 
-            if CImGui.BeginTabItem("Utils")
-                # TODO Capture mode is temporarily disabled: it renders synchronously on the UI thread
-                disabled_begin()
-                CImGui.Button("Capture Video", CImGui.ImVec2(-1, 0))
-                disabled_end()
-                CImGui.EndTabItem()
+            image_filenames = gui.trainer.dataset.train_image_filenames
+            CImGui.Text("Camera view:")
+            CImGui.PushItemWidth(-1)
+            if CImGui.ListBox("##views", gui.ui_state.selected_view,
+                image_filenames, length(image_filenames),
+            )
+                vid = gui.ui_state.selected_view[] + 1
+                set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
+                # A dataset photo's pose is level: use it to calibrate the yaw axis.
+                gui.control_settings.up_vec = -view_up(gui.camera)
+                gui.render_state.need_render = true
             end
-
-            if CImGui.BeginTabItem("Help")
-                CImGui.TextWrapped("FPV controller:")
-                CImGui.TextWrapped("- Left Mouse to rotate camera.")
-                CImGui.TextWrapped("- WASD to move the camera.")
-                CImGui.TextWrapped("- QE to move the camera up/down.")
-                CImGui.TextWrapped("- R + Left Mouse to control the roll.")
-                CImGui.TextWrapped(" ")
-
-                CImGui.TextWrapped("Orbiting controller:")
-                CImGui.TextWrapped("- Left Mouse to pan (moves the orbiting target).")
-                CImGui.TextWrapped("- Right Mouse to orbit around the target.")
-                CImGui.TextWrapped("- Mouse Wheel to zoom towards the target.")
-                CImGui.TextWrapped("- Double Left Click to pick a new orbiting target.")
-                CImGui.EndTabItem()
-            end
-            CImGui.EndTabBar()
         end
     end
     CImGui.End()

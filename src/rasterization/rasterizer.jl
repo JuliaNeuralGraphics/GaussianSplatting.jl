@@ -116,6 +116,17 @@ function release_scene_buffers!(rast::GaussianRasterizer)
     return
 end
 
+# `pinned_image` is excluded: it is registered host memory, not a device
+# allocation.
+memory_usage(rast::GaussianRasterizer) =
+    memory_usage(rast.istate) +
+    memory_usage(rast.gstate) +
+    memory_usage(rast.bstate) +
+    memory_usage(rast.shs) +
+    memory_usage(rast.scales_act) +
+    memory_usage(rast.opacities_act) +
+    memory_usage(rast.image)
+
 function KA.unsafe_free!(rast::GaussianRasterizer)
     KA.unsafe_free!(rast.istate)
     KA.unsafe_free!(rast.gstate)

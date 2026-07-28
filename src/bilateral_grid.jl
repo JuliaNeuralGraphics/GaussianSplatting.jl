@@ -33,6 +33,9 @@ function BilateralGrid(kab, n_images::Int, opt_params)
     return BilateralGrid(grids, optimizer, scheduler)
 end
 
+memory_usage(bg::BilateralGrid) =
+    memory_usage(bg.grids) + memory_usage(bg.optimizer)
+
 function KA.unsafe_free!(bg::BilateralGrid)
     KA.unsafe_free!(bg.grids)
     free_optimizer!(bg.optimizer)

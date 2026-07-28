@@ -55,6 +55,21 @@ function free_optimizer!(opt::NU.Adam)
     return
 end
 
+# E.g. `ROCBackend()` -> "ROCBackend".
+backend_name(kab) = string(nameof(typeof(kab)))
+
+"""
+Device memory (in bytes) held by a scene component.
+
+This is what the app itself allocates, not what the driver reports: the
+backend's memory pool keeps freed blocks around, so the process always holds
+at least this much and usually more.
+"""
+memory_usage(x::AbstractArray) = sizeof(x)
+memory_usage(::Nothing) = 0
+memory_usage(opt::NU.Adam) =
+    sum(memory_usage, opt.μ; init=0) + sum(memory_usage, opt.ν; init=0)
+
 mse(x, y) = mean((x .- y).^2)
 
 psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))

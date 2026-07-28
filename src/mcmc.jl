@@ -59,6 +59,7 @@ end
 
 # All of the strategy's state (the binomial table) lives on the host.
 KA.unsafe_free!(::MCMCStrategy) = return
+memory_usage(::MCMCStrategy) = 0
 
 function regularization_loss(strategy::MCMCStrategy, opacities, scales)
     return strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +

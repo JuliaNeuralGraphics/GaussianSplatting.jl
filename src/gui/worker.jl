@@ -80,6 +80,7 @@ mutable struct RenderWorker
     loss::Threads.Atomic{Float32}
     step::Threads.Atomic{Int}
     n_gaussians::Threads.Atomic{Int}
+    memory::Threads.Atomic{Int} # Device bytes; see `refresh_memory!`.
 
     # worker → UI activity (see `with_activity` & `busy_status`).
     activity::Threads.Atomic{Int32} # A `WorkerActivity`.
@@ -104,7 +105,7 @@ function RenderWorker(; width::Int, height::Int)
         Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
         Threads.Atomic{Float32}(0f0), Threads.Atomic{Int}(0),
-        Threads.Atomic{Int}(0),
+        Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
         # activity, activity_since
         Threads.Atomic{Int32}(Int32(ActivityIdle)), Threads.Atomic{Float64}(0.0),
         "", nothing, nothing)
@@ -160,6 +161,8 @@ function start_worker!(gui)
     KA.synchronize(get_backend(gui.rasterizer))
 
     w = gui.worker
+    # Seed the published stats; safe here, the worker task does not exist yet.
+    refresh_memory!(gui, w)
     w.running[] = true
     w.task = Threads.@spawn worker_loop!(gui, w)
     return
@@ -203,6 +206,24 @@ function take_pick_result!(w::RenderWorker)::Maybe{SVector{3, Float32}}
         w.pick_result = nothing
         return result
     end
+end
+
+"""
+Publish the device memory the scene holds (see `memory_usage`).
+
+Computed on the worker: it walks arrays that densification replaces, so the
+UI thread must not do it itself. Called wherever the scene changes size —
+after a train step & on install/close.
+"""
+function refresh_memory!(gui, w::RenderWorker)
+    t1 = time()
+    w.memory[] =
+        memory_usage(gui.gaussians) +
+        memory_usage(gui.trainer) +
+        memory_usage(gui.rasterizer)
+    t2 = time()
+    @show t2 - t1
+    return
 end
 
 # Publish the current camera & render settings for the worker to render.
@@ -270,6 +291,7 @@ function worker_loop!(gui, w::RenderWorker)
                     w.loss[] = loss
                     w.step[] = trainer.step
                     w.n_gaussians[] = length(gui.gaussians)
+                    refresh_memory!(gui, w)
                     did_train = true
                 catch err
                     # E.g. non-finite loss:
@@ -349,6 +371,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         w.loss[] = 0f0
         w.step[] = loaded.trainer.step
         w.n_gaussians[] = length(loaded.gaussians)
+        refresh_memory!(gui, w)
         return true
     elseif tag ≡ :install_bson
         gaussians = cmd[2]
@@ -357,6 +380,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         w.loss[] = 0f0
         w.step[] = 0
         w.n_gaussians[] = length(gaussians)
+        refresh_memory!(gui, w)
         return true
     elseif tag ≡ :close_scene
         return handle_close_scene!(gui, w)
@@ -390,6 +414,7 @@ function handle_close_scene!(gui, w::RenderWorker)
     w.n_gaussians[] = 0
     # `rast.image` no longer holds the depth an orbit pick would unproject.
     w.last_snapshot = nothing
+    refresh_memory!(gui, w)
 
     GC.gc(false)
     GC.gc(true)
@@ -435,6 +460,9 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot)
         w.front, w.back = w.back, w.front
         w.has_new_frame = true
     end
+    # The first render allocates the scene-sized scratch buffers, and a
+    # resize rebuilds the rasterizer: both move the number above.
+    refresh_memory!(gui, w)
     return
 end
 

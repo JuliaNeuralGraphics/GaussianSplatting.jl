@@ -186,6 +186,9 @@ end
 
 Base.length(d::ColmapDataset) = length(d.train_cameras)
 
+memory_usage(d::ColmapDataset) =
+    memory_usage(d.points) + memory_usage(d.colors) + memory_usage(d.scales)
+
 function KA.unsafe_free!(d::ColmapDataset)
     KA.unsafe_free!(d.points)
     KA.unsafe_free!(d.colors)

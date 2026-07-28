@@ -63,6 +63,15 @@ end
 
 KernelAbstractions.get_backend(gs::GaussianModel) = get_backend(gs.points)
 
+memory_usage(gs::GaussianModel) =
+    memory_usage(gs.points) +
+    memory_usage(gs.features_dc) +
+    memory_usage(gs.features_rest) +
+    memory_usage(gs.scales) +
+    memory_usage(gs.rotations) +
+    memory_usage(gs.opacities) +
+    memory_usage(gs.ids)
+
 function KA.unsafe_free!(gs::GaussianModel)
     KA.unsafe_free!(gs.points)
     KA.unsafe_free!(gs.features_dc)
