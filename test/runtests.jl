@@ -2,7 +2,7 @@
 # This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 
-ENV["GSP_TEST_AMDGPU"] = true
+# ENV["GSP_TEST_AMDGPU"] = true
 # ENV["GSP_TEST_CUDA"] = true
 
 import Pkg
