@@ -56,8 +56,6 @@ function GaussianRasterizer(kab;
     mode::Symbol = :rgbd,
 )
     @assert width % 16 == 0 && height % 16 == 0
-
-    # TODO support :d
     modes = (:rgb, :rgbd, :rgbdn)
     mode in modes || error("Invalid render: $mode ∉ $modes")
 
