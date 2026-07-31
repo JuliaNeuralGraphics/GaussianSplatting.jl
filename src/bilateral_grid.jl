@@ -156,9 +156,9 @@ end
     wi, hi = @index(Global, NTuple)
     c = _bgrid_coords(image, grid, wi, hi)
 
-    for di in 1:3
+    @unroll for di in 1:3
         acc = 0f0
-        for si in 1:4
+        @unroll for si in 1:4
             ci = (di - 1) * 4 + si
             c00 = grid[c.x0, c.y0, c.z0, ci] * (1f0 - c.fx) + grid[c.x1, c.y0, c.z0, ci] * c.fx
             c10 = grid[c.x0, c.y1, c.z0, ci] * (1f0 - c.fx) + grid[c.x1, c.y1, c.z0, ci] * c.fx
@@ -192,7 +192,7 @@ end
 
     ∇sr, ∇sg, ∇sb = 0f0, 0f0, 0f0
     ∇z = 0f0 # Gradient w.r.t. the guidance coordinate `z`.
-    for corner in 0:7
+    @unroll for corner in 0:7
         xc, yc, zc = corner & 1, (corner >> 1) & 1, (corner >> 2) & 1
         xi = xc == 1 ? c.x1 : c.x0
         yi = yc == 1 ? c.y1 : c.y0
@@ -201,9 +201,9 @@ end
         wt = wxy * (zc == 1 ? c.fz : 1f0 - c.fz)
         dwdz = wxy * (zc == 1 ? 1f0 : -1f0) * (gz - 1)
 
-        for di in 1:3
+        @unroll for di in 1:3
             gout = di == 1 ? Δr : di == 2 ? Δg : Δb
-            for si in 1:4
+            @unroll for si in 1:4
                 ci = (di - 1) * 4 + si
                 v = grid[xi, yi, zi, ci]
                 gb = (si == 1 ? c.sr : si == 2 ? c.sg : si == 3 ? c.sb : 1f0) * gout

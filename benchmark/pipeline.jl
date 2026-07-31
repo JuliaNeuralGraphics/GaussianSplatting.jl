@@ -1,10 +1,10 @@
 import GaussianSplatting as GSP
+import ProgressMeter
 
 function benchmark(kab, dataset_path::String; scale::Int)
     @info "Using `$kab` GPU backend."
 
-    dataset = GSP.ColmapDataset(kab, dataset_path; scale,
-        train_test_split=1, permute=false)
+    dataset = GSP.ColmapDataset(kab, dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
@@ -20,13 +20,19 @@ function benchmark(kab, dataset_path::String; scale::Int)
     n_steps = 1000
 
     println("Warmup for `$warmup_steps` steps:")
+    warmup_meter = ProgressMeter.Progress(warmup_steps; desc="warmup ", showspeed=true)
     @time for i in 1:warmup_steps
         GSP.step!(trainer)
+        ProgressMeter.next!(warmup_meter;
+            showvalues=() -> [("gaussians", length(gaussians))])
     end
 
     println("Benchmark for `$n_steps` steps:")
+    meter = ProgressMeter.Progress(n_steps; desc="benchmark ", showspeed=true)
     @time for i in 1:n_steps
         GSP.step!(trainer)
+        ProgressMeter.next!(meter;
+            showvalues=() -> [("gaussians", length(gaussians))])
     end
     return
 end

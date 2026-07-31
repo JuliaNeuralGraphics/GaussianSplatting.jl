@@ -41,6 +41,7 @@ import NerfUtils as NU
 import NeuralGraphicsGL as NGL
 import SIMD
 import PlyIO
+import ProgressMeter
 
 const Maybe{T} = Union{T, Nothing}
 
@@ -56,6 +57,7 @@ _as_T(T, x) = reinterpret(T, reshape(x, :))
 
 include("simd.jl")
 include("utils.jl")
+include("checkpoint.jl")
 include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
@@ -121,7 +123,7 @@ function main(kab, dataset_path::String;
     seed ≡ nothing || Random.seed!(seed)
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=0.9, permute=false)
+    dataset = ColmapDataset(kab, dataset_path; scale)
     camera = dataset.test_cameras[1]
 
     gaussians = GaussianModel(
@@ -191,40 +193,98 @@ function main(kab, dataset_path::String;
 end
 
 """
-Benchmark strategies / optimization params against each other on one dataset.
-Every config trains from scratch with the same `seed`, so all runs see the
-same initial Gaussians & the same train view order (until the RNG streams
-diverge through strategy-specific sampling; see the note in [`main`](@ref)).
+Optimization params of the reference 3DGS implementation: photometric loss
+only & a fixed background. Everything this package adds on top is off, so a
+run with these is comparable to published numbers.
+"""
+reference_opt_params(; kwargs...) = OptimizationParams(;
+    use_depth_loss=false, use_bilateral_grid=false, use_normal_loss=false,
+    random_background=false, kwargs...)
 
-Depth-supervised configs silently fall back to plain training when the
-dataset has no depth priors (the `depth` column in the report tells which
-was actually used).
+# Scenes of the Mip-NeRF 360 dataset & the resolution the 3DGS paper evaluates
+# them at: outdoor scenes at 1/4, indoor at 1/2.
+const MIPNERF360_SCALES = Dict(
+    "bicycle" => 4, "flowers" => 4, "garden" => 4, "stump" => 4, "treehill" => 4,
+    "bonsai" => 2, "counter" => 2, "kitchen" => 2, "room" => 2)
+
+"""
+Downscale factor the 3DGS paper evaluates the scene at `dataset_path` at.
+
+Mip-NeRF 360 scenes are recognized by directory name; everything else
+(Tanks&Temples, Deep Blending) is evaluated at the resolution it ships in.
+"""
+standard_scale(dataset_path::String) =
+    get(MIPNERF360_SCALES, basename(normpath(dataset_path)), 1)
+
+"""
+Train & evaluate under the protocol the 3DGS paper &
+[nerfbaselines](https://github.com/nerfbaselines/nerfbaselines) use, so the
+numbers are comparable to published ones:
+
+- Test split: views ordered by image filename, every 8-th held out
+  (`llffhold=8`), the rest used for training. Deterministic — no random split.
+- 30 000 steps, with metrics also reported at 7 000, the two checkpoints the
+  paper tabulates. Densification is left to the strategy (steps 500..15 000
+  for `:default`), not cut short.
+- Resolution: 1/4 for Mip-NeRF 360 outdoor scenes, 1/2 for indoor
+  (see [`standard_scale`](@ref)); pass `scale` to override.
+- Metrics: SSIM/PSNR per test view, averaged over views, on renders rounded to
+  8-bit sRGB & composited over a black background.
+
+Multiple `configs` can be compared on the same protocol; each trains from
+scratch with the same `seed`, so all of them see the same initial Gaussians &
+the same train view order (until the RNG streams diverge through
+strategy-specific sampling). The first config is the reference one.
+
+Depth-supervised configs silently fall back to plain training when the dataset
+has no depth priors (the `depth` column in the report tells which was actually
+used).
+
+Known deviations from the reference implementation, both of which move the
+numbers a little:
+
+- LPIPS is not reported (needs a pretrained VGG/AlexNet).
+- Images are resampled up to a multiple of 16, a rasterizer requirement, so
+  both render & ground truth are up to ~1% larger than the reference's.
 """
 function benchmark(kab, dataset_path::String;
-    scale::Int,
-    n_steps::Int = 10_000,
-    # TODO better control number of GS
-    densify_until::Int = 3_000,
-    eval_every::Int = 1_000,
+    scale::Maybe{Int} = nothing,
+    n_steps::Int = 30_000,
+    eval_at = (7_000, 30_000),
+    holdout::Int = 8,
     seed::Int = 42,
+    progress::Bool = true,
     # TODO add geometry_regularization
     configs = [
-        (name="default",                 strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=false)),
-        (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
-        (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
-        (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
-        (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
-        (name="mcmc",                    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
-        (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
+        (name="3dgs",                    strategy=:default, opt_params=reference_opt_params()),
+        # (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
+        # (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
+        # (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
+        # (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
+        # (name="mcmc",                    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
+        # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
     ],
 )
     maybe_debug()
     @info "Using `$kab` GPU backend."
     Random.seed!(seed)
 
+    scale ≡ nothing && (scale = standard_scale(dataset_path))
     # The dataset is read-only during training: load once, share across runs.
-    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=0.9, permute=true)
+    # `max_extent=Inf32`: the reference implementation does not clamp it &
+    # the extent scales the position LR and the densification thresholds.
+    dataset = ColmapDataset(kab, dataset_path; scale, holdout, max_extent=Inf32)
+    isempty(dataset.test_cameras) && throw(ArgumentError(
+        "Evaluation needs a test split, but `holdout=$holdout` left none."))
     camera = dataset.test_cameras[1]
+    @info "$(length(dataset.train_cameras)) train / $(length(dataset.test_cameras)) test views " *
+        "at $(Int.(camera.intrinsics.resolution)) (scale=$scale)."
+
+    # Report at every requested step that the run actually reaches, plus the
+    # last one, so a shortened run is still tabulated.
+    eval_steps = sort!(unique!(Int[s for s in eval_at if s ≤ n_steps]))
+    push!(eval_steps, n_steps)
+    unique!(eval_steps)
 
     results = NamedTuple[]
     for config in configs
@@ -243,27 +303,34 @@ function benchmark(kab, dataset_path::String;
         # not at some later unrelated call.
         KA.synchronize(kab)
 
-        loss, train_time = 0f0, 0.0
+        # Metrics of the last checkpoint, carried between steps so the meter
+        # keeps showing them until the next evaluation refreshes them.
+        loss, eval_ssim, eval_psnr = 0f0, 0f0, 0f0
+        train_time = 0.0
+        meter = ProgressMeter.Progress(n_steps;
+            desc="[$(config.name)] ", showspeed=true, enabled=progress)
         for i in 1:n_steps
             # `step!` syncs on the loss transfer, so `@elapsed` covers the
-            # whole step; evaluation below is excluded from the timing.
+            # whole step; evaluation & progress reporting below are excluded
+            # from the timing.
             train_time += @elapsed loss = step!(trainer)
-            i == densify_until && (trainer.densify = false)
 
-            if i % eval_every == 0
-                (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
-                println(
-                    "[$(config.name)] i=$i | N Gaussians: $(length(gaussians)) | " *
-                    "↓ loss=$(round(loss; digits=4)) | ↑ ssim=$(round(eval_ssim; digits=4)) | " *
-                    "↓ mse=$(round(eval_mse; digits=6)) | ↑ psnr=$(round(eval_psnr; digits=2))")
+            if i in eval_steps
+                (; eval_ssim, eval_mse, eval_psnr) = validate(trainer; quantize=true)
+                push!(results, (;
+                    name=config.name, step=i, depth=use_depth,
+                    minutes=train_time / 60, n_gaussians=length(gaussians), loss,
+                    ssim=eval_ssim, mse=eval_mse, psnr=eval_psnr))
             end
-        end
 
-        (; eval_ssim, eval_mse, eval_psnr) = validate(trainer)
-        push!(results, (;
-            name=config.name, depth=use_depth, minutes=train_time / 60,
-            n_gaussians=length(gaussians), loss,
-            ssim=eval_ssim, mse=eval_mse, psnr=eval_psnr))
+            # A thunk: only evaluated on the steps the meter actually redraws.
+            ProgressMeter.next!(meter; showvalues=() -> [
+                ("gaussians", length(gaussians)),
+                ("↓ loss", round(loss; digits=4)),
+                ("↑ ssim", round(eval_ssim; digits=4)),
+                ("↑ psnr", round(eval_psnr; digits=2))])
+        end
+        ProgressMeter.finish!(meter)
 
         # TODO (AMDGPU.jl) bulk-freeing in finalizers triggers use-after-free?
         # Release GPU memory before the next run. Synchronize around the
@@ -276,17 +343,72 @@ function benchmark(kab, dataset_path::String;
         KA.synchronize(kab)
     end
 
-    println("\nDataset: `$dataset_path` (scale=$scale), $n_steps steps, seed=$seed.")
+    println("\nDataset: `$dataset_path` (scale=$scale), holdout=$holdout, seed=$seed.")
+    print_results(results)
+    return results
+end
+
+function print_results(results)
     println(
-        rpad("config", 16), rpad("depth", 7), rpad("minutes", 9),
+        rpad("config", 16), rpad("step", 8), rpad("depth", 7), rpad("minutes", 9),
         rpad("gaussians", 11), rpad("↓ loss", 9), rpad("↑ ssim", 9),
         rpad("↓ mse", 10), "↑ psnr")
     for r in results
         println(
-            rpad(r.name, 16), rpad(r.depth, 7),
+            rpad(r.name, 16), rpad(r.step, 8), rpad(r.depth, 7),
             rpad(round(r.minutes; digits=2), 9), rpad(r.n_gaussians, 11),
             rpad(round(r.loss; digits=4), 9), rpad(round(r.ssim; digits=4), 9),
             rpad(round(r.mse; digits=6), 10), round(r.psnr; digits=2))
+    end
+    return
+end
+
+"""
+Run [`benchmark`](@ref) over every scene under `root` & report the per-scene
+table plus the average over scenes - the form the 3DGS paper reports.
+
+`scenes` are directory names under `root`; each is evaluated at its
+[`standard_scale`](@ref). By default only the reference config is trained, so
+the averages line up with the paper's table.
+"""
+function benchmark_scenes(kab, root::String;
+    scenes = sort!(collect(keys(MIPNERF360_SCALES))),
+    configs = [(name="3dgs", strategy=:default, opt_params=reference_opt_params())],
+    kwargs...,
+)
+    results = NamedTuple[]
+    # No scene-level bar: `benchmark` already draws a per-step one & two
+    # meters would fight over the same terminal line.
+    for (i, scene) in enumerate(scenes)
+        scene_path = joinpath(root, scene)
+        isdir(scene_path) || (@warn "Skipping missing scene `$scene_path`."; continue)
+
+        @info "Scene $i/$(length(scenes)): `$scene`."
+        for r in benchmark(kab, scene_path; configs, kwargs...)
+            push!(results, (; scene, r...))
+        end
+    end
+
+    println("\nRoot: `$root`.")
+    for config in configs, step in unique(r.step for r in results)
+        rows = filter(r -> r.name == config.name && r.step == step, results)
+        isempty(rows) && continue
+
+        println("\n`$(config.name)` @ $step steps:")
+        println(
+            rpad("scene", 12), rpad("minutes", 9), rpad("gaussians", 11),
+            rpad("↑ ssim", 9), "↑ psnr")
+        for r in rows
+            println(
+                rpad(r.scene, 12), rpad(round(r.minutes; digits=2), 9),
+                rpad(r.n_gaussians, 11), rpad(round(r.ssim; digits=4), 9),
+                round(r.psnr; digits=2))
+        end
+        println(
+            rpad("average", 12), rpad(round(mean(r.minutes for r in rows); digits=2), 9),
+            rpad(round(Int, mean(r.n_gaussians for r in rows)), 11),
+            rpad(round(mean(r.ssim for r in rows); digits=4), 9),
+            round(mean(r.psnr for r in rows); digits=2))
     end
     return results
 end

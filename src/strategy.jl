@@ -11,9 +11,9 @@ Must be Zygote-differentiable w.r.t. `opacities` & `scales` (raw, pre-activation
 """
 regularization_loss(::AbstractStrategy, opacities, scales) = 0f0
 
-create_strategy(kind::Symbol, gs) =
-    kind == :default ? DefaultStrategy(gs) :
-    kind == :mcmc ? MCMCStrategy() :
+create_strategy(kind::Symbol, gs; kwargs...) =
+    kind == :default ? DefaultStrategy(gs; kwargs...) :
+    kind == :mcmc ? MCMCStrategy(; kwargs...) :
     throw(ArgumentError("Unknown densification strategy `$kind`, must be one of: `:default`, `:mcmc`."))
 
 """
@@ -46,7 +46,7 @@ function DefaultStrategy(gs::GaussianModel;
     densification_interval::Int = 100,
     densify_grad_threshold::Float32 = 2f-4,
     opacity_reset_interval::Int = 3_000,
-    min_opacity::Float32 = 0.05f0,
+    min_opacity::Float32 = 0.005f0,
 )
     kab = get_backend(gs)
     n = length(gs)

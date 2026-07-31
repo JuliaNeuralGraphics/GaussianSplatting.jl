@@ -29,7 +29,7 @@ struct ColmapDataset{
 end
 
 function ColmapDataset(kab, dataset_dir::String;
-    scale::Int = 1, train_test_split::Real = 0.8, permute::Bool = true,
+    scale::Int = 1, holdout::Int = 8, max_extent::Float32 = Inf32,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -37,12 +37,22 @@ function ColmapDataset(kab, dataset_dir::String;
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(kab;
         cameras_file, images_file, points_file,
-        scale, images_dir, train_test_split, permute)
+        scale, images_dir, holdout, max_extent)
 end
 
+"""
+- `holdout`: the train/test split the 3DGS literature evaluates on
+  (`llffhold`): views ordered by image filename, every `holdout`-th one held
+  out for testing, the rest used for training. Deterministic, so the split
+  matches other implementations view-for-view. `0` disables the split & trains on every view.
+- `max_extent`: upper bound on the camera extent, which scales the position
+  learning rate & the densification size thresholds. The reference
+  implementation does not clamp it (pass `Inf32` to match).
+"""
 function ColmapDataset(kab;
     cameras_file::String, images_file::String, points_file::String,
-    scale::Int = 1, images_dir::String, train_test_split::Real = 0.8, permute::Bool = true,
+    scale::Int = 1, images_dir::String, holdout::Int = 8,
+    max_extent::Float32 = Inf32,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
     depths_dir = joinpath(dirname(images_dir), "depths")
@@ -115,44 +125,30 @@ function ColmapDataset(kab;
     # Compute cameras extent which is used for scaling learning rate and densification.
     scene_center = sum(camera_centers) ./ length(camera_centers)
     scene_diagonal = maximum(map(c -> norm(c - scene_center), camera_centers))
-    camera_extent::Float32 = min(4f0, scene_diagonal * 1.1f0)
+    camera_extent::Float32 = min(max_extent, scene_diagonal * 1.1f0)
     # TODO resize scene into unit box?
 
     scales = compute_scales(points.points_3d)
 
-    n_cameras = length(cameras)
-    if permute
-        perm = randperm(n_cameras)
-        cameras = cameras[perm]
-        images = images[:, :, :, perm]
-        image_filenames = image_filenames[perm]
-        depth_maps = depth_maps[perm]
-        depth_qsteps = depth_qsteps[perm]
-    end
-
-    if train_test_split < 1
-        n_train = ceil(Int, n_cameras * train_test_split)
-
-        train_cameras = cameras[1:n_train]
-        train_images = images[:, :, :, 1:n_train]
-        train_image_filenames = image_filenames[1:n_train]
-        train_depths = depth_maps[1:n_train]
-        train_depth_qsteps = depth_qsteps[1:n_train]
-
-        test_cameras = cameras[(n_train + 1):end]
-        test_images = images[:, :, :, (n_train + 1):end]
-        test_image_filenames = image_filenames[(n_train + 1):end]
+    # Views in filename order: the order the split is defined in & the one
+    # other implementations report their per-view metrics in.
+    order = sortperm(image_filenames)
+    train_ids, test_ids = if holdout > 0
+        [id for (i, id) in enumerate(order) if (i - 1) % holdout != 0],
+        order[1:holdout:end]
     else
-        train_cameras = cameras
-        train_images = images
-        train_image_filenames = image_filenames
-        train_depths = depth_maps
-        train_depth_qsteps = depth_qsteps
-
-        test_cameras = Camera[]
-        test_images = Array{UInt8, 4}(undef, 0, 0, 0, 0)
-        test_image_filenames = String[]
+        order, Int[]
     end
+
+    train_cameras = cameras[train_ids]
+    train_images = images[:, :, :, train_ids]
+    train_image_filenames = image_filenames[train_ids]
+    train_depths = depth_maps[train_ids]
+    train_depth_qsteps = depth_qsteps[train_ids]
+
+    test_cameras = cameras[test_ids]
+    test_images = images[:, :, :, test_ids]
+    test_image_filenames = image_filenames[test_ids]
 
     depth_priors_count > 0 &&
         @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."

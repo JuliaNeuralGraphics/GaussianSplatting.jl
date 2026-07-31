@@ -165,7 +165,7 @@ function save_state(trainer::Trainer, filename::String)
         opt=bson_params(trainer.bilateral_grid.optimizer))
 
     camera = trainer.dataset.train_cameras[1]
-    BSON.bson(filename, Dict(
+    save_checkpoint(filename, Dict(
         :gaussians => bson_params(trainer.gaussians),
         :optimizers => optimizers,
         :bilateral => bilateral,
@@ -176,7 +176,7 @@ function save_state(trainer::Trainer, filename::String)
 end
 
 function load_state!(trainer::Trainer, filename::String)
-    θ = BSON.load(filename)
+    θ = load_checkpoint(filename)
     optimizers = θ[:optimizers]
     set_from_bson!(trainer.gaussians, θ[:gaussians])
 
@@ -208,7 +208,15 @@ function get_image(trainer::Trainer, idx::Integer, set::Symbol)
     return reshape(target_image, size(target_image)..., 1)
 end
 
-function validate(trainer::Trainer)
+"""
+Average SSIM / MSE / PSNR over the test views, each metric computed per view &
+then averaged (the reference implementation's reduction).
+
+`quantize` rounds the render to 8-bit before scoring, which is what published
+numbers measure - see [`quantize8`](@ref). It costs a bit of accuracy on the
+metric, so it is off for the in-training readout & on for benchmarks.
+"""
+function validate(trainer::Trainer; quantize::Bool = false)
     gs = trainer.gaussians
     rast = trainer.rast
     dataset = trainer.dataset
@@ -216,6 +224,9 @@ function validate(trainer::Trainer)
     eval_ssim = 0f0
     eval_mse = 0f0
     eval_psnr = 0f0
+    isempty(dataset.test_cameras) &&
+        return (; eval_ssim, eval_mse, eval_psnr)
+
     for (idx, camera) in enumerate(dataset.test_cameras)
         target_image = get_image(trainer, idx, :test)
 
@@ -233,6 +244,7 @@ function validate(trainer::Trainer)
         # From (c, w, h) to (w, h, c, 1) for SSIM.
         image_tmp = permutedims(image, (2, 3, 1))
         image_eval = reshape(image_tmp, size(image_tmp)..., 1)
+        quantize && (image_eval = quantize8(image_eval))
 
         eval_ssim += mean(fused_ssim(image_eval; ref=target_image))
         eval_mse += mse(image_eval, target_image)
@@ -308,7 +320,9 @@ function step!(trainer::Trainer)
     idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
     camera = trainer.dataset.train_cameras[idx]
     target_image = get_image(trainer, idx, :train)
-    background = rand(SVector{3, Float32})
+    background = params.random_background ?
+        rand(SVector{3, Float32}) :
+        zeros(SVector{3, Float32})
 
     θ = (
         gs.points, gs.features_dc, gs.features_rest,

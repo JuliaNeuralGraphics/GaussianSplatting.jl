@@ -252,7 +252,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
 
     enable_docking!()
 
-    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
+    dataset = ColmapDataset(kab, dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
@@ -310,7 +310,7 @@ function load_dataset(kab, dataset_path::String;
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
     use_normal_loss::Bool = false,
 )
-    dataset = ColmapDataset(kab, dataset_path; scale, train_test_split=1)
+    dataset = ColmapDataset(kab, dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
@@ -360,7 +360,7 @@ OpenGL state: the results are applied on the render thread in
 `apply_bson!`.
 """
 function load_bson(kab, state_file::String)
-    θ = BSON.load(state_file)
+    θ = load_checkpoint(state_file)
     gaussians = GaussianModel(kab)
     set_from_bson!(gaussians, θ[:gaussians])
     # H2D copies above run on this task's stream: make sure they are

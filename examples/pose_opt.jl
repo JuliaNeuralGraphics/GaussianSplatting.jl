@@ -14,8 +14,7 @@ function main(dataset_path::String, state_path::String; scale::Int)
     kab = GSP.gpu_backend()
     @info "Using `$kab` GPU backend."
 
-    dataset = GSP.ColmapDataset(kab, dataset_path; scale,
-        train_test_split=1, permute=false)
+    dataset = GSP.ColmapDataset(kab, dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
     target_camera = deepcopy(camera)
 

@@ -11,6 +11,12 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
+    # Composite each train render over a random background instead of the
+    # black one used at evaluation. Helps opacities escape the background
+    # color, but the reference implementation keeps it off & the published
+    # numbers are without it.
+    random_background::Bool = true
+
     # Depth supervision with monocular priors (see `depth_supervision.jl`).
     # Requires depth maps next to the dataset images, an init point cloud and a `:rgbd` rasterizer.
     use_depth_loss::Bool = true
@@ -73,6 +79,15 @@ memory_usage(opt::NU.Adam) =
 mse(x, y) = mean((x .- y).^2)
 
 psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))
+
+"""
+Round a render to the 8-bit sRGB grid the ground truth lives on.
+
+The reference implementation scores PNGs written to disk, so its published
+numbers include this rounding; targets here are already 8-bit, only the render
+is continuous.
+"""
+quantize8(x) = floor.(clamp.(x, 0f0, 1f0) .* 255f0 .+ 0.5f0) .* (1f0 / 255f0)
 
 within_gradient(x) = false
 CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
