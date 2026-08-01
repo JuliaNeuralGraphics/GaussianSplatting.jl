@@ -2,6 +2,7 @@
 include("ui_state.jl")
 include("render_state.jl")
 include("worker.jl")
+include("frustums.jl")
 include("camera_path.jl")
 include("capture_mode.jl")
 
@@ -145,7 +146,10 @@ end
 mutable struct GSGUI
     context::NGL.Context
     screen::Screen
-    frustum::NGL.Frustum
+    frustum_renderer::FrustumRenderer
+    # Dataset view frustums, built on first draw & dropped with the scene
+    # (see `dataset_frustums!` / `invalidate_frustums!`).
+    camera_frustums::Maybe{CameraFrustums}
     render_state::RenderState
     ui_state::UIState
     control_settings::ControlSettings
@@ -225,7 +229,7 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
 
     trainer = nothing
     gsgui = GSGUI(
-        context, MainScreen, NGL.Frustum(), render_state, ui_state,
+        context, MainScreen, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
         gaussians, rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
@@ -252,7 +256,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
 
     enable_docking!()
 
-    dataset = ColmapDataset(dataset_path; scale, holdout=0)
+    # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
+    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
@@ -288,7 +293,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     worker.n_gaussians[] = length(gaussians)
 
     gsgui = GSGUI(
-        context, MainScreen, NGL.Frustum(), render_state, ui_state,
+        context, MainScreen, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
         gaussians, gui_rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
@@ -310,7 +315,8 @@ function load_dataset(kab, dataset_path::String;
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
     use_normal_loss::Bool = false,
 )
-    dataset = ColmapDataset(dataset_path; scale, holdout=0)
+    # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
+    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
@@ -338,6 +344,7 @@ end
 # Replace the current scene, keeping the GL context & render surface.
 # UI-side part runs here; the GPU state is installed by the worker.
 function apply_dataset!(gui::GSGUI, loaded)
+    invalidate_frustums!(gui)
     gui.camera = loaded.camera
     # Yaw rotates around the estimated scene up: keeps the horizon level.
     gui.control_settings.up_vec = loaded.up_vec
@@ -371,6 +378,7 @@ end
 
 # Replace the current scene with a loaded checkpoint (viewer-only).
 function apply_bson!(gui::GSGUI, loaded)
+    invalidate_frustums!(gui)
     # Keep the current render resolution.
     camera = loaded.camera
     set_resolution!(camera; resolution(gui.camera)...)
@@ -411,6 +419,7 @@ UI-side part runs here; the GPU state is released by the worker
 (`handle_close_scene!`), leaving an empty scene behind.
 """
 function close_scene!(gui::GSGUI)
+    invalidate_frustums!(gui)
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = 0
     gui.ui_state.is_mcmc = false
@@ -678,17 +687,7 @@ function loop!(gui::GSGUI)
     # Draw gaussians & other OpenGL objects into the `Scene` window.
     scene_window!(gui, dockspace_id) do
         if !viewer_only(gui) && gui.ui_state.draw_cameras[]
-            P = NGL.perspective(gui.camera)
-            L = NGL.look_at(gui.camera)
-
-            dataset = gui.trainer.dataset
-            for view_id in 1:length(dataset)
-                camera = dataset.train_cameras[view_id]
-                camera_perspective =
-                    NGL.perspective(camera; near=0.1f0, far=0.2f0) *
-                    NGL.look_at(camera)
-                NGL.draw(gui.frustum, camera_perspective, P, L)
-            end
+            draw_dataset_frustums!(gui)
         end
     end
 
@@ -846,6 +845,65 @@ function draw_scene!(extra_draws::Function, gui::GSGUI)
     return
 end
 
+"""
+World-space depth of the drawn camera frustums: a fraction of the scene
+extent (so they read the same on any dataset), times the `Camera Size` slider.
+"""
+function frustum_scale(gui::GSGUI)
+    base = viewer_only(gui) ?
+        0.2f0 : 0.05f0 * gui.trainer.dataset.camera_extent
+    return base * gui.ui_state.camera_size[]
+end
+
+"""
+Frustums of the current dataset's views, built (and their thumbnails
+uploaded) on first use, so a dataset whose cameras are never drawn costs
+no device memory.
+"""
+function dataset_frustums!(gui::GSGUI)
+    frustums = gui.camera_frustums
+    frustums ≡ nothing || return frustums
+    return gui.camera_frustums = CameraFrustums(gui.trainer.dataset)
+end
+
+"""
+Drop the dataset frustums & the device memory their thumbnails hold. Must
+run on the render thread; call whenever the scene is replaced or closed.
+"""
+function invalidate_frustums!(gui::GSGUI)
+    frustums = gui.camera_frustums
+    frustums ≡ nothing && return
+    free!(frustums)
+    gui.camera_frustums = nothing
+    return
+end
+
+"""
+Overlay the dataset views: a wireframe frustum per training camera, with
+the view's image on the frustum's image plane. The currently selected view
+(the `Camera view` list) is highlighted.
+"""
+function draw_dataset_frustums!(gui::GSGUI)
+    ui_state = gui.ui_state
+    frustums = dataset_frustums!(gui)
+
+    P = NGL.perspective(gui.camera)
+    L = NGL.look_at(gui.camera)
+    scale = frustum_scale(gui)
+
+    if ui_state.draw_camera_images[]
+        draw_images(
+            gui.frustum_renderer, frustums.poses, frustums.thumbnails, P, L;
+            scale, eye=view_pos(gui.camera),
+            opacity=ui_state.camera_image_opacity[])
+    end
+
+    draw_wireframes(gui.frustum_renderer, frustums.poses, P, L;
+        scale, color=SVector{4, Float32}(0.35f0, 0.65f0, 1f0, 1f0),
+        highlight=Int(ui_state.selected_view[]) + 1)
+    return
+end
+
 function handle_ui!(gui::GSGUI; frame_time)
     w = gui.worker
     if CImGui.Begin("GaussianSplatting")
@@ -951,6 +1009,9 @@ function handle_ui!(gui::GSGUI; frame_time)
             end
             CImGui.TableNextColumn()
             CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+            CImGui.SetItemTooltip(
+                "Overlay the dataset views as camera frustums, " *
+                "each showing the image it was trained on.")
 
             # Row 3.
             CImGui.TableNextRow()
@@ -959,8 +1020,22 @@ function handle_ui!(gui::GSGUI; frame_time)
                 w.densify[] = gui.ui_state.densify[]
             end
             CImGui.TableNextColumn()
+            gui.ui_state.draw_cameras[] || disabled_begin()
+            CImGui.Checkbox("Camera Images", gui.ui_state.draw_camera_images)
+            gui.ui_state.draw_cameras[] || disabled_end()
 
             CImGui.EndTable()
+
+            if gui.ui_state.draw_cameras[]
+                CImGui.PushItemWidth(-100)
+                CImGui.SliderFloat("Camera Size",
+                    gui.ui_state.camera_size, 0.2f0, 5f0, "%.2fx")
+                if gui.ui_state.draw_camera_images[]
+                    CImGui.PushItemWidth(-100)
+                    CImGui.SliderFloat("Image Opacity",
+                        gui.ui_state.camera_image_opacity, 0.1f0, 1f0, "%.2f")
+                end
+            end
 
             if gui.ui_state.is_mcmc
                 # Benign cross-thread write: `max_cap` is a

@@ -164,7 +164,8 @@ function loop!(capture_mode::CaptureMode; gui)
         if !capture_mode.is_rendering
             P = NGL.perspective(gui.camera)
             L = NGL.look_at(gui.camera)
-            NGL.draw(capture_mode.camera_path, P, L; frustum=gui.frustum)
+            NGL.draw(capture_mode.camera_path, P, L;
+                renderer=gui.frustum_renderer, scale=frustum_scale(gui))
         end
     end
 

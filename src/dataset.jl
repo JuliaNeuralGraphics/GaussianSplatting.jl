@@ -1,4 +1,9 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+# Width the view thumbnails are downscaled to (see `with_thumbnails`):
+# enough to recognize a photo at the size a camera frustum takes up on
+# screen, ~50 KiB of device memory per view once uploaded.
+const THUMBNAIL_WIDTH = 128
+
 struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
     points::Matrix{Float32}
     colors::Matrix{Float32}
@@ -7,6 +12,11 @@ struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
     train_image_filenames::Vector{String}
     train_cameras::Vector{Camera}
     train_images::I
+    # Downscaled train images for display (the GUI maps them onto the
+    # camera frustums); empty unless the dataset was loaded
+    # `with_thumbnails`. Each is `(channels, width, height)`, like the
+    # slices of `train_images`.
+    train_thumbnails::Vector{Array{UInt8, 3}}
 
     # Monocular depth priors for depth supervision (`nothing` when an image has no prior)
     # + their encoding quantization steps.
@@ -26,6 +36,7 @@ end
 
 function ColmapDataset(dataset_dir::String;
     scale::Int = 1, holdout::Int = 8, max_extent::Float32 = Inf32,
+    with_thumbnails::Bool = false,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -33,7 +44,7 @@ function ColmapDataset(dataset_dir::String;
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(;
         cameras_file, images_file, points_file,
-        scale, images_dir, holdout, max_extent)
+        scale, images_dir, holdout, max_extent, with_thumbnails)
 end
 
 """
@@ -44,11 +55,14 @@ end
 - `max_extent`: upper bound on the camera extent, which scales the position
   learning rate & the densification size thresholds. The reference
   implementation does not clamp it (pass `Inf32` to match).
+- `with_thumbnails`: also downscale every train image to `THUMBNAIL_WIDTH`
+  (`train_thumbnails`). Done here, while the image is already decoded, so
+  the GUI does not have to resize anything to display the views.
 """
 function ColmapDataset(;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, holdout::Int = 8,
-    max_extent::Float32 = Inf32,
+    max_extent::Float32 = Inf32, with_thumbnails::Bool = false,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
     depths_dir = joinpath(dirname(images_dir), "depths")
@@ -72,6 +86,9 @@ function ColmapDataset(;
 
     # NOTE: no distortion.
     intrinsics = NU.CameraIntrinsics(nothing, new_focal, principal, new_resolution)
+    @info "Dataset has following resolution: ($(Int(resolution[1])) x $(Int(resolution[2]))) (width x height)."
+    @info "Scaled dataset resolution to multiple of 16: ($(Int(new_resolution[1])) x $(Int(new_resolution[2]))) (width x height)."
+    with_thumbnails && @info "Creating thumbnails for the dataset, `width = $THUMBNAIL_WIDTH`."
 
     # Load cameras and images & depths priors if they exist.
     camera_centers = SVector{3, Float32}[]
@@ -82,6 +99,7 @@ function ColmapDataset(;
 
     image_filenames = String[]
     images_list = Array{UInt8, 3}[]
+    thumbnails_list = Array{UInt8, 3}[]
     for (id, img) in images
         image_path = joinpath(images_dir, img.name)
         if !isfile(image_path)
@@ -105,6 +123,9 @@ function ColmapDataset(;
         raw = permutedims(raw, (1, 3, 2))
         push!(images_list, raw)
 
+        with_thumbnails &&
+            push!(thumbnails_list, thumbnail(image, THUMBNAIL_WIDTH))
+
         if has_depth_dir
             depth_path = joinpath(depths_dir, "$(splitext(img.name)[1]).png")
             depth, qstep = load_depth_prior(depth_path, Int(new_resolution[1]), Int(new_resolution[2]))
@@ -116,6 +137,7 @@ function ColmapDataset(;
             push!(depth_qsteps, 0f0)
         end
     end
+    @info "Loaded `$(length(images_list))` images."
     images = cat(images_list...; dims=4)
 
     # Compute cameras extent which is used for scaling learning rate and densification.
@@ -143,6 +165,8 @@ function ColmapDataset(;
 
     train_cameras = cameras[train_ids]
     train_images = images[:, :, :, train_ids]
+    train_thumbnails = with_thumbnails ?
+        thumbnails_list[train_ids] : Array{UInt8, 3}[]
     train_image_filenames = image_filenames[train_ids]
     train_depths = depth_maps[train_ids]
     train_depth_qsteps = depth_qsteps[train_ids]
@@ -158,11 +182,26 @@ function ColmapDataset(;
         Float32.(points.points_3d),
         Float32.(points.points_colors) .* (1f0 / 255f0),
         scales,
-        train_image_filenames, train_cameras, train_images,
+        train_image_filenames, train_cameras, train_images, train_thumbnails,
         train_depths, train_depth_qsteps, depth_priors_count > 0,
         has_depth_dir ? depths_dir : nothing,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
+end
+
+"""
+Downscale a loaded (`height × width`) image to at most `max_width` pixels
+wide, keeping its aspect ratio, and return it in the same
+`(channels, width, height)` `UInt8` layout as `train_images`.
+"""
+function thumbnail(image::AbstractMatrix, max_width::Int)
+    height, width = size(image)
+    if width > max_width
+        scale = max_width / width
+        image = imresize(image, (max(1, round(Int, height * scale)), max_width))
+    end
+    raw = floor.(UInt8, clamp.(Float32.(channelview(image)), 0f0, 1f0) .* 255f0)
+    return permutedims(raw, (1, 3, 2))
 end
 
 function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)

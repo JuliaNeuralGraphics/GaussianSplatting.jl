@@ -7,7 +7,12 @@ Base.@kwdef mutable struct UIState
 
     loss::Float32 = 0f0
 
+    # Dataset camera overlay (see `draw_dataset_frustums!`).
     draw_cameras::Ref{Bool} = Ref(false)
+    draw_camera_images::Ref{Bool} = Ref(true)
+    # Frustum size, relative to the scene extent (see `frustum_scale`).
+    camera_size::Ref{Float32} = Ref(1f0)
+    camera_image_opacity::Ref{Float32} = Ref(1f0)
     selected_view::Ref{Int32} = Ref{Int32}(0)
 
     sh_degree::Ref{Int32} = Ref{Int32}(-1) # -1 means use value from the model

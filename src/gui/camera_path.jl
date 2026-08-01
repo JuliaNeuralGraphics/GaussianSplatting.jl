@@ -4,7 +4,7 @@ Base.@kwdef mutable struct CameraPath
     current_time::Float32 = 0f0
     current_step::Int64 = 0
 
-    frustum_projections::Vector{SMatrix{4, 4, Float32, 16}} = []
+    frustums::Vector{FrustumPose} = []
     gui_lines::Vector{NGL.Line} = []
     line_program::NGL.ShaderProgram = NGL.get_program(NGL.Line)
 end
@@ -12,8 +12,7 @@ end
 function Base.push!(p::CameraPath, camera::Camera)
     new_keyframe = NU.CameraKeyframe(camera)
     push!(p.keyframes, new_keyframe)
-    push!(p.frustum_projections,
-        NGL.perspective(camera; near=0.1f0, far=0.2f0) * NGL.look_at(camera))
+    push!(p.frustums, FrustumPose(camera))
     length(p.keyframes) == 1 && return
 
     from = p.keyframes[end - 1].t
@@ -53,7 +52,7 @@ function Base.empty!(p::CameraPath)
 
     NGL.delete!.(p.gui_lines; with_program=false)
     empty!(p.keyframes)
-    empty!(p.frustum_projections)
+    empty!(p.frustums)
     empty!(p.gui_lines)
 end
 
@@ -69,14 +68,15 @@ function current_pose(p::CameraPath)
     NU.spline(t - floor(t), p[idx - 1], p[idx], p[idx + 1], p[idx + 2])
 end
 
-function NGL.draw(p::CameraPath, P, L; frustum::NGL.Frustum)
+function NGL.draw(p::CameraPath, P, L;
+    renderer::FrustumRenderer, scale::Float32,
+)
     isempty(p.gui_lines) && return
     for l in p.gui_lines
         NGL.draw(l, P, L)
     end
 
-    # Draw camera poses.
-    for fp in p.frustum_projections
-        NGL.draw(frustum, fp, P, L)
-    end
+    # Draw keyframe poses, in the color of the path lines they connect.
+    draw_wireframes(renderer, p.frustums, P, L;
+        scale, color=SVector{4, Float32}(0.8f0, 0.5f0, 0.1f0, 1f0))
 end
