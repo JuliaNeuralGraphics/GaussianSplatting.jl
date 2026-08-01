@@ -4,12 +4,12 @@ import ProgressMeter
 function benchmark(kab, dataset_path::String; scale::Int)
     @info "Using `$kab` GPU backend."
 
-    dataset = GSP.ColmapDataset(kab, dataset_path; scale, holdout=0)
+    dataset = GSP.ColmapDataset(dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
     @info "Dataset resolution: $(Int.(camera.intrinsics.resolution))"
 
     opt_params = GSP.OptimizationParams()
-    gaussians = GSP.GaussianModel(
+    gaussians = GSP.GaussianModel(kab,
         dataset.points, dataset.colors, dataset.scales)
     rasterizer = GSP.GaussianRasterizer(kab, camera;
         mode=:rgb)

@@ -1,12 +1,8 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-struct ColmapDataset{
-    P <: AbstractMatrix{Float32},
-    C <: AbstractMatrix{Float32},
-    I <: AbstractArray{UInt8, 4},
-}
-    points::P
-    colors::C
-    scales::P
+struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
+    points::Matrix{Float32}
+    colors::Matrix{Float32}
+    scales::Matrix{Float32}
 
     train_image_filenames::Vector{String}
     train_cameras::Vector{Camera}
@@ -28,14 +24,14 @@ struct ColmapDataset{
     camera_extent::Float32
 end
 
-function ColmapDataset(kab, dataset_dir::String;
+function ColmapDataset(dataset_dir::String;
     scale::Int = 1, holdout::Int = 8, max_extent::Float32 = Inf32,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
     points_file = joinpath(dataset_dir, "sparse", "0", "points3D.bin")
     images_dir = joinpath(dataset_dir, "images")
-    ColmapDataset(kab;
+    ColmapDataset(;
         cameras_file, images_file, points_file,
         scale, images_dir, holdout, max_extent)
 end
@@ -49,7 +45,7 @@ end
   learning rate & the densification size thresholds. The reference
   implementation does not clamp it (pass `Inf32` to match).
 """
-function ColmapDataset(kab;
+function ColmapDataset(;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, holdout::Int = 8,
     max_extent::Float32 = Inf32,
@@ -159,10 +155,9 @@ function ColmapDataset(kab;
         @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."
 
     ColmapDataset(
-        # TODO why move to GPU?
-        adapt(kab, Float32.(points.points_3d)),
-        adapt(kab, Float32.(points.points_colors) .* (1f0 / 255f0)),
-        adapt(kab, scales),
+        Float32.(points.points_3d),
+        Float32.(points.points_colors) .* (1f0 / 255f0),
+        scales,
         train_image_filenames, train_cameras, train_images,
         train_depths, train_depth_qsteps, depth_priors_count > 0,
         has_depth_dir ? depths_dir : nothing,
@@ -186,16 +181,6 @@ function compute_scales(xyz::Matrix{Float32}; point_size::Float32 = 1f0)
 end
 
 Base.length(d::ColmapDataset) = length(d.train_cameras)
-
-memory_usage(d::ColmapDataset) =
-    memory_usage(d.points) + memory_usage(d.colors) + memory_usage(d.scales)
-
-function KA.unsafe_free!(d::ColmapDataset)
-    KA.unsafe_free!(d.points)
-    KA.unsafe_free!(d.colors)
-    KA.unsafe_free!(d.scales)
-    return
-end
 
 function get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol)
     image = if set == :train

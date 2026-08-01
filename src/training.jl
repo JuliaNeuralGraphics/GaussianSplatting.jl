@@ -85,7 +85,6 @@ memory_usage(trainer::Trainer) =
     sum(memory_usage, values(trainer.optimizers); init=0) +
     Int(sizeof(trainer.cache)) +
     memory_usage(trainer.strategy) +
-    memory_usage(trainer.dataset) +
     memory_usage(trainer.rast) +
     memory_usage(trainer.bilateral_grid)
 
@@ -93,7 +92,6 @@ function KA.unsafe_free!(trainer::Trainer)
     foreach(free_optimizer!, values(trainer.optimizers))
     GPUArrays.unsafe_free!(trainer.cache)
     KA.unsafe_free!(trainer.strategy)
-    KA.unsafe_free!(trainer.dataset)
     KA.unsafe_free!(trainer.rast)
     isnothing(trainer.bilateral_grid) ||
         KA.unsafe_free!(trainer.bilateral_grid)
@@ -124,7 +122,7 @@ function setup_depth_supervision(
         @warn "Depth supervision enabled, but no depth priors were found, disabling."
         return disabled
     end
-    points = Array(dataset.points)
+    points = dataset.points
     if isempty(points)
         @warn "Depth supervision requires an init point cloud to fit anchors, disabling."
         return disabled

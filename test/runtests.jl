@@ -631,7 +631,7 @@ end
     colors = adapt(kab, rand(Float32, 3, n_points))
     scales = adapt(kab, repeat(Float32[log(0.2f0), log(0.2f0), log(0.01f0)], 1, n_points))
 
-    gaussians = GaussianSplatting.GaussianModel(
+    gaussians = GaussianSplatting.GaussianModel(kab,
         points, colors, scales; max_sh_degree=0, isotropic=false)
     gaussians.opacities .= 5f0 # ≈ 0.993 after the sigmoid.
 

@@ -14,7 +14,7 @@ function main(dataset_path::String, state_path::String; scale::Int)
     kab = GSP.gpu_backend()
     @info "Using `$kab` GPU backend."
 
-    dataset = GSP.ColmapDataset(kab, dataset_path; scale, holdout=0)
+    dataset = GSP.ColmapDataset(dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
     target_camera = deepcopy(camera)
 
@@ -29,7 +29,7 @@ function main(dataset_path::String, state_path::String; scale::Int)
     lr_scheduler = GSP.lr_exp_scheduler(lr_start, lr_end, n_steps)
 
     opt_params = GSP.OptimizationParams()
-    gaussians = GSP.GaussianModel(
+    gaussians = GSP.GaussianModel(kab,
         dataset.points, dataset.colors, dataset.scales)
     rasterizer = GSP.GaussianRasterizer(kab, camera;
         mode=:rgb)

@@ -123,10 +123,10 @@ function main(kab, dataset_path::String;
     seed ≡ nothing || Random.seed!(seed)
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(kab, dataset_path; scale)
+    dataset = ColmapDataset(dataset_path; scale)
     camera = dataset.test_cameras[1]
 
-    gaussians = GaussianModel(
+    gaussians = GaussianModel(kab,
         dataset.points, dataset.colors, dataset.scales;
         max_sh_degree=3, isotropic=false)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -273,7 +273,7 @@ function benchmark(kab, dataset_path::String;
     # The dataset is read-only during training: load once, share across runs.
     # `max_extent=Inf32`: the reference implementation does not clamp it &
     # the extent scales the position LR and the densification thresholds.
-    dataset = ColmapDataset(kab, dataset_path; scale, holdout, max_extent=Inf32)
+    dataset = ColmapDataset(dataset_path; scale, holdout, max_extent=Inf32)
     isempty(dataset.test_cameras) && throw(ArgumentError(
         "Evaluation needs a test split, but `holdout=$holdout` left none."))
     camera = dataset.test_cameras[1]
@@ -291,7 +291,7 @@ function benchmark(kab, dataset_path::String;
         @info "Benchmarking `$(config.name)`..."
         Random.seed!(seed)
 
-        gaussians = GaussianModel(
+        gaussians = GaussianModel(kab,
             dataset.points, dataset.colors, dataset.scales;
             max_sh_degree=3, isotropic=false)
         rasterizer = GaussianRasterizer(kab, camera;

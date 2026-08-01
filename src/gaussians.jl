@@ -17,7 +17,9 @@ mutable struct GaussianModel{
     max_sh_degree::Int
 end
 
-function GaussianModel(
+# Initialize a model on `kab` from a point cloud, which may live on any
+# backend (a dataset's cloud is a host array).
+function GaussianModel(kab,
     points::AbstractMatrix{Float32}, colors::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32};
     max_sh_degree::Int = 3, isotropic::Bool = false, use_ids::Bool = false,
@@ -25,11 +27,10 @@ function GaussianModel(
     0 ≤ max_sh_degree ≤ 3 || throw(ArgumentError(
         "`max_sh_degree=$max_sh_degree` must be in `[0, 3]` range."))
 
-    kab = get_backend(points)
     n = size(points, 2)
     sh_degree = 0
 
-    colors = rgb_2_sh.(colors)
+    colors = adapt(kab, rgb_2_sh.(colors))
     n_features = (max_sh_degree + 1)^2
     features = KA.zeros(kab, Float32, (3, n_features, n))
     features[:, 1, :] .= colors
@@ -48,18 +49,22 @@ function GaussianModel(
     # so it must not alias the caller's `points`/`scales` (e.g. a dataset's
     # point cloud, which outlives the model).
     GaussianModel(
-        copy(points), features_dc, features_rest,
-        isotropic ? mean(scales; dims=1) : copy(scales),
+        adopt(kab, points), features_dc, features_rest,
+        isotropic ? mean(adapt(kab, scales); dims=1) : adopt(kab, scales),
         rotations, opacities, ids,
         sh_degree, max_sh_degree)
 end
 
 function GaussianModel(kab; kwargs...)
-    points = KA.allocate(kab, Float32, (3, 0))
-    scales = KA.allocate(kab, Float32, (3, 0))
-    colors = KA.allocate(kab, Float32, (3, 0))
-    GaussianModel(points, colors, scales; kwargs...)
+    empty = Matrix{Float32}(undef, 3, 0)
+    GaussianModel(kab, empty, empty, empty; kwargs...)
 end
+
+"""
+Move `x` onto `kab`, always returning an array the caller does not share:
+`adapt` is the identity when `x` already lives on `kab`, which would alias it.
+"""
+adopt(kab, x::AbstractArray) = (y = adapt(kab, x); y ≡ x ? copy(x) : y)
 
 KernelAbstractions.get_backend(gs::GaussianModel) = get_backend(gs.points)
 

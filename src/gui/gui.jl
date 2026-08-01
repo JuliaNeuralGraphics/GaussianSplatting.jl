@@ -252,12 +252,12 @@ function GSGUI(kab, dataset_path::String, scale::Int;
 
     enable_docking!()
 
-    dataset = ColmapDataset(kab, dataset_path; scale, holdout=0)
+    dataset = ColmapDataset(dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss)
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+    gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
         mode=training_rasterizer_mode(opt_params))
@@ -310,12 +310,12 @@ function load_dataset(kab, dataset_path::String;
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
     use_normal_loss::Bool = false,
 )
-    dataset = ColmapDataset(kab, dataset_path; scale, holdout=0)
+    dataset = ColmapDataset(dataset_path; scale, holdout=0)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss)
-    gaussians = GaussianModel(dataset.points, dataset.colors, dataset.scales;
+    gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree=3)
     rasterizer = GaussianRasterizer(kab, camera;
         mode=training_rasterizer_mode(opt_params))
