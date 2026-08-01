@@ -125,8 +125,13 @@ function ColmapDataset(kab;
     # Compute cameras extent which is used for scaling learning rate and densification.
     scene_center = sum(camera_centers) ./ length(camera_centers)
     scene_diagonal = maximum(map(c -> norm(c - scene_center), camera_centers))
-    camera_extent::Float32 = min(max_extent, scene_diagonal * 1.1f0)
-    # TODO resize scene into unit box?
+    scene_radius::Float32 = scene_diagonal * 1.1f0
+    camera_extent::Float32 = min(max_extent, scene_radius)
+
+    @info "Scene extent: $(round(camera_extent; digits=3))" * (
+        camera_extent < scene_radius ?
+            " (clamped from $(round(scene_radius; digits=3)) by `max_extent`)." :
+            ".")
 
     scales = compute_scales(points.points_3d)
 
