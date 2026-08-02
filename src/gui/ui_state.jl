@@ -29,6 +29,10 @@ Base.@kwdef mutable struct UIState
     controller_mode::Ref{Int32} = Ref{Int32}(0)
     controller_modes::Vector{String} = ["FPV", "Orbiting"]
 
+    # Whether the `Capture` tab is the open one: capture mode is active
+    # (camera path drawn & editable). Refreshed every frame by `handle_ui!`.
+    capture_tab::Bool = false
+
     # `Open Dataset` modal.
     open_dataset_popup::Bool = false
     dataset_scale::Ref{Int32} = Ref{Int32}(1)

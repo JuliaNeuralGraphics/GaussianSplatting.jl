@@ -92,6 +92,12 @@ function is_mouse_in_ui()
     CImGui.IsMousePosValid() && unsafe_load(CImGui.GetIO().WantCaptureMouse)
 end
 
+# `true` while an ImGui widget consumes key presses (e.g. a focused text
+# input): scene shortcuts must not fire on what the user is typing.
+function is_keyboard_in_ui()
+    unsafe_load(CImGui.GetIO().WantCaptureKeyboard)
+end
+
 function enable_docking!()
     io = CImGui.GetIO()
     io.ConfigFlags = unsafe_load(io.ConfigFlags) | CImGui.ImGuiConfigFlags_DockingEnable
@@ -135,17 +141,11 @@ function NU.CameraKeyframe(c::Camera)
     NU.CameraKeyframe(QuaternionF32(q.w, q.x, q.y, q.z), t)
 end
 
-@enum Screen begin
-    MainScreen
-    CaptureScreen
-end
-
 # Fields are non-concrete so that a dataset can be loaded at runtime
 # (`trainer` goes from `nothing` to a `Trainer`, gaussians & rasterizer
 # are replaced): see `load_dataset!`.
 mutable struct GSGUI
     context::NGL.Context
-    screen::Screen
     frustum_renderer::FrustumRenderer
     # Dataset view frustums, built on first draw & dropped with the scene
     # (see `dataset_frustums!` / `invalidate_frustums!`).
@@ -229,7 +229,7 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
 
     trainer = nothing
     gsgui = GSGUI(
-        context, MainScreen, FrustumRenderer(), nothing, render_state, ui_state,
+        context, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
         gaussians, rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
@@ -293,7 +293,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     worker.n_gaussians[] = length(gaussians)
 
     gsgui = GSGUI(
-        context, MainScreen, FrustumRenderer(), nothing, render_state, ui_state,
+        context, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
         gaussians, gui_rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
@@ -345,6 +345,8 @@ end
 # UI-side part runs here; the GPU state is installed by the worker.
 function apply_dataset!(gui::GSGUI, loaded)
     invalidate_frustums!(gui)
+    # The camera path is in the old scene's coordinates.
+    reset!(gui.capture_mode)
     gui.camera = loaded.camera
     # Yaw rotates around the estimated scene up: keeps the horizon level.
     gui.control_settings.up_vec = loaded.up_vec
@@ -391,6 +393,8 @@ end
 # `loaded.camera` is `nothing` for formats that store no camera (PLY).
 function apply_model!(gui::GSGUI, loaded)
     invalidate_frustums!(gui)
+    # The camera path is in the old scene's coordinates.
+    reset!(gui.capture_mode)
     camera = loaded.camera
     if camera ≢ nothing
         # Keep the current render resolution.
@@ -435,6 +439,8 @@ UI-side part runs here; the GPU state is released by the worker
 """
 function close_scene!(gui::GSGUI)
     invalidate_frustums!(gui)
+    # The camera path is in the old scene's coordinates.
+    reset!(gui.capture_mode)
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = 0
     gui.ui_state.is_mcmc = false
@@ -663,15 +669,12 @@ function launch!(gui::GSGUI)
     start_worker!(gui)
     try
         NGL.render_loop(gui.context) do
-            if gui.screen == MainScreen
-                loop!(gui)
-            else gui.screen == CaptureScreen
-                loop!(gui.capture_mode; gui)
-            end
+            loop!(gui)
             return true
         end
     finally
         stop_worker!(gui.worker)
+        close_video!(gui.capture_mode)
     end
 end
 
@@ -687,7 +690,12 @@ function loop!(gui::GSGUI)
     # Worker results: stats, errors, orbit-target picks.
     gui.ui_state.loss = w.loss[]
     err = take_error!(w)
-    err ≡ nothing || (gui.ui_state.worker_error = err)
+    if err ≢ nothing
+        gui.ui_state.worker_error = err
+        # The frame a capture waits for may be the one that failed:
+        # stop it instead of leaving the UI waiting forever.
+        stop_capture!(gui.capture_mode)
+    end
     target = take_pick_result!(w)
     target ≡ nothing || (gui.control_settings.orbiting_target = target)
 
@@ -696,14 +704,25 @@ function loop!(gui::GSGUI)
     mouse_in_ui = is_mouse_in_ui() && !gui.ui_state.scene_hovered
 
     handle_ui!(gui; frame_time)
-    if !mouse_in_ui
+
+    # The camera follows the path while capturing: no manual control.
+    capture = gui.capture_mode
+    if !capture.is_rendering && !mouse_in_ui
         controller_id = gui.ui_state.controller_mode[]
 
         gui.render_state.need_render |= handle_keyboard!(
             gui.control_settings, gui.camera; frame_time, controller_id)
         gui.render_state.need_render |= handle_mouse!(
             gui.control_settings, gui.camera; controller_id)
+
+        if gui.ui_state.capture_tab && !is_keyboard_in_ui() &&
+            NGL.is_key_pressed(iglib.ImGuiKey_V; repeat=false)
+            push!(capture.camera_path, deepcopy(gui.camera))
+        end
     end
+    # Publishes the next path pose itself, so it runs before the
+    # `need_render` check below.
+    poll_capture!(capture, gui)
 
     # Publish the latest camera & render settings: the worker
     # rasterizes in the background and hands back a host frame,
@@ -717,9 +736,17 @@ function loop!(gui::GSGUI)
     NGL.set_clear_color(0.2, 0.2, 0.2, 1.0)
 
     # Draw gaussians & other OpenGL objects into the `Scene` window.
-    scene_window!(gui, dockspace_id) do
+    # The render resolution is locked while capturing:
+    # the frame size must keep matching the opened video stream.
+    scene_window!(gui, dockspace_id; allow_resize=!capture.is_rendering) do
         if !viewer_only(gui) && gui.ui_state.draw_cameras[]
             draw_dataset_frustums!(gui)
+        end
+        # Draw camera path if in capture mode.
+        if gui.ui_state.capture_tab && !capture.is_rendering
+            NGL.draw(capture.camera_path,
+                NGL.perspective(gui.camera), NGL.look_at(gui.camera);
+                renderer=gui.frustum_renderer, scale=frustum_scale(gui))
         end
     end
 
@@ -746,7 +773,7 @@ framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
 """
 function scene_window!(
     extra_draws::Function, gui::GSGUI, dockspace_id;
-    force_render::Bool = false, allow_resize::Bool = true,
+    allow_resize::Bool = true,
 )
     CImGui.SetNextWindowDockID(dockspace_id, CImGui.ImGuiCond_FirstUseEver)
     CImGui.PushStyleVar(
@@ -765,13 +792,7 @@ function scene_window!(
         end
     end
 
-    # if force_render
-    #     # Capture mode: synchronous render on the GUI thread
-    #     # (the worker is expected to be paused).
-    #     render!(gui)
-    # else
     upload_frame!(gui)
-    # end
 
     if visible
         draw_scene!(extra_draws, gui)
@@ -938,6 +959,8 @@ end
 
 function handle_ui!(gui::GSGUI; frame_time)
     w = gui.worker
+    gui.ui_state.capture_tab = false
+
     if CImGui.Begin("GaussianSplatting")
         (; width, height) = resolution(gui.camera)
         CImGui.Text("Render Resolution: $width x $height")
@@ -953,194 +976,171 @@ function handle_ui!(gui::GSGUI; frame_time)
         isempty(gui.ui_state.worker_error) || CImGui.TextColored(
             (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
 
-        if CImGui.Checkbox("Render", gui.ui_state.render)
-            w.render[] = gui.ui_state.render[]
-            notify(w.wakeup)
-        end
-
-        CImGui.PushItemWidth(-100)
-        if CImGui.Combo("Controller", gui.ui_state.controller_mode,
-            gui.ui_state.controller_modes,
-        ) && gui.ui_state.controller_mode[] == 1
-            # Entering orbit mode: place the target in front of the
-            # camera, at a scene-sized distance.
-            d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
-            gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
-        end
-
-        # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
-        CImGui.BeginTable("##up-vec-buttons-table", 2)
-        CImGui.TableNextRow()
-        CImGui.TableNextColumn()
-        if CImGui.Button("Set Up From View", CImGui.ImVec2(-1, 0))
-            gui.control_settings.up_vec = -view_up(gui.camera)
-        end
-        CImGui.SetItemTooltip(
-            "Use the current camera up as the scene up: " *
-            "yaw will rotate around it.")
-        CImGui.TableNextColumn()
-        if CImGui.Button("Level Horizon", CImGui.ImVec2(-1, 0))
-            level_horizon!(gui.camera, gui.control_settings.up_vec)
-            gui.render_state.need_render = true
-        end
-        CImGui.SetItemTooltip(
-            "Remove accumulated roll: align the camera with the scene up.")
-        CImGui.EndTable()
-
-        has_dataset = !viewer_only(gui)
-        has_dataset || disabled_begin()
-        if CImGui.Button("Reset Up From Dataset", CImGui.ImVec2(-1, 0))
-            gui.control_settings.up_vec =
-                estimate_up_vec(gui.trainer.dataset.train_cameras)
-        end
-        CImGui.SetItemTooltip(
-            "Re-estimate the scene up from the dataset cameras, " *
-            "discarding manual calibration.")
-        has_dataset || disabled_end()
-
-        CImGui.PushItemWidth(-100)
-        max_sh_degree = gui.ui_state.max_sh_degree
-        if max_sh_degree > 0 && CImGui.SliderInt(
-            "SH degree", gui.ui_state.sh_degree,
-            -1, max_sh_degree, "%d / $max_sh_degree",
-        )
-            gui.render_state.need_render = true
-        end
-
-        # GUI rasterizers always render in `:rgbd` mode.
-        CImGui.PushItemWidth(-100)
-        if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-            gui.ui_state.render_modes,
-        )
-            gui.render_state.need_render = true
-        end
-
-        if !viewer_only(gui)
-            CImGui.Separator()
-
-            CImGui.BeginTable("##checkbox-table", 2)
-
-            # Row 1.
-            CImGui.TableNextRow()
-            CImGui.TableNextColumn()
-            CImGui.Text("Steps: $(w.step[])")
-            CImGui.TableNextColumn()
-            CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
-
-            # Row 2.
-            CImGui.TableNextRow()
-            CImGui.TableNextColumn()
-            # Reflect worker-side stops (e.g. training error)
-            # before drawing the checkbox.
-            gui.ui_state.train[] = w.train[]
-            if CImGui.Checkbox("Train", gui.ui_state.train)
-                GC.gc(false)
-                GC.gc(true)
-                w.train[] = gui.ui_state.train[]
-                notify(w.wakeup)
-            end
-            CImGui.TableNextColumn()
-            CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
-            CImGui.SetItemTooltip(
-                "Overlay the dataset views as camera frustums, " *
-                "each showing the image it was trained on.")
-
-            # Row 3.
-            CImGui.TableNextRow()
-            CImGui.TableNextColumn()
-            if CImGui.Checkbox("Densify", gui.ui_state.densify)
-                w.densify[] = gui.ui_state.densify[]
-            end
-            CImGui.TableNextColumn()
-            gui.ui_state.draw_cameras[] || disabled_begin()
-            CImGui.Checkbox("Camera Images", gui.ui_state.draw_camera_images)
-            gui.ui_state.draw_cameras[] || disabled_end()
-
-            CImGui.EndTable()
-
-            if gui.ui_state.draw_cameras[]
-                CImGui.PushItemWidth(-100)
-                CImGui.SliderFloat("Camera Size",
-                    gui.ui_state.camera_size, 0.2f0, 5f0, "%.2fx")
-                if gui.ui_state.draw_camera_images[]
-                    CImGui.PushItemWidth(-100)
-                    CImGui.SliderFloat("Image Opacity",
-                        gui.ui_state.camera_image_opacity, 0.1f0, 1f0, "%.2f")
-                end
+        if CImGui.BeginTabBar("##main-tab-bar")
+            if CImGui.BeginTabItem("Scene")
+                scene_tab!(gui)
+                CImGui.EndTabItem()
             end
 
-            if gui.ui_state.is_mcmc
-                # Benign cross-thread write: `max_cap` is a
-                # word-sized Int the worker only reads at
-                # densification time.
-                strategy = gui.trainer.strategy
-                max_cap_ref = Ref{Int32}(strategy.max_cap)
-                CImGui.PushItemWidth(-100)
-                if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
-                    strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
-                end
+            # Selecting the tab is what enters capture mode: the
+            # camera path is drawn & editable while it is open.
+            if CImGui.BeginTabItem("Capture")
+                gui.ui_state.capture_tab = true
+                capture_ui!(gui.capture_mode, gui)
+                CImGui.EndTabItem()
             end
-
-            image_filenames = gui.trainer.dataset.train_image_filenames
-            CImGui.Text("Camera view:")
-            CImGui.PushItemWidth(-1)
-            if CImGui.ListBox("##views", gui.ui_state.selected_view,
-                image_filenames, VIEW_LIST_ROWS,
-            )
-                vid = gui.ui_state.selected_view[] + 1
-                set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
-                # A dataset photo's pose is level: use it to calibrate the yaw axis.
-                gui.control_settings.up_vec = -view_up(gui.camera)
-                gui.render_state.need_render = true
-            end
+            CImGui.EndTabBar()
         end
     end
     CImGui.End()
     return
 end
 
-function render!(gui::GSGUI)
-    gui.render_state.need_render || return
+# Contents of the `Scene` tab: view & training controls.
+function scene_tab!(gui::GSGUI)
+    w = gui.worker
 
-    # `need_render` is `true` every time user interacts with the app
-    # via controls, so we need to render anew.
-    if gui.render_state.need_render
-        gui.render_state.need_render = false
+    if CImGui.Checkbox("Render", gui.ui_state.render)
+        w.render[] = gui.ui_state.render[]
+        notify(w.wakeup)
     end
 
-    gs = gui.gaussians
-    rast = gui.rasterizer
-    (; width, height) = resolution(gui.camera)
-
-    # Empty scene (no dataset loaded yet): display background color.
-    if gs ≡ nothing || length(gs) == 0
-        NGL.set_data!(gui.render_state.surface,
-            zeros(Float32, 3, width, height))
-        return
+    CImGui.PushItemWidth(-100)
+    if CImGui.Combo("Controller", gui.ui_state.controller_mode,
+        gui.ui_state.controller_modes,
+    ) && gui.ui_state.controller_mode[] == 1
+        # Entering orbit mode: place the target in front of the
+        # camera, at a scene-sized distance.
+        d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
+        gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
     end
 
-    # The worker normally rebuilds the rasterizer on resolution change;
-    # this synchronous path (capture mode) has to do it itself.
-    if size(rast.image)[2:3] != (width, height)
-        kab = get_backend(rast)
-        # TODO free the old one before creating new one.
-        gui.rasterizer = rast =
-            GaussianRasterizer(kab, gui.camera; mode=:rgbd)
+    # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
+    CImGui.BeginTable("##up-vec-buttons-table", 2)
+    CImGui.TableNextRow()
+    CImGui.TableNextColumn()
+    if CImGui.Button("Set Up From View", CImGui.ImVec2(-1, 0))
+        gui.control_settings.up_vec = -view_up(gui.camera)
+    end
+    CImGui.SetItemTooltip(
+        "Use the current camera up as the scene up: " *
+        "yaw will rotate around it.")
+    CImGui.TableNextColumn()
+    if CImGui.Button("Level Horizon", CImGui.ImVec2(-1, 0))
+        level_horizon!(gui.camera, gui.control_settings.up_vec)
+        gui.render_state.need_render = true
+    end
+    CImGui.SetItemTooltip(
+        "Remove accumulated roll: align the camera with the scene up.")
+    CImGui.EndTable()
+
+    has_dataset = !viewer_only(gui)
+    has_dataset || disabled_begin()
+    if CImGui.Button("Reset Up From Dataset", CImGui.ImVec2(-1, 0))
+        gui.control_settings.up_vec =
+            estimate_up_vec(gui.trainer.dataset.train_cameras)
+    end
+    CImGui.SetItemTooltip(
+        "Re-estimate the scene up from the dataset cameras, " *
+        "discarding manual calibration.")
+    has_dataset || disabled_end()
+
+    CImGui.PushItemWidth(-100)
+    max_sh_degree = gui.ui_state.max_sh_degree
+    if max_sh_degree > 0 && CImGui.SliderInt(
+        "SH degree", gui.ui_state.sh_degree,
+        -1, max_sh_degree, "%d / $max_sh_degree",
+    )
+        gui.render_state.need_render = true
     end
 
-    ui_sh_degree::Int = gui.ui_state.sh_degree[]
-    sh_degree = ui_sh_degree == -1 ? gs.sh_degree : ui_sh_degree
-    rast(
-        gs.points, gs.opacities, gs.scales,
-        gs.rotations, gs.features_dc, gs.features_rest;
-        camera=gui.camera, sh_degree)
-
-    mode = gui.ui_state.selected_mode[]
-    tex = if mode == 0 # Render color.
-        gl_texture(rast)
-    elseif mode == 1 # Render depth.
-        gl_depth(rast)
+    # GUI rasterizers always render in `:rgbd` mode.
+    CImGui.PushItemWidth(-100)
+    if CImGui.Combo("Mode", gui.ui_state.selected_mode,
+        gui.ui_state.render_modes,
+    )
+        gui.render_state.need_render = true
     end
-    NGL.set_data!(gui.render_state.surface, tex)
+
+    if !viewer_only(gui)
+        CImGui.Separator()
+
+        CImGui.BeginTable("##checkbox-table", 2)
+
+        # Row 1.
+        CImGui.TableNextRow()
+        CImGui.TableNextColumn()
+        CImGui.Text("Steps: $(w.step[])")
+        CImGui.TableNextColumn()
+        CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
+
+        # Row 2.
+        CImGui.TableNextRow()
+        CImGui.TableNextColumn()
+        # Reflect worker-side stops (e.g. training error)
+        # before drawing the checkbox.
+        gui.ui_state.train[] = w.train[]
+        if CImGui.Checkbox("Train", gui.ui_state.train)
+            GC.gc(false)
+            GC.gc(true)
+            w.train[] = gui.ui_state.train[]
+            notify(w.wakeup)
+        end
+        CImGui.TableNextColumn()
+        CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
+        CImGui.SetItemTooltip(
+            "Overlay the dataset views as camera frustums, " *
+            "each showing the image it was trained on.")
+
+        # Row 3.
+        CImGui.TableNextRow()
+        CImGui.TableNextColumn()
+        if CImGui.Checkbox("Densify", gui.ui_state.densify)
+            w.densify[] = gui.ui_state.densify[]
+        end
+        CImGui.TableNextColumn()
+        gui.ui_state.draw_cameras[] || disabled_begin()
+        CImGui.Checkbox("Camera Images", gui.ui_state.draw_camera_images)
+        gui.ui_state.draw_cameras[] || disabled_end()
+
+        CImGui.EndTable()
+
+        if gui.ui_state.draw_cameras[]
+            CImGui.PushItemWidth(-100)
+            CImGui.SliderFloat("Camera Size",
+                gui.ui_state.camera_size, 0.2f0, 5f0, "%.2fx")
+            if gui.ui_state.draw_camera_images[]
+                CImGui.PushItemWidth(-100)
+                CImGui.SliderFloat("Image Opacity",
+                    gui.ui_state.camera_image_opacity, 0.1f0, 1f0, "%.2f")
+            end
+        end
+
+        if gui.ui_state.is_mcmc
+            # Benign cross-thread write: `max_cap` is a
+            # word-sized Int the worker only reads at
+            # densification time.
+            strategy = gui.trainer.strategy
+            max_cap_ref = Ref{Int32}(strategy.max_cap)
+            CImGui.PushItemWidth(-100)
+            if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
+                strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
+            end
+        end
+
+        image_filenames = gui.trainer.dataset.train_image_filenames
+        CImGui.Text("Camera view:")
+        CImGui.PushItemWidth(-1)
+        if CImGui.ListBox("##views", gui.ui_state.selected_view,
+            image_filenames, VIEW_LIST_ROWS,
+        )
+            vid = gui.ui_state.selected_view[] + 1
+            set_c2w!(gui.camera, gui.trainer.dataset.train_cameras[vid].c2w)
+            # A dataset photo's pose is level: use it to calibrate the yaw axis.
+            gui.control_settings.up_vec = -view_up(gui.camera)
+            gui.render_state.need_render = true
+        end
+    end
     return
 end
+

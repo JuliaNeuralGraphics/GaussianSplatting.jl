@@ -77,6 +77,10 @@ mutable struct RenderWorker
     front::FrameBuffer
     back::FrameBuffer
     has_new_frame::Bool
+    # Snapshot version each buffer was rendered from: lets the UI wait
+    # for the frame of a specific published view (see `fetch_frame`).
+    front_version::UInt64
+    back_version::UInt64
 
     # worker → UI stats.
     loss::Threads.Atomic{Float32}
@@ -106,6 +110,7 @@ function RenderWorker(; width::Int, height::Int)
         # running
         Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
+        UInt64(0), UInt64(0),
         Threads.Atomic{Float32}(0f0), Threads.Atomic{Int}(0),
         Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
         # activity, activity_since
@@ -226,18 +231,20 @@ function refresh_memory!(gui, w::RenderWorker)
 end
 
 # Publish the current camera & render settings for the worker to render.
-function publish_view!(gui)
+# Returns the version of the published snapshot, so that callers which
+# need this exact frame back (video capture) can wait for it.
+function publish_view!(gui)::UInt64
     w = gui.worker
     snap = ViewSnapshot(
         deepcopy(gui.camera),
         Int(gui.ui_state.sh_degree[]),
         Int(gui.ui_state.selected_mode[]))
-    lock(w.lock) do
+    version = lock(w.lock) do
         w.snapshot = snap
         w.snapshot_version += 1
     end
     notify(w.wakeup)
-    return
+    return version
 end
 
 # Push the UI toggles to the worker flags (after `reset_ui!`).
@@ -267,6 +274,23 @@ function upload_frame!(gui)
         return
     end
     return
+end
+
+"""
+Copy out the latest worker frame, but only once it was rendered from
+snapshot `version` (or a newer one) at the given resolution; `nothing`
+while the worker has not caught up yet.
+
+Unlike `upload_frame!` this does not consume `has_new_frame`: the frame
+still goes to the scene view as usual.
+"""
+function fetch_frame(w::RenderWorker, version::UInt64; width::Int, height::Int)
+    lock(w.lock) do
+        w.front_version ≥ version || return nothing
+        frame = w.front
+        (frame.width == width && frame.height == height) || return nothing
+        return copy(frame.data)
+    end
 end
 
 function worker_loop!(gui, w::RenderWorker)
@@ -311,7 +335,7 @@ function worker_loop!(gui, w::RenderWorker)
                 # during training refresh the view at ≤ 10 FPS to not starve `step!`.
                 if version != last_version || (did_train && time() - last_view_time > 0.1)
                     with_activity(w, ActivityRendering) do
-                        render_view!(gui, w, snap)
+                        render_view!(gui, w, snap, version)
                     end
                     last_version = version
                     last_view_time = time()
@@ -424,8 +448,9 @@ function handle_close_scene!(gui, w::RenderWorker)
     return true
 end
 
-# Render the view described by `snap` into the back buffer & swap.
-function render_view!(gui, w::RenderWorker, snap::ViewSnapshot)
+# Render the view described by `snap` (published as `version`) into the
+# back buffer & swap.
+function render_view!(gui, w::RenderWorker, snap::ViewSnapshot, version::UInt64)
     camera = snap.camera
     (; width, height) = resolution(camera)
 
@@ -461,6 +486,7 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot)
     w.last_snapshot = snap
     lock(w.lock) do
         w.front, w.back = w.back, w.front
+        w.back_version, w.front_version = w.front_version, version
         w.has_new_frame = true
     end
     # The first render allocates the scene-sized scratch buffers, and a
