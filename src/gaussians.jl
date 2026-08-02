@@ -136,54 +136,101 @@ sh_2_rgb(x) = x * SH0 + 0.5f0
 
 inverse_sigmoid(x) = log(x / (1f0 - x))
 
-function export_ply(g::GaussianModel, filename::String)
-    ply = PlyIO.Ply()
+"""
+Write `g` as a binary `.ply` in the layout the reference 3DGS implementation
+writes, which is what external viewers & editors read:
 
+    x y z  nx ny nz  f_dc_0..2  f_rest_0..N  opacity  scale_0..2  rot_0..3
+
+Two details are load-bearing for those readers & are the reason this does not
+go through `PlyIO.save_ply`:
+
+- The type is spelled `float`. PlyIO emits `float32`, which is not a canonical
+  PLY type name & is rejected outright by some readers.
+- `f_rest` is channel-major: all coefficients of R, then of G, then of B,
+  matching the reference's `transpose(1, 2).flatten()`. The model stores the
+  transpose of that.
+
+Normals are written as zeros, as the reference does: nothing consumes them,
+but readers key off the property set.
+"""
+function export_ply(g::GaussianModel, filename::String)
     n = size(g.points, 2)
 
     xyz = Array(g.points)
     features_dc = reshape(Array(g.features_dc), :, n)
-    features_rest = reshape(Array(g.features_rest), :, n)
+    # (channel, coefficient, gaussian) -> (coefficient, channel, gaussian),
+    # so that flattening gives the channel-major order described above.
+    features_rest = reshape(
+        permutedims(Array(g.features_rest), (2, 1, 3)), :, n)
     scales = Array(g.scales)
     rotations = Array(g.rotations)
-    opacities = reshape(Array(g.opacities), :)
+    opacities = reshape(Array(g.opacities), 1, n)
 
-    vertex = PlyIO.PlyElement("vertex",
-        PlyIO.ArrayProperty("x", xyz[1, :]),
-        PlyIO.ArrayProperty("y", xyz[2, :]),
-        PlyIO.ArrayProperty("z", xyz[3, :]),
+    names = vcat(
+        ["x", "y", "z"],
+        ["nx", "ny", "nz"],
+        ["f_dc_$(i - 1)" for i in axes(features_dc, 1)],
+        ["f_rest_$(i - 1)" for i in axes(features_rest, 1)],
+        ["opacity"],
+        ["scale_$(i - 1)" for i in axes(scales, 1)],
+        ["rot_$(i - 1)" for i in axes(rotations, 1)])
+    # One row per property, in `names` order. Julia is column-major, so this
+    # is already the interleaved layout PLY stores: every property of the
+    # first vertex, then of the second, ...
+    properties = vcat(
+        xyz,
+        zeros(Float32, 3, n), # Normals.
+        features_dc, features_rest, opacities, scales, rotations)
+    @assert size(properties, 1) == length(names)
 
-        [PlyIO.ArrayProperty("f_dc_$(i - 1)", features_dc[i, :]) for i in 1:size(features_dc, 1)]...,
-        [PlyIO.ArrayProperty("f_rest_$(i - 1)", features_rest[i, :]) for i in 1:size(features_rest, 1)]...,
-        [PlyIO.ArrayProperty("scale_$(i - 1)", scales[i, :]) for i in 1:size(scales, 1)]...,
-        [PlyIO.ArrayProperty("rot_$(i - 1)", rotations[i, :]) for i in 1:size(rotations, 1)]...,
-
-        PlyIO.ArrayProperty("opacity", opacities),
-    )
-    push!(ply, vertex)
-
-    PlyIO.save_ply(ply, filename; ascii=false)
+    format = ENDIAN_BOM == 0x04030201 ?
+        "binary_little_endian" : "binary_big_endian"
+    open(filename, "w") do io
+        println(io, "ply")
+        println(io, "format $format 1.0")
+        println(io, "element vertex $n")
+        for name in names
+            println(io, "property float $name")
+        end
+        println(io, "end_header")
+        write(io, properties)
+    end
     return
 end
 
+"""
+Read a `.ply` written by [`export_ply`](@ref) or by any other 3DGS
+implementation, onto `kab`. See [`export_ply`](@ref) for the layout; both
+the property order in the header & the storage precision are free, only the
+names matter here.
+"""
 function import_ply(filename::String, kab)
     ply = PlyIO.load_ply(filename)
     vertex = ply["vertex"]
 
     prop_names = PlyIO.plyname.(vertex.properties)
     n_frest = count(k -> startswith(k, "f_rest_"), prop_names)
+    n_frest % 3 == 0 || throw(ArgumentError(
+        "`$filename` has $n_frest `f_rest_*` properties, which is not a " *
+        "whole number of SH coefficients per color channel."))
 
     n = length(vertex["x"])
-    xyz = vcat([reshape(vertex[i], 1, n) for i in ("x", "y", "z")]...)
-    scales = vcat([reshape(vertex["scale_$(i - 1)"], 1, n) for i in 1:3]...)
-    rotations = vcat([reshape(vertex["rot_$(i - 1)"], 1, n) for i in 1:4]...)
-    opacities = reshape(Array(vertex["opacity"]), 1, n)
+    # A row of one property, converted from whatever the file stores it as.
+    row(name) = reshape(Float32.(vertex[name]), 1, n)
 
-    features_dc = vcat([reshape(vertex["f_dc_$(i - 1)"], 1, 1, n) for i in 1:3]...)
+    xyz = vcat((row(i) for i in ("x", "y", "z"))...)
+    scales = vcat((row("scale_$(i - 1)") for i in 1:3)...)
+    rotations = vcat((row("rot_$(i - 1)") for i in 1:4)...)
+    opacities = row("opacity")
+
+    features_dc = reshape(vcat((row("f_dc_$(i - 1)") for i in 1:3)...), 3, 1, n)
     features_rest = if n_frest > 0
-        reshape(
-            vcat([reshape(vertex["f_rest_$(i - 1)"], 1, n) for i in 1:n_frest]...),
-            3, :, n)
+        # Channel-major in the file (see `export_ply`), (channel,
+        # coefficient, gaussian) in the model.
+        permutedims(
+            reshape(vcat((row("f_rest_$(i - 1)") for i in 1:n_frest)...), :, 3, n),
+            (2, 1, 3))
     else
         Array{Float32}(undef, 3, 0, n)
     end

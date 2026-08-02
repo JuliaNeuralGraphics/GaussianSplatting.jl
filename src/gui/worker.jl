@@ -28,6 +28,7 @@ the app would otherwise look frozen.
     ActivityRendering
     ActivityLoadingScene
     ActivitySaving
+    ActivityExporting
     ActivityClosingScene
 end
 
@@ -36,6 +37,7 @@ function activity_label(activity::WorkerActivity)
     activity ≡ ActivityRendering && return "Rendering"
     activity ≡ ActivityLoadingScene && return "Installing scene"
     activity ≡ ActivitySaving && return "Saving checkpoint"
+    activity ≡ ActivityExporting && return "Exporting PLY"
     activity ≡ ActivityClosingScene && return "Closing scene"
     return "Working"
 end
@@ -348,8 +350,9 @@ end
 
 # What the UI shows while a command is being handled.
 function command_activity(tag::Symbol)
-    (tag ≡ :install_scene || tag ≡ :install_bson) && return ActivityLoadingScene
+    (tag ≡ :install_scene || tag ≡ :install_model) && return ActivityLoadingScene
     tag ≡ :save_bson && return ActivitySaving
+    tag ≡ :export_ply && return ActivityExporting
     tag ≡ :close_scene && return ActivityClosingScene
     return ActivityRendering # `:pick_orbit` reads the rendered depth.
 end
@@ -370,8 +373,8 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         w.n_gaussians[] = length(loaded.gaussians)
         refresh_memory!(gui, w)
         return true
-    elseif tag ≡ :install_bson
-        gaussians = cmd[2]
+    elseif tag ≡ :install_model
+        gaussians = cmd[2]::GaussianModel
         gui.gaussians = gaussians
         gui.trainer = nothing # Viewer-only mode.
         w.loss[] = 0f0
@@ -382,8 +385,11 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
     elseif tag ≡ :close_scene
         return handle_close_scene!(gui, w)
     elseif tag ≡ :save_bson
-        # Reads GPU arrays: must be ordered with training, hence here.
         gui.trainer ≡ nothing || save_state(gui.trainer, cmd[2]::String)
+        return false
+    elseif tag ≡ :export_ply
+        gs = gui.gaussians
+        gs ≡ nothing || export_ply(gs, cmd[2]::String)
         return false
     elseif tag ≡ :pick_orbit
         handle_pick!(gui, w, cmd[2]::Int, cmd[3]::Int)

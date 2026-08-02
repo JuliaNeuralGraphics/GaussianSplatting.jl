@@ -737,4 +737,72 @@ end
     @test size(old[:points]) == (3, 10)
 end
 
+@testset "PLY export/import" begin
+    n = 8
+    gs = GaussianSplatting.GaussianModel(
+        adapt(kab, rand(Float32, 3, n)),
+        adapt(kab, rand(Float32, 3, 1, n)),
+        # Distinct values, so a transposed `f_rest` cannot pass unnoticed.
+        adapt(kab, reshape(Float32.(1:(3 * 15 * n)), 3, 15, n)),
+        adapt(kab, rand(Float32, 3, n)),
+        adapt(kab, rand(Float32, 4, n)),
+        adapt(kab, rand(Float32, 1, n)),
+        nothing, 3, 3)
+
+    path = joinpath(mktempdir(), "splat.ply")
+    GaussianSplatting.export_ply(gs, path)
+
+    # The header external viewers parse: canonical `float` (not PlyIO's
+    # `float32`) & the reference implementation's property set.
+    header = String[]
+    open(path) do io
+        while (line = readline(io)) != "end_header"
+            push!(header, line)
+        end
+    end
+    @test !any(l -> occursin("float32", l), header)
+    @test header[1] == "ply"
+    @test "element vertex $n" in header
+    for name in ("x", "nx", "f_dc_0", "f_rest_0", "f_rest_44", "opacity",
+        "scale_0", "rot_3")
+        @test "property float $name" in header
+    end
+    @test count(l -> startswith(l, "property"), header) == 62
+
+    ply = GaussianSplatting.PlyIO.load_ply(path)
+    vertex = ply["vertex"]
+    features_rest = Array(gs.features_rest)
+    # `f_rest` is channel-major in the file: R's coefficients, then G's, then B's.
+    @test vertex["f_rest_0"][1] == features_rest[1, 1, 1]
+    @test vertex["f_rest_14"][1] == features_rest[1, 15, 1]
+    @test vertex["f_rest_15"][1] == features_rest[2, 1, 1]
+    @test vertex["f_rest_30"][1] == features_rest[3, 1, 1]
+
+    (; gaussians) = GaussianSplatting.import_ply(path, kab)
+    @test Array(gaussians.points) == Array(gs.points)
+    @test Array(gaussians.features_dc) == Array(gs.features_dc)
+    @test Array(gaussians.features_rest) == features_rest
+    @test Array(gaussians.scales) == Array(gs.scales)
+    @test Array(gaussians.rotations) == Array(gs.rotations)
+    @test Array(gaussians.opacities) == Array(gs.opacities)
+    @test gaussians.max_sh_degree == 3
+
+    # Degree 0: no `f_rest_*` properties at all.
+    gs0 = GaussianSplatting.GaussianModel(
+        adapt(kab, rand(Float32, 3, n)),
+        adapt(kab, rand(Float32, 3, 1, n)),
+        adapt(kab, Array{Float32}(undef, 3, 0, n)),
+        adapt(kab, rand(Float32, 3, n)),
+        adapt(kab, rand(Float32, 4, n)),
+        adapt(kab, rand(Float32, 1, n)),
+        nothing, 0, 0)
+    path0 = joinpath(mktempdir(), "splat0.ply")
+    GaussianSplatting.export_ply(gs0, path0)
+
+    (; gaussians) = GaussianSplatting.import_ply(path0, kab)
+    @test gaussians.max_sh_degree == 0
+    @test size(gaussians.features_rest) == (3, 0, n)
+    @test Array(gaussians.features_dc) == Array(gs0.features_dc)
+end
+
 end

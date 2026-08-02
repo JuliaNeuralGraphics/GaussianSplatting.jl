@@ -360,11 +360,10 @@ function apply_dataset!(gui::GSGUI, loaded)
 end
 
 """
-Load a `.bson` model checkpoint for viewer-only mode (no trainer).
+Load a `.bson` model checkpoint for viewer-only mode.
 
-Runs on a background thread (see `menu_bar!`), so it must not touch
-OpenGL state: the results are applied on the render thread in
-`apply_bson!`.
+Runs on a background thread (see `menu_bar!`), so it must not touch OpenGL state:
+the results are applied on the render thread in `apply_model!`.
 """
 function load_bson(kab, state_file::String)
     θ = load_checkpoint(state_file)
@@ -376,32 +375,48 @@ function load_bson(kab, state_file::String)
     return (; camera=θ[:camera]::Camera, gaussians)
 end
 
-# Replace the current scene with a loaded checkpoint (viewer-only).
-function apply_bson!(gui::GSGUI, loaded)
+"""
+Load a `.ply` gaussian splat for viewer-only mode,
+in the format the reference 3DGS implementation writes (see [`import_ply`](@ref)).
+"""
+function load_ply(kab, ply_file::String)
+    (; gaussians) = import_ply(ply_file, kab)
+    # H2D copies above run on this task's stream: make sure they are
+    # done before the worker task touches the new arrays.
+    KA.synchronize(kab)
+    return (; camera=nothing, gaussians)
+end
+
+# Replace the current scene with a loaded model (viewer-only).
+# `loaded.camera` is `nothing` for formats that store no camera (PLY).
+function apply_model!(gui::GSGUI, loaded)
     invalidate_frustums!(gui)
-    # Keep the current render resolution.
     camera = loaded.camera
-    set_resolution!(camera; resolution(gui.camera)...)
-    gui.camera = camera
+    if camera ≢ nothing
+        # Keep the current render resolution.
+        set_resolution!(camera; resolution(gui.camera)...)
+        gui.camera = camera
+    end
 
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = loaded.gaussians.max_sh_degree
     gui.ui_state.is_mcmc = false
     sync_worker_flags!(gui)
 
-    submit!(gui.worker, (:install_bson, loaded.gaussians))
+    submit!(gui.worker, (:install_model, loaded.gaussians))
     gui.render_state.need_render = true
     return
 end
 
-function poll_bson_load!(gui::GSGUI)
-    task = gui.ui_state.bson_load_task
+function poll_model_load!(gui::GSGUI)
+    task = gui.ui_state.model_load_task
     (task ≡ nothing || !istaskdone(task)) && return
-    gui.ui_state.bson_load_task = nothing
+    gui.ui_state.model_load_task = nothing
     try
-        apply_bson!(gui, fetch(task))
+        apply_model!(gui, fetch(task))
     catch err
-        @error "Failed to load BSON checkpoint:" exception=(err, catch_backtrace())
+        gui.ui_state.worker_error = "Failed to load model. See logs for details."
+        @error "Failed to load model:" exception=(err, catch_backtrace())
     end
     return
 end
@@ -444,25 +459,33 @@ end
 
 function menu_bar!(gui::GSGUI)
     CImGui.BeginMainMenuBar() || return
-
     if CImGui.BeginMenu("File")
         if CImGui.MenuItem("Open Dataset...")
             gui.ui_state.open_dataset_popup = true
         end
-
         CImGui.Separator()
 
-        # Viewer-only mode: no trainer.
-        if CImGui.MenuItem("Open BSON...")
+        # Both load into viewer-only mode: no trainer.
+        # Disabled while a load is in flight, so its task cannot be dropped.
+        can_load = gui.ui_state.model_load_task ≡ nothing
+        if CImGui.MenuItem("Open BSON...", C_NULL, false, can_load)
             state_file = pick_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
                 # Only the backend type is read here: safe from the UI thread.
                 kab = get_backend(gui.rasterizer)
-                gui.ui_state.bson_load_task =
-                    Threads.@spawn load_bson(kab, state_file)
+                gui.ui_state.model_load_task = Threads.@spawn load_bson(kab, state_file)
             end
         end
 
+        if CImGui.MenuItem("Open PLY...", C_NULL, false, can_load)
+            ply_file = pick_file(homedir(); filterlist="ply") # Empty when cancelled.
+            if !isempty(ply_file)
+                # Only the backend type is read here: safe from the UI thread.
+                kab = get_backend(gui.rasterizer)
+                gui.ui_state.model_load_task = Threads.@spawn load_ply(kab, ply_file)
+            end
+        end
+        CImGui.SetItemTooltip("Load gaussians from a 3DGS `.ply` file. ")
         CImGui.Separator()
 
         # Saving needs a trainer: it stores optimizers & training step.
@@ -470,12 +493,22 @@ function menu_bar!(gui::GSGUI)
             state_file = save_file(homedir(); filterlist="bson") # Empty when cancelled.
             if !isempty(state_file)
                 endswith(state_file, ".bson") || (state_file *= ".bson")
-                # Saving reads GPU arrays: run on the worker so it is
-                # ordered with training steps.
+                # Saving reads GPU arrays: run on the worker so it is ordered with training steps.
                 submit!(gui.worker, (:save_bson, state_file))
             end
         end
 
+        # Exporting only needs the gaussians, so it also works in viewer-only mode;
+        # drops the optimizers & the training step, unlike `Save BSON`.
+        if CImGui.MenuItem("Export PLY...", C_NULL, false, gui.worker.n_gaussians[] > 0)
+            ply_file = save_file(homedir(); filterlist="ply") # Empty when cancelled.
+            if !isempty(ply_file)
+                endswith(ply_file, ".ply") || (ply_file *= ".ply")
+                # Reads GPU arrays: run on the worker so it is ordered with training steps.
+                submit!(gui.worker, (:export_ply, ply_file))
+            end
+        end
+        CImGui.SetItemTooltip("Write the current gaussians as a 3DGS `.ply`, readable by other splat viewers.")
         CImGui.Separator()
 
         if CImGui.MenuItem("Close Scene", C_NULL, false, scene_loaded(gui))
@@ -485,7 +518,6 @@ function menu_bar!(gui::GSGUI)
             "Unload the gaussians & the dataset, freeing their GPU memory.")
         CImGui.EndMenu()
     end
-
     CImGui.EndMainMenuBar()
     return
 end
@@ -649,7 +681,7 @@ function loop!(gui::GSGUI)
     NGL.imgui_begin()
     menu_bar!(gui)
     open_dataset_modal!(gui)
-    poll_bson_load!(gui)
+    poll_model_load!(gui)
     dockspace_id = dockspace!()
 
     # Worker results: stats, errors, orbit-target picks.

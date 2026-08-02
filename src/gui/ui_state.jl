@@ -44,6 +44,7 @@ Base.@kwdef mutable struct UIState
     dataset_error::String = ""
     dataset_load_task::Maybe{Task} = nothing
 
-    # `Open BSON` checkpoint loading (see `load_bson` / `poll_bson_load!`).
-    bson_load_task::Maybe{Task} = nothing
+    # `Open BSON` / `Open PLY` model loading
+    # (see `load_bson`, `load_ply` & `poll_model_load!`).
+    model_load_task::Maybe{Task} = nothing
 end
