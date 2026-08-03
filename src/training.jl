@@ -27,6 +27,10 @@ mutable struct Trainer{
     depth_anchors::Vector{Maybe{DepthAnchor}}
     # Per train camera appearance grids; `nothing` when disabled.
     bilateral_grid::Maybe{BilateralGrid}
+    # Far-field shell composited behind the scene; `nothing` when disabled.
+    sky::Maybe{SkyDome}
+    # Whether sky-mask supervision is active (requires masks & a sky dome).
+    sky_loss::Bool
     # Whether geometry regularization is active (see `geometry_regularization.jl`).
     normals::Bool
 end
@@ -71,12 +75,14 @@ function Trainer(
         nothing
     end
 
+    sky = setup_sky_dome(rast, dataset, opt_params)
+    sky_loss = setup_sky_supervision(sky, dataset, opt_params)
     normals = setup_normal_supervision(rast, opt_params)
 
     Trainer(
         rast, gs, dataset, optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
-        depth_anchors, bilateral_grid, normals)
+        depth_anchors, bilateral_grid, sky, sky_loss, normals)
 end
 
 # `gaussians` is excluded, as in `unsafe_free!`: the model is shared with
@@ -86,7 +92,8 @@ memory_usage(trainer::Trainer) =
     Int(sizeof(trainer.cache)) +
     memory_usage(trainer.strategy) +
     memory_usage(trainer.rast) +
-    memory_usage(trainer.bilateral_grid)
+    memory_usage(trainer.bilateral_grid) +
+    memory_usage(trainer.sky)
 
 function KA.unsafe_free!(trainer::Trainer)
     foreach(free_optimizer!, values(trainer.optimizers))
@@ -95,6 +102,7 @@ function KA.unsafe_free!(trainer::Trainer)
     KA.unsafe_free!(trainer.rast)
     isnothing(trainer.bilateral_grid) ||
         KA.unsafe_free!(trainer.bilateral_grid)
+    isnothing(trainer.sky) || KA.unsafe_free!(trainer.sky)
     return
 end
 
@@ -134,6 +142,67 @@ function setup_depth_supervision(
         mode=opt_params.depth_loss_mode)
 end
 
+"""
+Mean color of the top eighth of the train images: a rough sky color to start
+the dome from, so it does not have to climb out of mid-grey while the scene is
+also forming.
+"""
+function sky_init_color(dataset::ColmapDataset)
+    images = dataset.train_images
+    isempty(images) && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
+
+    band = @view images[:, :, 1:max(1, size(images, 3) ÷ 8), :]
+    totals = Array(vec(sum(Float32, band; dims=(2, 3, 4))))
+    return SVector{3, Float32}(totals ./ (255f0 * (length(band) ÷ size(band, 1)))...)
+end
+
+function setup_sky_dome(
+    rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams,
+)
+    opt_params.use_sky_dome || return nothing
+    if rast.mode == :rgb
+        @warn "Sky dome requires a `:rgbd` rasterizer for the alpha channel, disabling."
+        return nothing
+    end
+    if isempty(dataset.train_cameras)
+        @warn "Sky dome requires at least one train camera, disabling."
+        return nothing
+    end
+
+    extent = dataset.camera_extent
+    radius = sky_dome_radius(rast, opt_params, extent)
+    requested = opt_params.sky_dome_radius_factor * extent
+    radius < requested && @warn string(
+        "Sky dome radius clamped to $(round(radius; digits=2)) from ",
+        "$(round(requested; digits=2)) by the rasterizer far plane ",
+        "($(rast.far_plane)); the dome will show some parallax.")
+
+    center = sum(c -> c.camera_center, dataset.train_cameras) /
+        length(dataset.train_cameras)
+    @info string(
+        "Using a sky dome: $(opt_params.sky_dome_points) Gaussians at radius ",
+        "$(round(radius; digits=2)) ($(round(radius / extent; digits=1)) scene extents).")
+
+    return SkyDome(
+        get_backend(rast), dataset.train_cameras[1], opt_params;
+        center, radius, color=sky_init_color(dataset))
+end
+
+function setup_sky_supervision(
+    sky::Maybe{SkyDome}, dataset::ColmapDataset, opt_params::OptimizationParams,
+)
+    opt_params.use_sky_loss || return false
+    dataset.has_sky_masks || return false
+    if sky ≡ nothing
+        # Driving alpha to zero without a far-field model just hands the sky to
+        # the background color & puts the sky loss at war with the photometric one.
+        @warn "Sky masks found, but the sky dome is off: sky supervision disabled."
+        return false
+    end
+    @info "Use sky masks to supervise the alpha map."
+    return true
+end
+
 function bson_params(opt::NU.Adam)
     (;
         μ=[adapt(CPU(), i) for i in opt.μ],
@@ -162,11 +231,14 @@ function save_state(trainer::Trainer, filename::String)
         grids=adapt(CPU(), trainer.bilateral_grid.grids),
         opt=bson_params(trainer.bilateral_grid.optimizer))
 
+    sky = trainer.sky ≡ nothing ? nothing : bson_params(trainer.sky)
+
     camera = trainer.dataset.train_cameras[1]
     save_checkpoint(filename, Dict(
         :gaussians => bson_params(trainer.gaussians),
         :optimizers => optimizers,
         :bilateral => bilateral,
+        :sky => sky,
         :step => trainer.step,
         :camera => camera,
     ))
@@ -192,6 +264,13 @@ function load_state!(trainer::Trainer, filename::String)
         kab = get_backend(trainer.gaussians)
         copyto!(trainer.bilateral_grid.grids, adapt(kab, bilateral.grids))
         set_from_bson!(trainer.bilateral_grid.optimizer, bilateral.opt)
+    end
+
+    # Same as the grids: restored only when both sides have a dome, since its
+    # geometry is derived from the dataset the checkpoint was trained on.
+    sky = get(θ, :sky, nothing)
+    if trainer.sky ≢ nothing && sky ≢ nothing
+        set_from_bson!(trainer.sky, sky)
     end
 
     trainer.step = θ[:step]
@@ -237,6 +316,13 @@ function validate(trainer::Trainer; quantize::Bool = false)
             image_features
         else
             image_features[1:3, :, :]
+        end
+
+        # The dome is part of the render: without it every sky pixel is scored
+        # against black and the metrics report a regression that is not there.
+        if trainer.sky ≢ nothing
+            image = composite_sky(
+                image, image_features[5, :, :], render_sky(trainer.sky, camera))
         end
 
         # From (c, w, h) to (w, h, c, 1) for SSIM.
@@ -318,7 +404,10 @@ function step!(trainer::Trainer)
     idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
     camera = trainer.dataset.train_cameras[idx]
     target_image = get_image(trainer, idx, :train)
-    background = params.random_background ?
+    sky = trainer.sky
+    # The dome *is* the background when it is on, so the scene pass renders
+    # over zeros & compositing supplies what is behind it.
+    background = (params.random_background && sky ≡ nothing) ?
         rand(SVector{3, Float32}) :
         zeros(SVector{3, Float32})
 
@@ -336,14 +425,14 @@ function step!(trainer::Trainer)
             nothing
         else
             prior = adapt(kab, trainer.dataset.train_depths[idx])
-            target, half_band, valid = depth_target(
+            target, half_band, valid, far_extrap = depth_target(
                 anchor, prior, trainer.dataset.train_depth_qsteps[idx])
             # Depth dominates early geometry formation,
             # photometric loss wins fine detail late.
             decay = DEPTH_LOSS_FINAL_SCALE^clamp(
                 Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
             weight = params.depth_loss_weight * decay
-            (; target, half_band, valid, weight)
+            (; target, half_band, valid, far_extrap, weight)
         end
 
         # Geometry regularization starts once the geometry is roughly in place:
@@ -354,9 +443,20 @@ function step!(trainer::Trainer)
             (; rays=pixel_rays(kab, camera))
         end
 
+        # Sky mask supervision, once the geometry has started to form: driving
+        # alpha to zero against a still-random scene would only carve holes.
+        sky_weight = if !trainer.sky_loss || trainer.step < params.sky_loss_from_iter
+            nothing
+        else
+            mask = trainer.dataset.train_sky_masks[idx]
+            mask ≡ nothing ? nothing : adapt(kab, mask)
+        end
+
         loss, ∇ = Zygote.withgradient(
             θ..., bgrid ≡ nothing ? nothing : bgrid.grids,
-        ) do means_3d, features_dc, features_rest, opacities, scales, rotations, bgrids
+            sky ≡ nothing ? nothing : sky.gaussians.features_dc,
+        ) do means_3d, features_dc, features_rest, opacities, scales, rotations,
+                bgrids, sky_features
             image_features = rast(
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
@@ -369,14 +469,24 @@ function step!(trainer::Trainer)
             # gradient accumulation with a shape mismatch.
             image = image_features[1:3, :, :]
 
-            # Sliced once & shared by the depth & normal terms, for the same reason:
-            # re-slicing a channel for a second consumer trips the
+            # Sliced once & shared by the depth, normal & sky terms, for the same
+            # reason: re-slicing a channel for a second consumer trips the
             # gradient mis-routing described above.
-            # Both terms imply a `:rgbd`/`:rgbdn` rasterizer, so the rows exist whenever they run.
-            depth_img, alpha_img = if depth_data ≡ nothing && normal_data ≡ nothing
+            # All of them imply a `:rgbd`/`:rgbdn` rasterizer, so the rows exist whenever they run.
+            depth_img, alpha_img = if (
+                depth_data ≡ nothing && normal_data ≡ nothing && sky_features ≡ nothing
+            )
                 nothing, nothing
             else
                 image_features[4, :, :], image_features[5, :, :]
+            end
+
+            # Composite the far-field dome behind the scene. Ahead of the
+            # appearance correction, which models the camera's response and so
+            # applies to the sky as much as to the scene.
+            if sky_features ≢ nothing
+                image = composite_sky(
+                    image, alpha_img, render_sky(sky, camera, sky_features))
             end
 
             # Per-view appearance correction before the photometric loss.
@@ -405,7 +515,13 @@ function step!(trainer::Trainer)
                     ssi_depth_loss(
                         depth_img, alpha_img;
                         depth_data.target, depth_data.half_band,
-                        depth_data.valid, depth_floor=anchor.floor)
+                        depth_data.valid, depth_data.far_extrap,
+                        depth_floor=anchor.floor)
+            end
+
+            if sky_weight ≢ nothing
+                total += params.sky_loss_weight *
+                    sky_opacity_loss(alpha_img, sky_weight)
             end
 
             if normal_data ≢ nothing
@@ -441,14 +557,27 @@ function step!(trainer::Trainer)
             NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
         end
 
+        # Trailing `withgradient` arguments, in the order they are passed.
+        ∇grids, ∇sky = ∇[end - 1], ∇[end]
+
         if bgrid ≢ nothing
-            ∇grids = ∇[end]
             if gsp_debug
                 isfinite(sum(∇grids)) || error(
                     "Non-finite bilateral grid gradient at step `$(trainer.step)` " *
                     "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
             end
             NU.step!(bgrid.optimizer, bgrid.grids, ∇grids; dispose=false)
+        end
+
+        # Only the dome's colors are trainable; its geometry stays frozen so it
+        # cannot drift into the scene & become a floater itself.
+        if sky ≢ nothing
+            if gsp_debug
+                isfinite(sum(∇sky)) || error(
+                    "Non-finite sky dome gradient at step `$(trainer.step)` " *
+                    "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
+            end
+            NU.step!(sky.optimizer, sky.gaussians.features_dc, ∇sky; dispose=false)
         end
     end
 

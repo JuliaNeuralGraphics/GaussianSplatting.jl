@@ -24,6 +24,21 @@ Base.@kwdef struct OptimizationParams
     depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
     depth_loss_steps::Int = 30_000 # Weight decays to 2% by this step.
 
+    # Sky dome (see `sky_dome.jl`): a frozen far-field shell of Gaussians
+    # composited behind the scene, so sky pixels have a parallax-free place to
+    # live instead of becoming near opaque floaters.
+    use_sky_dome::Bool = false
+    sky_dome_points::Int = 32_768
+    sky_dome_radius_factor::Float32 = 100f0 # × the dataset's camera extent.
+    sky_dome_lr::Float32 = 25f-4            # Colors only; matches `lr_feature`.
+
+    # Sky mask supervision (see `sky_dome.jl`): pulls the scene's accumulated
+    # alpha to zero on sky rays, so a floater there costs something.
+    # Inert unless sky masks were found next to the dataset images.
+    use_sky_loss::Bool = true
+    sky_loss_weight::Float32 = 1f0
+    sky_loss_from_iter::Int = 500
+
     # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
     # per-train-image low-res affine color grids applied to the render before
     # the photometric loss, absorbing exposure / white-balance drift.

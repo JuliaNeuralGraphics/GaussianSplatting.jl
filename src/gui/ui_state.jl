@@ -46,6 +46,8 @@ Base.@kwdef mutable struct UIState
     dataset_depth_loss::Ref{Bool} = Ref(true)
     # Geometry regularization (see `geometry_regularization.jl`).
     dataset_normal_loss::Ref{Bool} = Ref(false)
+    # Far-field shell the sky is painted onto (see `sky_dome.jl`).
+    dataset_sky_dome::Ref{Bool} = Ref(false)
     # Composite train renders over a random background (see `OptimizationParams`).
     dataset_random_background::Ref{Bool} = Ref(false)
     dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)

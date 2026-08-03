@@ -226,7 +226,8 @@ function refresh_memory!(gui, w::RenderWorker)
     w.memory[] =
         memory_usage(gui.gaussians) +
         memory_usage(gui.trainer) +
-        memory_usage(gui.rasterizer)
+        memory_usage(gui.rasterizer) +
+        memory_usage(gui.sky_rasterizer)
     return
 end
 
@@ -391,6 +392,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         loaded = cmd[2]
         gui.gaussians = loaded.gaussians
         gui.rasterizer = loaded.gui_rasterizer
+        gui.sky_rasterizer = loaded.gui_sky_rasterizer
         gui.trainer = loaded.trainer
         w.loss[] = 0f0
         w.step[] = loaded.trainer.step
@@ -400,7 +402,9 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
     elseif tag ≡ :install_model
         gaussians = cmd[2]::GaussianModel
         gui.gaussians = gaussians
-        gui.trainer = nothing # Viewer-only mode.
+        # Viewer-only mode: a loaded PLY already has the dome merged into it.
+        gui.trainer = nothing
+        gui.sky_rasterizer = nothing
         w.loss[] = 0f0
         w.step[] = 0
         w.n_gaussians[] = length(gaussians)
@@ -413,7 +417,12 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         return false
     elseif tag ≡ :export_ply
         gs = gui.gaussians
-        gs ≡ nothing || export_ply(gs, cmd[2]::String)
+        if gs ≢ nothing
+            # Fold the dome in: it is part of the scene's appearance, and a PLY
+            # has nowhere else to put it.
+            sky = gui.trainer ≡ nothing ? nothing : gui.trainer.sky
+            export_ply(sky ≡ nothing ? gs : merge_sky(gs, sky), cmd[2]::String)
+        end
         return false
     elseif tag ≡ :pick_orbit
         handle_pick!(gui, w, cmd[2]::Int, cmd[3]::Int)
@@ -430,10 +439,12 @@ function handle_close_scene!(gui, w::RenderWorker)
     w.train[] = false
 
     trainer, gaussians = gui.trainer, gui.gaussians
-    gui.trainer, gui.gaussians = nothing, nothing
+    sky_rast = gui.sky_rasterizer
+    gui.trainer, gui.gaussians, gui.sky_rasterizer = nothing, nothing, nothing
 
     trainer ≡ nothing || KA.unsafe_free!(trainer)
     gaussians ≡ nothing || KA.unsafe_free!(gaussians)
+    sky_rast ≡ nothing || KA.unsafe_free!(sky_rast)
     release_scene_buffers!(gui.rasterizer)
 
     w.loss[] = 0f0
@@ -461,6 +472,14 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot, version::UInt64)
         gui.rasterizer = rast = GaussianRasterizer(kab, camera; mode=:rgbd)
     end
 
+    trainer = gui.trainer
+    sky = trainer ≡ nothing ? nothing : trainer.sky
+    sky_rast = gui.sky_rasterizer
+    if sky ≢ nothing && (sky_rast ≡ nothing || size(sky_rast.image)[2:3] != (width, height))
+        gui.sky_rasterizer = sky_rast =
+            sky_view_rasterizer(get_backend(rast), sky, camera)
+    end
+
     back = w.back
     if back.width != width || back.height != height
         back.data = Array{Float32, 3}(undef, 3, width, height)
@@ -477,6 +496,9 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot, version::UInt64)
             gs.points, gs.opacities, gs.scales,
             gs.rotations, gs.features_dc, gs.features_rest;
             camera, sh_degree)
+        # Only touches the color rows, so the depth view & orbit picking below
+        # still read pure scene geometry.
+        sky ≡ nothing || composite_sky!(rast, sky, camera; sky_rast)
         tex = snap.mode == 1 ? gl_depth(rast) : gl_texture(rast)
         # `tex` is the rasterizer-owned host buffer, overwritten by the next render,
         # so copy it out before publishing.

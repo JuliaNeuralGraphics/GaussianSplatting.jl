@@ -71,6 +71,7 @@ include("strategy.jl")
 include("densification.jl")
 include("mcmc.jl")
 include("rasterization/rasterizer.jl")
+include("sky_dome.jl")
 include("training.jl")
 include("gui/gui.jl")
 
