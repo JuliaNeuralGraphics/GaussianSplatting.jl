@@ -63,11 +63,21 @@ function fibonacci_sphere(n::Int)
 end
 
 """
+Gaussian std as a multiple of the lattice spacing.
+
+Sized by the *deepest* gap, the circumcenter of three neighboring cells at
+`d/√3 ≈ 0.577·d` from each. At one full spacing (`σ = d`) each of the three
+still contributes `α ≈ 0.84` there, leaving transmittance ≈ 0.004 — a sealed
+shell. Half a spacing leaves ≈ 0.2, which shows up as dark speckle across the
+sky, so the extra screen footprint here is not optional.
+"""
+const SKY_DOME_OVERLAP = 1f0
+
+"""
     SkyDome(kab, camera, opt_params; center, radius, color)
 
-Build the dome around `center` at `radius`, sized so neighboring Gaussians
-overlap without smearing: each gets a std of half the lattice spacing, so its
-3σ footprint reaches 1.5 cells and the shell is opaque with no holes.
+Build the dome around `center` at `radius`, with Gaussians sized by
+[`SKY_DOME_OVERLAP`](@ref) so the shell is opaque and hole-free.
 
 The dome's rasterizer carries its own far plane (`4 * radius`), since the
 default one (1000) would cull the entire shell for any sizeable scene.
@@ -85,7 +95,7 @@ function SkyDome(
     points = dirs .* radius .+ Array(center)
     colors = repeat(Array(color), 1, n)
     # Isotropic & big enough to overlap its neighbors.
-    scales = fill(radius * spacing * 0.5f0, 3, n)
+    scales = fill(radius * spacing * SKY_DOME_OVERLAP, 3, n)
 
     gaussians = GaussianModel(kab, points, colors, log.(scales); max_sh_degree=0)
     # Opaque: the render kernel caps `α` at 0.99 regardless, and a transparent

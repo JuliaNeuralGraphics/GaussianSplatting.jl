@@ -780,7 +780,12 @@ end
     composited = zeroed[1:3, :, :] .+
         reshape(1f0 .- alpha, 1, width, height) .* Array(bg)
 
-    @test 0f0 < minimum(alpha) && maximum(alpha) < 1f0 # Genuinely partial.
+    # The composite must be exercised over the whole range of `alpha`: bare
+    # background (the dome shows through fully), partial coverage (both terms
+    # contribute) and near-opaque scene.
+    @test minimum(alpha) < 1f-3
+    @test any(0.05f0 .< alpha .< 0.95f0)
+    @test maximum(alpha) > 0.3f0
     @test maximum(abs, in_kernel .- composited) < 1f-5
 
     # `composite_sky` itself, on device, against the same reference.
@@ -804,19 +809,26 @@ end
     # The dome must outlive its own far plane, or `project!` culls all of it.
     @test sky.rast.far_plane > radius
 
-    # No holes: a gap in the shell shows up as a black spot in the sky.
+    # No holes: a gap in the shell shows up as a dark speck in the sky, which
+    # is what `SKY_DOME_OVERLAP` is sized to prevent.
     probe = GaussianSplatting.GaussianRasterizer(kab, camera;
         mode=:rgbd, far_plane=4f0 * radius)
     gs = sky.gaussians
     image = Array(probe(
         gs.points, gs.opacities, gs.scales, gs.rotations,
         gs.features_dc, gs.features_rest; camera, sh_degree=0))
-    @test minimum(image[5, :, :]) > 0.99f0
+    dome_alpha = image[5, :, :]
+    @test minimum(dome_alpha) > 0.98f0
 
-    # The dome renders the color it was initialized with.
-    rgb = GaussianSplatting.render_sky(sky, camera)
-    @test size(Array(rgb)) == (3, width, height)
-    @test all(isapprox.(mean(Array(rgb); dims=(2, 3)), [0.2f0; 0.4f0; 0.9f0]; atol=1f-2))
+    # The dome renders the color it was initialized with. Checked where the
+    # shell is opaque: elsewhere the render is legitimately `alpha · color`.
+    rgb = Array(GaussianSplatting.render_sky(sky, camera))
+    @test size(rgb) == (3, width, height)
+    opaque = dome_alpha .> 0.99f0
+    @test any(opaque)
+    for (c, expected) in enumerate((0.2f0, 0.4f0, 0.9f0))
+        @test all(isapprox.(rgb[c, :, :][opaque], expected; atol=1f-2))
+    end
 
     # Colors are trainable; the frozen geometry is not touched by the optimizer.
     weights = adapt(kab, randn(Float32, 3, width, height))
