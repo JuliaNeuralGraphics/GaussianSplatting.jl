@@ -239,11 +239,20 @@ end
 # Densification strategies selectable in the UI.
 const STRATEGIES = (:default, :mcmc)
 
+# Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
+const MAX_SH_DEGREE = 3
+
+const SH_DEGREE_TOOLTIP =
+    "How much colors are allowed to change with the viewing angle.\n" *
+    "Higher looks better on shiny & reflective surfaces, but uses more " *
+    "memory and trains slower.\n" *
+    "0 makes everything look the same from every direction. 3 is the default."
+
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
-    gl_kwargs...,
+    random_background::Bool = true, max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
     NGL.init(3, 2)
@@ -261,9 +270,9 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
-        use_depth_loss, use_bilateral_grid, use_normal_loss)
+        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
-        isotropic=false, max_sh_degree=3)
+        isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
         mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
@@ -313,16 +322,17 @@ in `apply_dataset!`.
 function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
-    use_normal_loss::Bool = false,
+    use_normal_loss::Bool = false, random_background::Bool = true,
+    max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
     dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
-        use_depth_loss, use_bilateral_grid, use_normal_loss)
+        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
-        isotropic=false, max_sh_degree=3)
+        isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
         mode=training_rasterizer_mode(opt_params))
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
@@ -599,6 +609,17 @@ function open_dataset_modal!(gui::GSGUI)
         end
     end
 
+    CImGui.Text("Max SH degree:")
+    for degree in 0:MAX_SH_DEGREE
+        CImGui.SameLine()
+        if CImGui.RadioButton("$degree##sh-degree",
+            Int(ui_state.dataset_max_sh_degree[]) == degree,
+        )
+            ui_state.dataset_max_sh_degree[] = degree
+        end
+        CImGui.SetItemTooltip(SH_DEGREE_TOOLTIP)
+    end
+
     CImGui.Text("Densification strategy:")
     for (i, strategy) in enumerate(STRATEGIES)
         CImGui.SameLine()
@@ -630,6 +651,15 @@ function open_dataset_modal!(gui::GSGUI)
             "channels per step.")
     end
 
+    CImGui.Checkbox("Random background", ui_state.dataset_random_background)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Train against a randomly colored background instead of a black " *
+            "one.\nHelps the gaussians settle on the right transparency, but " *
+            "the reference implementation keeps it off & its published " *
+            "numbers are without it.")
+    end
+
     # Always occupy the error line to keep the window height constant.
     if isempty(ui_state.dataset_error)
         CImGui.Text(" ")
@@ -650,10 +680,13 @@ function open_dataset_modal!(gui::GSGUI)
         use_depth_loss = ui_state.dataset_depth_loss[]
         use_bilateral_grid = ui_state.dataset_bilateral_grid[]
         use_normal_loss = ui_state.dataset_normal_loss[]
+        random_background = ui_state.dataset_random_background[]
+        max_sh_degree = Int(ui_state.dataset_max_sh_degree[])
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
             kab, dataset_path; scale, width, height, strategy,
-            use_depth_loss, use_bilateral_grid, use_normal_loss)
+            use_depth_loss, use_bilateral_grid, use_normal_loss,
+            random_background, max_sh_degree)
     end
     can_open || disabled_end()
 

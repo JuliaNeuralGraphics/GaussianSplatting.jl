@@ -15,7 +15,7 @@ Base.@kwdef struct OptimizationParams
     # black one used at evaluation. Helps opacities escape the background
     # color, but the reference implementation keeps it off & the published
     # numbers are without it.
-    random_background::Bool = true
+    random_background::Bool = false
 
     # Depth supervision with monocular priors (see `depth_supervision.jl`).
     # Requires depth maps next to the dataset images, an init point cloud and a `:rgbd` rasterizer.

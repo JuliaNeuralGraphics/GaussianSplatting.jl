@@ -38,12 +38,16 @@ Base.@kwdef mutable struct UIState
     dataset_scale::Ref{Int32} = Ref{Int32}(1)
     # Index into `STRATEGIES` (densification strategy for the new trainer).
     dataset_strategy::Ref{Int32} = Ref{Int32}(0)
+    # Highest SH band the new model allocates (see `GaussianModel`).
+    dataset_max_sh_degree::Ref{Int32} = Ref{Int32}(3)
     # Per-train-image appearance modeling (see `bilateral_grid.jl`).
     dataset_bilateral_grid::Ref{Bool} = Ref(false)
     # Monocular depth supervision (see `depth_supervision.jl`).
     dataset_depth_loss::Ref{Bool} = Ref(true)
     # Geometry regularization (see `geometry_regularization.jl`).
     dataset_normal_loss::Ref{Bool} = Ref(false)
+    # Composite train renders over a random background (see `OptimizationParams`).
+    dataset_random_background::Ref{Bool} = Ref(false)
     dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)
     dataset_error::String = ""
     dataset_load_task::Maybe{Task} = nothing
