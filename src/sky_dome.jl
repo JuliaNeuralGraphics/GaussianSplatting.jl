@@ -14,6 +14,14 @@ The dome gives that content somewhere to go:
 - **Frozen geometry.** Positions, scales, rotations & opacities are never
   optimized. Only the colors learn. A dome Gaussian therefore cannot drift
   into the scene and become the very floater it exists to prevent.
+- **Shape.** The alpha cotangent the composite feeds back is indiscriminate: it
+  removes a floater and a piece of real ground with equal enthusiasm, because a
+  free parallax-free background explains *any* not-yet-opaque pixel more
+  cheaply than geometry can. A full `:sphere` therefore tends to absorb
+  ground — and its colors then learn that ground texture, which is
+  self-reinforcing. A `:hemisphere` leaves nothing behind downward-looking
+  rays, so that geometry has to become opaque on its own. See
+  `sky_dome_shape`.
 - **SH degree 0.** One RGB value per Gaussian, no view dependence — a
   view-dependent dome could fake parallax and reintroduce the problem.
   Functionally it is a learned spherical texture that happens to be expressed
@@ -62,6 +70,32 @@ function fibonacci_sphere(n::Int)
     return dirs, sqrt(4f0 * Float32(π) / Float32(n))
 end
 
+# Shapes `sky_dome_shape` selects between.
+const SKY_DOME_SHAPES = (:hemisphere, :sphere)
+
+"""
+    sky_dome_directions(n, shape, up)
+
+`n` directions for the dome, plus the lattice's angular spacing.
+
+`:sphere` is the whole sky; `:hemisphere` keeps only what is at or above the
+horizon, measured against `up`. The lattice is generated at double size and
+then cut, so `n` means "Gaussians actually in the dome" either way and the
+returned spacing — a property of the lattice, not of the surviving subset —
+still sizes them correctly.
+"""
+function sky_dome_directions(n::Int, shape::Symbol, up::SVector{3, Float32})
+    shape in SKY_DOME_SHAPES ||
+        error("Invalid sky dome shape: `$shape` ∉ $SKY_DOME_SHAPES.")
+    shape ≡ :sphere && return fibonacci_sphere(n)
+
+    dirs, spacing = fibonacci_sphere(2 * n)
+    up = normalize(up)
+    kept = [i for i in axes(dirs, 2) if
+        dirs[1, i] * up[1] + dirs[2, i] * up[2] + dirs[3, i] * up[3] ≥ 0f0]
+    return dirs[:, kept], spacing
+end
+
 """
 Gaussian std as a multiple of the lattice spacing.
 
@@ -78,6 +112,7 @@ const SKY_DOME_OVERLAP = 1f0
 
 Build the dome around `center` at `radius`, with Gaussians sized by
 [`SKY_DOME_OVERLAP`](@ref) so the shell is opaque and hole-free.
+`up` orients the cut when `sky_dome_shape` is `:hemisphere`.
 
 The dome's rasterizer carries its own far plane (`4 * radius`), since the
 default one (1000) would cull the entire shell for any sizeable scene.
@@ -86,12 +121,15 @@ function SkyDome(
     kab, camera::Camera, opt_params::OptimizationParams;
     center::SVector{3, Float32},
     radius::Float32,
+    up::SVector{3, Float32} = SVector{3, Float32}(0f0, 0f0, 1f0),
     color::SVector{3, Float32} = SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0),
 )
     n = opt_params.sky_dome_points
     n > 0 || throw(ArgumentError("`sky_dome_points=$n` must be positive."))
 
-    dirs, spacing = fibonacci_sphere(n)
+    dirs, spacing = sky_dome_directions(n, opt_params.sky_dome_shape, up)
+    n = size(dirs, 2) # The cut lands near, but not exactly on, `n`.
+
     points = dirs .* radius .+ Array(center)
     colors = repeat(Array(color), 1, n)
     # Isotropic & big enough to overlap its neighbors.

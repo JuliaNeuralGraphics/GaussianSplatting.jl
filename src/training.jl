@@ -179,13 +179,17 @@ function setup_sky_dome(
 
     center = sum(c -> c.camera_center, dataset.train_cameras) /
         length(dataset.train_cameras)
-    @info string(
-        "Using a sky dome: $(opt_params.sky_dome_points) Gaussians at radius ",
-        "$(round(radius; digits=2)) ($(round(radius / extent; digits=1)) scene extents).")
+    # Orients the horizon cut for a `:hemisphere`; unused for a `:sphere`.
+    up = estimate_up_vec(dataset.train_cameras)
 
-    return SkyDome(
+    sky = SkyDome(
         get_backend(rast), dataset.train_cameras[1], opt_params;
-        center, radius, color=sky_init_color(dataset))
+        center, radius, up, color=sky_init_color(dataset))
+    @info string(
+        "Using a `$(opt_params.sky_dome_shape)` sky dome: $(length(sky)) ",
+        "Gaussians at radius $(round(radius; digits=2)) ",
+        "($(round(radius / extent; digits=1)) scene extents).")
+    return sky
 end
 
 function setup_sky_supervision(

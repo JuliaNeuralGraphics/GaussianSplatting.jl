@@ -799,7 +799,7 @@ end
     width, height = 64, 48
     camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width, height)
     opt_params = GaussianSplatting.OptimizationParams(;
-        use_sky_dome=true, sky_dome_points=8192)
+        use_sky_dome=true, sky_dome_points=8192, sky_dome_shape=:sphere)
 
     radius = 50f0
     sky = GaussianSplatting.SkyDome(kab, camera, opt_params;
@@ -849,6 +849,35 @@ end
     @test size(merged.features_rest) == (3, 15, length(merged))
     @test all(iszero, Array(merged.features_rest)[:, :, (length(scene) + 1):end])
     @test Array(merged.points)[:, (length(scene) + 1):end] ≈ Array(gs.points)
+end
+
+@testset "Sky dome shape" begin
+    sky_dome_directions = GaussianSplatting.sky_dome_directions
+    up = SVector{3, Float32}(0f0, 0f0, 1f0)
+
+    sphere, sphere_spacing = sky_dome_directions(4096, :sphere, up)
+    @test size(sphere) == (3, 4096)
+    @test any(sphere[3, :] .< 0f0) # Covers below the horizon.
+
+    # The cut keeps the requested count, not half of it: the lattice is
+    # generated oversized so density is the same either way.
+    hemi, hemi_spacing = sky_dome_directions(4096, :hemisphere, up)
+    @test size(hemi, 2) ≈ 4096 rtol=0.05
+    @test hemi_spacing ≈ sqrt(4f0 * Float32(pi) / 8192f0)
+    @test hemi_spacing < sphere_spacing
+
+    # Nothing below the horizon: that is the whole point — downward-looking
+    # rays get no free background, so the ground has to be opaque itself.
+    @test all(hemi[3, :] .≥ 0f0)
+    # Still a full hemisphere of sky, not a cap around the zenith.
+    @test minimum(hemi[3, :]) < 0.05f0 && maximum(hemi[3, :]) > 0.95f0
+
+    # The cut follows `up`, it is not hardcoded to an axis.
+    tilted = normalize(SVector{3, Float32}(1f0, 0f0, 1f0))
+    dirs, _ = sky_dome_directions(2048, :hemisphere, tilted)
+    @test all(vec(sum(dirs .* Array(tilted); dims=1)) .≥ -1f-5)
+
+    @test_throws ErrorException sky_dome_directions(64, :dome, up)
 end
 
 @testset "sky_opacity_loss" begin

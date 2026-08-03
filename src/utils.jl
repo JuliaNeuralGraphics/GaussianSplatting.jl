@@ -28,6 +28,11 @@ Base.@kwdef struct OptimizationParams
     # composited behind the scene, so sky pixels have a parallax-free place to
     # live instead of becoming near opaque floaters.
     use_sky_dome::Bool = false
+    # `:hemisphere` covers only the sky, leaving black behind downward-looking
+    # rays so the ground has to become opaque on its own; a full `:sphere`
+    # gives the optimizer a free background everywhere & tends to absorb ground
+    # into the dome (see `sky_dome.jl`).
+    sky_dome_shape::Symbol = :hemisphere # :hemisphere | :sphere
     sky_dome_points::Int = 32_768
     sky_dome_radius_factor::Float32 = 100f0 # × the dataset's camera extent.
     sky_dome_lr::Float32 = 25f-4            # Colors only; matches `lr_feature`.

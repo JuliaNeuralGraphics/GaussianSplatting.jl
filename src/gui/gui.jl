@@ -257,7 +257,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
     random_background::Bool = false, use_sky_dome::Bool = false,
-    max_sh_degree::Int = 3, gl_kwargs...,
+    sky_dome_shape::Symbol = :hemisphere, max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
     NGL.init(3, 2)
@@ -276,7 +276,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_sky_dome)
+        use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -331,7 +331,8 @@ function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
     use_normal_loss::Bool = false, random_background::Bool = false,
-    use_sky_dome::Bool = false, max_sh_degree::Int = 3,
+    use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
+    max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
     dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
@@ -339,7 +340,7 @@ function load_dataset(kab, dataset_path::String;
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_sky_dome)
+        use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -681,6 +682,23 @@ function open_dataset_modal!(gui::GSGUI)
             "capture path.\nRecommended for outdoor scenes; pointless indoors.")
     end
 
+    ui_state.dataset_sky_dome[] || disabled_begin()
+    CImGui.Text("Sky dome shape:")
+    for (i, shape) in enumerate(SKY_DOME_SHAPES)
+        CImGui.SameLine()
+        if CImGui.RadioButton("$shape", Int(ui_state.dataset_sky_dome_shape[]) == i - 1)
+            ui_state.dataset_sky_dome_shape[] = i - 1
+        end
+    end
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "`hemisphere` covers only the sky, leaving black below the " *
+            "horizon so the ground has to become solid on its own.\n" *
+            "`sphere` wraps the whole scene, which gives the optimizer a free " *
+            "background everywhere and tends to pull ground onto the dome.")
+    end
+    ui_state.dataset_sky_dome[] || disabled_end()
+
     CImGui.Checkbox("Random background", ui_state.dataset_random_background)
     if CImGui.IsItemHovered()
         CImGui.SetTooltip(
@@ -713,12 +731,13 @@ function open_dataset_modal!(gui::GSGUI)
         use_normal_loss = ui_state.dataset_normal_loss[]
         random_background = ui_state.dataset_random_background[]
         use_sky_dome = ui_state.dataset_sky_dome[]
+        sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1]
         max_sh_degree = Int(ui_state.dataset_max_sh_degree[])
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
             kab, dataset_path; scale, width, height, strategy,
             use_depth_loss, use_bilateral_grid, use_normal_loss,
-            random_background, use_sky_dome, max_sh_degree)
+            random_background, use_sky_dome, sky_dome_shape, max_sh_degree)
     end
     can_open || disabled_end()
 

@@ -30,17 +30,6 @@ mutable struct ControlSettings
 end
 
 """
-Estimate the scene's up direction as the average of the dataset
-cameras' up axes: photos are mostly taken with a roughly level camera,
-while the COLMAP world orientation is arbitrary. Yawing around this
-vector instead of the world `-Y` keeps the horizon level.
-Negated to match the `up_vec` convention (`-view_up` of an identity camera).
-"""
-function estimate_up_vec(cameras::Vector{Camera})
-    return -normalize(sum(view_up, cameras))
-end
-
-"""
 Look from `pos` towards `target` with zero roll w.r.t. `up_vec`:
 rebuild the orientation frame in `c2w` convention
 (columns: side, up, dir; `up_vec = -view_up`). See also `estimate_up_vec`.

@@ -48,6 +48,8 @@ Base.@kwdef mutable struct UIState
     dataset_normal_loss::Ref{Bool} = Ref(false)
     # Far-field shell the sky is painted onto (see `sky_dome.jl`).
     dataset_sky_dome::Ref{Bool} = Ref(false)
+    # Index into `SKY_DOME_SHAPES`.
+    dataset_sky_dome_shape::Ref{Int32} = Ref{Int32}(0)
     # Composite train renders over a random background (see `OptimizationParams`).
     dataset_random_background::Ref{Bool} = Ref(false)
     dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)

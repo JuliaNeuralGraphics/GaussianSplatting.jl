@@ -66,6 +66,16 @@ view_pos(c::Camera) = SVector{3, Float32}(@view(c.c2w[1:3, 4])...)
 
 look_at(c::Camera) = view_pos(c) .+ view_dir(c)
 
+"""
+Estimate the scene's up direction as the average of the dataset
+cameras' up axes: photos are mostly taken with a roughly level camera,
+while the COLMAP world orientation is arbitrary. Yawing around this
+vector instead of the world `-Y` keeps the horizon level.
+Negated to match the `up_vec` convention (`-view_up` of an identity camera),
+which also makes it point at the sky — see `SkyDome`.
+"""
+estimate_up_vec(cameras::Vector{Camera}) = -normalize(sum(view_up, cameras))
+
 function get_w2c(R::SMatrix{3, 3, Float32, 9}, t::SVector{3, Float32})
     P = zeros(MMatrix{4, 4, Float32, 16})
     P[1:3, 1:3] .= R
