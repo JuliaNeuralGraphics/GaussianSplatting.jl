@@ -480,21 +480,28 @@ function ssi_depth_loss(
     α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
-    # `1` on the one-sided pixels; `w` with those pixels removed.
+    # `1` where the data term's residual goes one-sided, and `w` restricted to
+    # the pixels the fit's support actually covers — i.e. whose target is an
+    # interpolation & so means something as a location, not just as a bound.
     one_sided = ignore_derivatives(ifelse.(far_extrap, 1f0, 0f0))
-    w_two_sided = ignore_derivatives(w .* (1f0 .- one_sided))
+    w_supported = ignore_derivatives(w .* (1f0 .- one_sided))
 
     # NOTE: the differentiable path uses `alpha`, not the clamped `α`. Zygote's
     # `clamp` adjoint is zero *at* the bound, so a fully opaque pixel would
     # silently lose the alpha cotangent this loss exists to produce.
     p = 1f0 ./ (depth_img ./ max.(alpha, 1f-6) .+ depth_floor)
 
-    # Residual scale from the two-sided pixels only: a large block of sky at
-    # `p ≈ 0` would otherwise inflate it for the whole image.
+    # REVERTED (under investigation): this used `w_supported`, to keep a large
+    # block of sky at `p ≈ 0` from inflating the residual scale. But excluding
+    # it *shrinks* σ, which raises `iscale` & saturates Geman-McClure sooner —
+    # and the largest residuals in inverse-depth space belong to near objects,
+    # so the tighter scale starves close geometry of gradient. Suspected cause
+    # of a near-field reconstruction regression; back to all valid pixels until
+    # that is settled.
     σ = ignore_derivatives() do
-        Σw = max(sum(w_two_sided), 1f-6)
-        μ = sum(w_two_sided .* p) / Σw
-        max(sqrt(max(sum(w_two_sided .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
+        Σw = max(sum(w), 1f-6)
+        μ = sum(w .* p) / Σw
+        max(sqrt(max(sum(w .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
     end
     iscale = 1f0 / (DEPTH_LOSS_RESIDUAL_SCALE * σ)
 
@@ -504,20 +511,20 @@ function ssi_depth_loss(
     r = r .- one_sided .* min.(r, 0f0)
     data = sum(w .* geman_mcclure.(r .* iscale))
 
-    # Forward differences along x (width) and y (height); pairs are
-    # weighted by the lesser alpha and both pixels must be valid & two-sided.
+    # Forward differences along x (width) and y (height); pairs are weighted by
+    # the lesser alpha and both pixels must be valid & inside the fit's support.
     hx =
         (p[2:end, :] .- p[1:(end - 1), :]) .-
         (target[2:end, :] .- target[1:(end - 1), :])
     bx = half_band[2:end, :] .+ half_band[1:(end - 1), :]
-    wx = min.(w_two_sided[2:end, :], w_two_sided[1:(end - 1), :])
+    wx = min.(w_supported[2:end, :], w_supported[1:(end - 1), :])
     grad_x = sum(wx .* geman_mcclure.(deadband.(hx, bx) .* iscale))
 
     hy =
         (p[:, 2:end] .- p[:, 1:(end - 1)]) .-
         (target[:, 2:end] .- target[:, 1:(end - 1)])
     by = half_band[:, 2:end] .+ half_band[:, 1:(end - 1)]
-    wy = min.(w_two_sided[:, 2:end], w_two_sided[:, 1:(end - 1)])
+    wy = min.(w_supported[:, 2:end], w_supported[:, 1:(end - 1)])
     grad_y = sum(wy .* geman_mcclure.(deadband.(hy, by) .* iscale))
 
     return (data + λ_grad * (grad_x + grad_y)) / Σα
