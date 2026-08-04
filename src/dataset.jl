@@ -27,6 +27,13 @@ struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
     # the fitted-anchor sidecar cache lives next to it.
     depths_dir::Maybe{String}
 
+    # Sky masks for sky supervision (`nothing` when an image has none).
+    # Soft weights in `[0, 1]`, so antialiased mask borders contribute
+    # proportionally instead of snapping (see `load_sky_mask`).
+    train_sky_masks::Vector{Maybe{Matrix{Float32}}}
+    has_sky_masks::Bool
+    sky_dir::Maybe{String}
+
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
     test_images::I
@@ -67,6 +74,8 @@ function ColmapDataset(;
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
     depths_dir = joinpath(dirname(images_dir), "depths")
     has_depth_dir = isdir(depths_dir)
+    sky_dir = joinpath(dirname(images_dir), "sky")
+    has_sky_dir = isdir(sky_dir)
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)
@@ -96,6 +105,8 @@ function ColmapDataset(;
     depth_priors_count = 0
     depth_maps = Maybe{Matrix{Float32}}[]
     depth_qsteps = Float32[]
+    sky_masks_count = 0
+    sky_masks = Maybe{Matrix{Float32}}[]
 
     image_filenames = String[]
     images_list = Array{UInt8, 3}[]
@@ -136,6 +147,18 @@ function ColmapDataset(;
             push!(depth_maps, nothing)
             push!(depth_qsteps, 0f0)
         end
+
+        # Unlike depth priors, a partially masked dataset is tolerated: views
+        # without a mask simply get no sky supervision.
+        sky_path = has_sky_dir ?
+            joinpath(sky_dir, "$(splitext(img.name)[1]).png") : ""
+        if has_sky_dir && isfile(sky_path)
+            push!(sky_masks, load_sky_mask(
+                sky_path, Int(new_resolution[1]), Int(new_resolution[2])))
+            sky_masks_count += 1
+        else
+            push!(sky_masks, nothing)
+        end
     end
     @info "Loaded `$(length(images_list))` images."
     images = cat(images_list...; dims=4)
@@ -170,6 +193,7 @@ function ColmapDataset(;
     train_image_filenames = image_filenames[train_ids]
     train_depths = depth_maps[train_ids]
     train_depth_qsteps = depth_qsteps[train_ids]
+    train_sky_masks = sky_masks[train_ids]
 
     test_cameras = cameras[test_ids]
     test_images = images[:, :, :, test_ids]
@@ -178,6 +202,10 @@ function ColmapDataset(;
     depth_priors_count > 0 &&
         @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."
 
+    n_train_sky = count(!isnothing, train_sky_masks)
+    sky_masks_count > 0 &&
+        @info "Found sky masks for $n_train_sky / $(length(train_sky_masks)) train images."
+
     ColmapDataset(
         Float32.(points.points_3d),
         Float32.(points.points_colors) .* (1f0 / 255f0),
@@ -185,6 +213,7 @@ function ColmapDataset(;
         train_image_filenames, train_cameras, train_images, train_thumbnails,
         train_depths, train_depth_qsteps, depth_priors_count > 0,
         has_depth_dir ? depths_dir : nothing,
+        train_sky_masks, n_train_sky > 0, has_sky_dir ? sky_dir : nothing,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
 end

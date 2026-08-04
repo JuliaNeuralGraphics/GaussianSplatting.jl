@@ -71,6 +71,7 @@ include("strategy.jl")
 include("densification.jl")
 include("mcmc.jl")
 include("rasterization/rasterizer.jl")
+include("sky_dome.jl")
 include("training.jl")
 include("gui/gui.jl")
 
@@ -179,6 +180,12 @@ function main(kab, dataset_path::String;
             loss, eval_ssim, eval_mse, eval_psnr = round.(
                 (loss, eval_ssim, eval_mse, eval_psnr); digits=4)
             println("i=$i | N Gaussians: $(length(gaussians)) | ↓ loss=$loss | ↑ ssim=$eval_ssim | ↓ mse=$eval_mse | ↑ psnr=$eval_psnr")
+            # Weighted contributions, so they sum to `loss` & a mis-scaled
+            # weight shows up as a term that dwarfs the ones it competes with.
+            # The average is the one to read for trends: each step scores a
+            # different view, so single-step values swing on view difficulty.
+            println("        terms: $(format_breakdown(trainer.losses.current))")
+            println("        ema:   $(format_breakdown(smoothed(trainer.losses)))")
         end
     end
     t2 = time()

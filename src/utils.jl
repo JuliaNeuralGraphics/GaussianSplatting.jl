@@ -24,6 +24,26 @@ Base.@kwdef struct OptimizationParams
     depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
     depth_loss_steps::Int = 30_000 # Weight decays to 2% by this step.
 
+    # Sky dome (see `sky_dome.jl`): a frozen far-field shell of Gaussians
+    # composited behind the scene, so sky pixels have a parallax-free place to
+    # live instead of becoming near opaque floaters.
+    use_sky_dome::Bool = false
+    # `:hemisphere` covers only the sky, leaving black behind downward-looking
+    # rays so the ground has to become opaque on its own; a full `:sphere`
+    # gives the optimizer a free background everywhere & tends to absorb ground
+    # into the dome (see `sky_dome.jl`).
+    sky_dome_shape::Symbol = :hemisphere # :hemisphere | :sphere
+    sky_dome_points::Int = 32_768
+    sky_dome_radius_factor::Float32 = 100f0 # × the dataset's camera extent.
+    sky_dome_lr::Float32 = 25f-4            # Colors only; matches `lr_feature`.
+
+    # Sky mask supervision (see `sky_dome.jl`): pulls the scene's accumulated
+    # alpha to zero on sky rays, so a floater there costs something.
+    # Inert unless sky masks were found next to the dataset images.
+    use_sky_loss::Bool = true
+    sky_loss_weight::Float32 = 1f0
+    sky_loss_from_iter::Int = 500
+
     # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
     # per-train-image low-res affine color grids applied to the render before
     # the photometric loss, absorbing exposure / white-balance drift.
@@ -38,10 +58,9 @@ Base.@kwdef struct OptimizationParams
     # Requires a `:rgbdn` rasterizer, which renders the extra normal channels.
     use_normal_loss::Bool = false
     normal_consistency_weight::Float32 = 0.05f0
-    normal_flatten_weight::Float32 = 1f0
-    # Both terms start once the geometry is roughly in place
-    # (LichtFeld's 20% start fraction of a 30k run).
-    normal_from_iter::Int = 6_000
+    normal_flatten_weight::Float32 = 0.01f0
+    # Both terms start once the geometry is roughly in place.
+    normal_from_iter::Int = 15_000
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)

@@ -163,6 +163,10 @@ mutable struct GSGUI
     # only change via installs the UI itself initiated.
     gaussians::Maybe{GaussianModel}
     rasterizer::GaussianRasterizer
+    # Renders `trainer.sky` at the *view* resolution. Separate from the dome's
+    # own training rasterizer, which stays sized to the dataset: sharing one
+    # would rebuild it on every alternation between a train step & a view render.
+    sky_rasterizer::Maybe{GaussianRasterizer}
     trainer::Maybe{Trainer}
 
     worker::RenderWorker
@@ -231,7 +235,7 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     gsgui = GSGUI(
         context, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, rasterizer, trainer, worker)
+        gaussians, rasterizer, nothing, trainer, worker)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -252,7 +256,8 @@ const SH_DEGREE_TOOLTIP =
 function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
-    random_background::Bool = true, max_sh_degree::Int = 3, gl_kwargs...,
+    random_background::Bool = false, use_sky_dome::Bool = false,
+    sky_dome_shape::Symbol = :hemisphere, max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
     NGL.init(3, 2)
@@ -270,7 +275,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
-        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background)
+        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
+        use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -284,6 +290,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
     gui_rasterizer = GaussianRasterizer(kab, camera; mode=:rgbd)
+    gui_sky_rasterizer = trainer.sky ≡ nothing ?
+        nothing : sky_view_rasterizer(kab, trainer.sky, camera)
 
     render_state = RenderState(;
         surface=NGL.RenderSurface(;
@@ -304,7 +312,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     gsgui = GSGUI(
         context, FrustumRenderer(), nothing, render_state, ui_state,
         control_settings, capture_mode, camera,
-        gaussians, gui_rasterizer, trainer, worker)
+        gaussians, gui_rasterizer, gui_sky_rasterizer, trainer, worker)
     GSGUI_REF[] = gsgui
     return gsgui
 end
@@ -322,7 +330,8 @@ in `apply_dataset!`.
 function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
     use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
-    use_normal_loss::Bool = false, random_background::Bool = true,
+    use_normal_loss::Bool = false, random_background::Bool = false,
+    use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
     max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
@@ -330,7 +339,8 @@ function load_dataset(kab, dataset_path::String;
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
-        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background)
+        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
+        use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -343,12 +353,14 @@ function load_dataset(kab, dataset_path::String;
     set_resolution!(camera; width, height)
     # TODO free the old one before creating new one.
     gui_rasterizer = GaussianRasterizer(kab, camera; mode=:rgbd)
+    gui_sky_rasterizer = trainer.sky ≡ nothing ?
+        nothing : sky_view_rasterizer(kab, trainer.sky, camera)
 
     up_vec = estimate_up_vec(dataset.train_cameras)
     # H2D copies above run on this task's stream: make sure they are
     # done before the worker task touches the new arrays.
     KA.synchronize(kab)
-    return (; camera, gaussians, gui_rasterizer, trainer, up_vec)
+    return (; camera, gaussians, gui_rasterizer, gui_sky_rasterizer, trainer, up_vec)
 end
 
 # Replace the current scene, keeping the GL context & render surface.
@@ -381,6 +393,16 @@ function load_bson(kab, state_file::String)
     θ = load_checkpoint(state_file)
     gaussians = GaussianModel(kab)
     set_from_bson!(gaussians, θ[:gaussians])
+
+    # Viewer-only mode has no trainer to hold a dome, so fold it into the model
+    # the same way `export_ply` does. Older checkpoints have no `:sky` key.
+    sky = get(θ, :sky, nothing)
+    if sky ≢ nothing
+        sky_gaussians = GaussianModel(kab)
+        set_from_bson!(sky_gaussians, sky.gaussians)
+        gaussians = merge_sky(gaussians, sky_gaussians)
+    end
+
     # H2D copies above run on this task's stream: make sure they are
     # done before the worker task touches the new arrays.
     KA.synchronize(kab)
@@ -651,13 +673,40 @@ function open_dataset_modal!(gui::GSGUI)
             "channels per step.")
     end
 
+    CImGui.Checkbox("Sky dome", ui_state.dataset_sky_dome)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "A frozen shell of gaussians far behind the scene that the sky is " *
+            "painted onto.\nWithout it the sky can only be drawn by near, " *
+            "opaque splats, which show up as floaters from any view off the " *
+            "capture path.\nRecommended for outdoor scenes; pointless indoors.")
+    end
+
+    ui_state.dataset_sky_dome[] || disabled_begin()
+    CImGui.Text("Sky dome shape:")
+    for (i, shape) in enumerate(SKY_DOME_SHAPES)
+        CImGui.SameLine()
+        if CImGui.RadioButton("$shape", Int(ui_state.dataset_sky_dome_shape[]) == i - 1)
+            ui_state.dataset_sky_dome_shape[] = i - 1
+        end
+    end
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "`hemisphere` covers only the sky, leaving black below the " *
+            "horizon so the ground has to become solid on its own.\n" *
+            "`sphere` wraps the whole scene, which gives the optimizer a free " *
+            "background everywhere and tends to pull ground onto the dome.")
+    end
+    ui_state.dataset_sky_dome[] || disabled_end()
+
     CImGui.Checkbox("Random background", ui_state.dataset_random_background)
     if CImGui.IsItemHovered()
         CImGui.SetTooltip(
             "Train against a randomly colored background instead of a black " *
             "one.\nHelps the gaussians settle on the right transparency, but " *
             "the reference implementation keeps it off & its published " *
-            "numbers are without it.")
+            "numbers are without it.\nIgnored when the sky dome is on, which " *
+            "supplies the background itself.")
     end
 
     # Always occupy the error line to keep the window height constant.
@@ -681,12 +730,14 @@ function open_dataset_modal!(gui::GSGUI)
         use_bilateral_grid = ui_state.dataset_bilateral_grid[]
         use_normal_loss = ui_state.dataset_normal_loss[]
         random_background = ui_state.dataset_random_background[]
+        use_sky_dome = ui_state.dataset_sky_dome[]
+        sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1]
         max_sh_degree = Int(ui_state.dataset_max_sh_degree[])
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
             kab, dataset_path; scale, width, height, strategy,
             use_depth_loss, use_bilateral_grid, use_normal_loss,
-            random_background, max_sh_degree)
+            random_background, use_sky_dome, sky_dome_shape, max_sh_degree)
     end
     can_open || disabled_end()
 

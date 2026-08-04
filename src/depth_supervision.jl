@@ -7,6 +7,13 @@ Instead a fixed per-camera "anchor" is fitted once at startup
 against the SfM point cloud, which keeps the supervision target absolute
 and multi-view consistent instead of letting the model drag the target
 along with its own errors.
+
+An anchor is only fitted where the SfM cloud has points, so it says nothing
+about the sky: sky pixels sit below every prior value the fit ever saw, and
+evaluating the affine map there is extrapolation. Taken at face value it
+places the sky at a finite depth and manufactures floaters, so pixels beyond
+the far end of the fit's support are supervised one-sidedly instead
+(see [`ssi_depth_loss`](@ref)).
 """
 
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
@@ -37,20 +44,71 @@ Affine alignment of a relative depth prior to the scene:
 `a·t + b` maps the prior value `t` to:
 - inverse depth `1 / (z + floor)` when `disparity` is set;
 - to depth `z` otherwise.
+
+`p_far` is the smallest target-space (inverse-depth) value the fit's inlier
+support covers, i.e. the farthest distance the anchor can vouch for. Targets
+below it are extrapolation — see [`anchor_target`](@ref) & [`depth_target`](@ref).
+`0f0` disables the distinction (no support information).
 """
 struct DepthAnchor
     a::Float32
     b::Float32
     floor::Float32
     disparity::Float32
+    p_far::Float32
+end
+
+"""
+Map a prior value `t` through `anchor` into target space (inverse depth).
+The scalar counterpart of the broadcasts in [`depth_target`](@ref).
+"""
+function anchor_target(a::Float32, b::Float32, floor::Float32, disparity::Float32, t::Float32)
+    affine = a * t + b
+    return disparity > 0 ?
+        min(affine, 1f0 / floor) :
+        1f0 / (affine + floor)
+end
+
+anchor_target(anchor::DepthAnchor, t::Float32) =
+    anchor_target(anchor.a, anchor.b, anchor.floor, anchor.disparity, t)
+
+"""
+Build an anchor and derive its `p_far` from the prior-value support
+`[t_lo, t_hi]` the fit was estimated on.
+
+The mapping is monotonic in `t`, so the farther of the two endpoint targets is
+simply the smaller one — which resolves the slope sign & the
+disparity/depth parameterization without special-casing either.
+
+A bracket has to have width to mean anything: `t_lo == t_hi` says the fit was
+supported at a single value, not over a range, and taking that point as the
+support boundary would flag everything below one arbitrary target. Such a
+bracket, and any non-finite or non-positive bound, yields `p_far = 0` —
+two-sided supervision everywhere, i.e. the behavior from before this existed.
+"""
+function DepthAnchor(
+    a::Float32, b::Float32, floor::Float32, disparity::Float32,
+    t_lo::Float32, t_hi::Float32,
+)
+    t_hi > t_lo || return DepthAnchor(a, b, floor, disparity, 0f0)
+
+    p_lo = anchor_target(a, b, floor, disparity, t_lo)
+    p_hi = anchor_target(a, b, floor, disparity, t_hi)
+    p_far = min(p_lo, p_hi)
+    (isfinite(p_far) && p_far > 0f0) || (p_far = 0f0)
+    return DepthAnchor(a, b, floor, disparity, p_far)
 end
 
 # Helper structure used by ransac_affine_fit.
+# `t_lo`/`t_hi` bracket the prior values of the final inlier set: the range the
+# fit is actually supported by, everything outside it being extrapolation.
 struct AnchorFit
     a::Float32
     b::Float32
     corr::Float32
     inlier_fraction::Float32
+    t_lo::Float32
+    t_hi::Float32
     usable::Bool
 end
 
@@ -84,6 +142,7 @@ function ransac_affine_fit(
     anchor_min_inlier_fraction::Float32 = 0.3f0,
     anchor_min_corr::Float32 = 0.35f0,
     score_subset::Int = 16_384,
+    support_quantile::Float32 = 0.02f0,
 )
     n = length(ts)
     a, b = ls_affine_fit(ts, ys)
@@ -125,11 +184,21 @@ function ransac_affine_fit(
         0f0 : Float32(cor(@view(ts[inliers]), @view(ys[inliers])))
     isfinite(corr) || (corr = 0f0)
 
+    # Quantiles rather than extrema: a couple of surviving outliers should not
+    # stretch the claimed support across the whole prior range.
+    t_lo, t_hi = if length(inliers) < 2
+        0f0, 0f0
+    else
+        ti = ts[inliers]
+        Float32(quantile(ti, support_quantile)),
+        Float32(quantile(ti, 1f0 - support_quantile))
+    end
+
     usable =
         n ≥ min_anchor_samples &&
         inlier_fraction ≥ anchor_min_inlier_fraction &&
         abs(corr) ≥ anchor_min_corr
-    return AnchorFit(a, b, corr, inlier_fraction, usable)
+    return AnchorFit(a, b, corr, inlier_fraction, t_lo, t_hi, usable)
 end
 
 function robust_aabb(points::Matrix{Float32}; q::Float32 = 0.01f0, pad::Float32 = 0.1f0)
@@ -258,7 +327,8 @@ function fit_depth_anchors(
         fits[i] ≡ nothing && continue
         f = selected(fits[i])
         (f.usable && sign(f.a) == slope_sign) || continue
-        anchors[i] = DepthAnchor(f.a, f.b, fits[i].floor, Float32(disparity))
+        anchors[i] = DepthAnchor(
+            f.a, f.b, fits[i].floor, Float32(disparity), f.t_lo, f.t_hi)
         n_anchored += 1
     end
 
@@ -333,9 +403,15 @@ deadband(r, half) = sign(r) * max(abs(r) - half, 0f0)
 
 """
 Build the per-pixel supervision target from a prior and its anchor:
-inverse-depth target `d`, quantization deadband half-width and validity.
+inverse-depth target `d`, quantization deadband half-width, validity and the
+extrapolation flag.
 For the depth model the half-step is propagated through the inversion
 as `half·d²`.
+
+`far_extrap` marks pixels whose target lies beyond the far end of the fit's
+inlier support (`anchor.p_far`) — typically the sky, which no SfM point ever
+constrained. Their target is an extrapolation of the affine map and is used
+one-sidedly by [`ssi_depth_loss`](@ref).
 """
 function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep::Float32)
     affine = anchor.a .* prior .+ anchor.b
@@ -348,7 +424,8 @@ function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep
         target = 1f0 ./ (affine .+ anchor.floor)
         half_band = half_step .* target.^2
     end
-    return target, half_band, valid
+    far_extrap = target .< anchor.p_far
+    return target, half_band, valid, far_extrap
 end
 
 """
@@ -368,9 +445,19 @@ Data term:
 alpha-weighted Geman-McClure penalty on the deadbanded residual,
 scaled by the alpha-weighted std of `p` (detached).
 
+On `far_extrap` pixels the residual is one-sided: only a render *nearer* than
+the target is penalized, never one farther away. Their target is the affine
+map evaluated outside the range of prior values it was fitted on (the sky, in
+practice), so it is trustworthy as a lower bound on distance and nothing more.
+Read as a constraint: nothing may sit closer than the farthest thing the fit
+can vouch for — which is exactly what suppresses sky floaters — while the
+extrapolated value itself never pulls geometry forward onto it.
+
 Gradient term:
 same penalty on the mismatch of forward-difference gradients,
-aligning depth edges rather than absolute values.
+aligning depth edges rather than absolute values. Extrapolated pixels are
+excluded from it altogether: a finite difference across the sky/scene boundary
+compares a real depth edge against an invented one.
 
 The sum is normalized by the total alpha.
 """
@@ -380,41 +467,60 @@ function ssi_depth_loss(
     target::AbstractMatrix{Float32},
     half_band::AbstractMatrix{Float32},
     valid::AbstractMatrix{Bool},
+    far_extrap::AbstractMatrix{Bool},
     depth_floor::Float32,
     λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
 )
     α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
     Σα = ignore_derivatives(max(sum(α), 1f0))
+    # `1` where the data term's residual goes one-sided, and `w` restricted to
+    # the pixels the fit's support actually covers — i.e. whose target is an
+    # interpolation & so means something as a location, not just as a bound.
+    one_sided = ignore_derivatives(ifelse.(far_extrap, 1f0, 0f0))
+    w_supported = ignore_derivatives(w .* (1f0 .- one_sided))
 
     # NOTE: the differentiable path uses `alpha`, not the clamped `α`. Zygote's
     # `clamp` adjoint is zero *at* the bound, so a fully opaque pixel would
     # silently lose the alpha cotangent this loss exists to produce.
     p = 1f0 ./ (depth_img ./ max.(alpha, 1f-6) .+ depth_floor)
 
+    # Residual scale from the supported pixels only: a large block of sky at
+    # `p ≈ 0` would otherwise inflate it for the whole image.
+    #
+    # This cuts both ways & the balance is not measured. Excluding the sky also
+    # *shrinks* σ, which raises `iscale` and saturates Geman-McClure sooner;
+    # since the largest residuals in inverse-depth space belong to near objects
+    # (`|dz/dp| = 1/p²`), a tighter scale is felt first by close geometry.
+    # Note the effect is largest early in training — once sky alpha collapses,
+    # `w` is ≈ 0 there anyway and the two variants converge.
     σ = ignore_derivatives() do
-        Σw = max(sum(w), 1f-6)
-        μ = sum(w .* p) / Σw
-        max(sqrt(max(sum(w .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
+        Σw = max(sum(w_supported), 1f-6)
+        μ = sum(w_supported .* p) / Σw
+        max(sqrt(max(sum(w_supported .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
     end
     iscale = 1f0 / (DEPTH_LOSS_RESIDUAL_SCALE * σ)
 
-    data = sum(w .* geman_mcclure.(deadband.(p .- target, half_band) .* iscale))
+    # `r - min(r, 0)` is `max(r, 0)`, so the mask selects the one-sided
+    # residual with plain arithmetic — no `ifelse` in the differentiable path.
+    r = deadband.(p .- target, half_band)
+    r = r .- one_sided .* min.(r, 0f0)
+    data = sum(w .* geman_mcclure.(r .* iscale))
 
-    # Forward differences along x (width) and y (height); pairs are
-    # weighted by the lesser alpha and both pixels must be valid.
+    # Forward differences along x (width) and y (height); pairs are weighted by
+    # the lesser alpha and both pixels must be valid & inside the fit's support.
     hx =
         (p[2:end, :] .- p[1:(end - 1), :]) .-
         (target[2:end, :] .- target[1:(end - 1), :])
     bx = half_band[2:end, :] .+ half_band[1:(end - 1), :]
-    wx = min.(w[2:end, :], w[1:(end - 1), :])
+    wx = min.(w_supported[2:end, :], w_supported[1:(end - 1), :])
     grad_x = sum(wx .* geman_mcclure.(deadband.(hx, bx) .* iscale))
 
     hy =
         (p[:, 2:end] .- p[:, 1:(end - 1)]) .-
         (target[:, 2:end] .- target[:, 1:(end - 1)])
     by = half_band[:, 2:end] .+ half_band[:, 1:(end - 1)]
-    wy = min.(w[:, 2:end], w[:, 1:(end - 1)])
+    wy = min.(w_supported[:, 2:end], w_supported[:, 1:(end - 1)])
     grad_y = sum(wy .* geman_mcclure.(deadband.(hy, by) .* iscale))
 
     return (data + λ_grad * (grad_x + grad_y)) / Σα

@@ -25,6 +25,12 @@ mutable struct GaussianRasterizer{
 
     grid::SVector{2, Int32}
 
+    # Camera-space depth range Gaussians are kept in (see `project!`).
+    # The sky dome needs a far plane past its radius, so this is per-rasterizer
+    # rather than a global constant.
+    near_plane::Float32
+    far_plane::Float32
+
     mode::Symbol
 end
 
@@ -54,6 +60,8 @@ training_rasterizer_mode(opt_params::OptimizationParams) =
 function GaussianRasterizer(kab;
     width::Int, height::Int,
     mode::Symbol = :rgbd,
+    near_plane::Float32 = 0.2f0,
+    far_plane::Float32 = 1000f0,
 )
     @assert width % 16 == 0 && height % 16 == 0
     modes = (:rgb, :rgbd, :rgbdn)
@@ -76,7 +84,7 @@ function GaussianRasterizer(kab;
         istate, gstate, bstate,
         shs, scales_act, opacities_act,
         image, pinned_image, host_image,
-        grid, mode)
+        grid, near_plane, far_plane, mode)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
 end
@@ -282,8 +290,7 @@ function rasterize(
         SVector{3, Float32}(camera.w2c[1:3, 4]) :
         t_w2c
 
-    # TODO make configurable.
-    near_plane, far_plane = 0.2f0, 1000f0
+    near_plane, far_plane = rast.near_plane, rast.far_plane
     radius_clip = Int32(3) # In pixels.
     blur_ϵ = 0.3f0
 

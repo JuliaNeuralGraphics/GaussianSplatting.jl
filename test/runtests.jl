@@ -372,6 +372,82 @@ end
     ts_small = collect(Float32, 1:100)
     f = ransac_affine_fit(ts_small, 2f0 .* ts_small .+ 3f0)
     @test !f.usable
+
+    # The support bracket is reported so `DepthAnchor` can tell interpolation
+    # from extrapolation. Quantiles, so a stray inlier cannot stretch it.
+    f = ransac_affine_fit(ts, 2f0 .* ts .+ 3f0)
+    @test f.t_lo ≈ quantile(ts, 0.02) atol=1f0
+    @test f.t_hi ≈ quantile(ts, 0.98) atol=1f0
+end
+
+@testset "Depth anchor extrapolation" begin
+    DepthAnchor = GaussianSplatting.DepthAnchor
+    anchor_target = GaussianSplatting.anchor_target
+    depth_target = GaussianSplatting.depth_target
+
+    # Disparity anchor fitted on priors t ∈ [0.3, 0.9]; sky sits at t ≈ 0.
+    a, b, dfloor, disparity = 1f0, 0.05f0, 0.1f0, 1f0
+    anchor = DepthAnchor(a, b, dfloor, disparity, 0.3f0, 0.9f0)
+
+    # `p_far` is the *smaller* endpoint target, i.e. the farthest distance the
+    # fit vouches for, whichever way the slope runs.
+    @test anchor.p_far ≈ anchor_target(anchor, 0.3f0)
+    @test anchor.p_far < anchor_target(anchor, 0.9f0)
+    # A negative slope flips which endpoint is far; `p_far` must follow.
+    flipped = DepthAnchor(-a, 1f0, dfloor, disparity, 0.3f0, 0.9f0)
+    @test flipped.p_far ≈ anchor_target(flipped, 0.9f0)
+
+    # A zero-width bracket carries no support information: fall back to
+    # two-sided supervision everywhere rather than flagging everything below
+    # one arbitrary target.
+    @test DepthAnchor(a, b, dfloor, disparity, 0f0, 0f0).p_far == 0f0
+    @test DepthAnchor(a, b, dfloor, disparity, 0.5f0, 0.5f0).p_far == 0f0
+    # With `p_far = 0` nothing is ever flagged.
+    flat = DepthAnchor(a, b, dfloor, disparity, 0.5f0, 0.5f0)
+    @test !any(depth_target(flat, Float32[0.5 0.005], 1f0 / 255f0)[4])
+
+    # Only the sky pixel is flagged; scene pixels inside the support are not.
+    prior = Float32[0.5 0.7; 0.8 0.005]
+    target, half_band, valid, far_extrap = depth_target(anchor, prior, 1f0 / 255f0)
+    @test all(valid)
+    @test far_extrap == Bool[0 0; 0 1]
+    # The bug this guards: the extrapolated target is a *finite* depth, so
+    # taken two-sidedly it plants geometry there.
+    @test isfinite(1f0 / target[2, 2] - dfloor)
+end
+
+@testset "One-sided sky depth supervision" begin
+    ssi_depth_loss = GaussianSplatting.ssi_depth_loss
+    anchor = GaussianSplatting.DepthAnchor(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
+    dfloor = anchor.floor
+
+    prior = Float32[0.5 0.7; 0.8 0.005]
+    target, half_band, valid, far_extrap = GaussianSplatting.depth_target(
+        anchor, prior, 1f0 / 255f0)
+    alpha = ones(Float32, 2, 2)
+    on_target = 1f0 ./ target .- dfloor
+    sel = Float32[0 0; 0 1] # Selects the sky pixel without mutating.
+
+    loss(z, fe) = ssi_depth_loss(
+        on_target .* (1f0 .- sel) .+ z .* sel, alpha;
+        target, half_band, valid, far_extrap=fe, depth_floor=dfloor)
+
+    sky_z = on_target[2, 2]
+    grad(z, fe) = Zygote.gradient(x -> loss(x, fe), z)[1]
+
+    # Nearer than the extrapolated target: penalized, and pushed away.
+    @test loss(2f0, far_extrap) > 0f0
+    @test grad(2f0, far_extrap) < 0f0
+    # Farther: free. This is the whole point — the sky may be arbitrarily
+    # distant, it just may not come closer than the fit can vouch for.
+    @test loss(10f0 * sky_z, far_extrap) ≈ 0f0 atol=1f-8
+    @test grad(10f0 * sky_z, far_extrap) == 0f0
+
+    # Without the flag the same pixel is pulled back onto the extrapolation:
+    # the behaviour that manufactures sky floaters.
+    two_sided = falses(2, 2)
+    @test loss(10f0 * sky_z, two_sided) > 0f0
+    @test grad(10f0 * sky_z, two_sided) > 0f0
 end
 
 @testset "MCMC relocation (Eq. 9)" begin
@@ -662,6 +738,166 @@ end
     @test size(∇rot) == size(gaussians.rotations)
     @test all(isfinite, Array(∇rot))
     @test maximum(abs, Array(∇rot)) > 0f0
+end
+
+# A partially transparent scene, so `alpha` spans (0, 1) and the composite is
+# actually exercised rather than being trivially 0 or 1 everywhere.
+function sky_test_scene(kab; opacity::Float32 = 0.5f0)
+    xs = range(-0.6f0, 0.6f0; length=6)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n = size(points, 2)
+    colors = adapt(kab, rand(Float32, 3, n))
+    scales = adapt(kab, fill(log(0.1f0), 3, n))
+
+    gaussians = GaussianSplatting.GaussianModel(kab,
+        points, colors, scales; max_sh_degree=0, isotropic=false)
+    gaussians.opacities .= GaussianSplatting.inverse_sigmoid(opacity)
+    return gaussians
+end
+
+@testset "Sky composite identity" begin
+    width, height = 64, 48
+    camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width, height)
+    gaussians = sky_test_scene(kab)
+    rast = GaussianSplatting.GaussianRasterizer(kab, camera; mode=:rgbd)
+
+    render(background) = Array(rast(
+        gaussians.points, gaussians.opacities, gaussians.scales,
+        gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+        camera, sh_degree=0, background))
+
+    # Compositing a *uniform* dome outside the rasterizer must reproduce what
+    # the kernel does with the same color as its background. This is the claim
+    # the whole design rests on: `alpha` (channel 5) is exactly `1 - T_final`,
+    # so `image + (1 - alpha)·sky` is real back-to-front blending, not an
+    # approximation.
+    bg = SVector{3, Float32}(0.2f0, 0.7f0, 0.4f0)
+    in_kernel = render(bg)[1:3, :, :]
+
+    zeroed = render(zeros(SVector{3, Float32}))
+    alpha = zeroed[5, :, :]
+    composited = zeroed[1:3, :, :] .+
+        reshape(1f0 .- alpha, 1, width, height) .* Array(bg)
+
+    # The composite must be exercised over the whole range of `alpha`: bare
+    # background (the dome shows through fully), partial coverage (both terms
+    # contribute) and near-opaque scene.
+    @test minimum(alpha) < 1f-3
+    @test any(0.05f0 .< alpha .< 0.95f0)
+    @test maximum(alpha) > 0.3f0
+    @test maximum(abs, in_kernel .- composited) < 1f-5
+
+    # `composite_sky` itself, on device, against the same reference.
+    sky_rgb = adapt(kab, repeat(Array(bg), 1, width, height))
+    device = Array(GaussianSplatting.composite_sky(
+        adapt(kab, zeroed[1:3, :, :]), adapt(kab, alpha), sky_rgb))
+    @test maximum(abs, in_kernel .- device) < 1f-5
+end
+
+@testset "Sky dome" begin
+    width, height = 64, 48
+    camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width, height)
+    opt_params = GaussianSplatting.OptimizationParams(;
+        use_sky_dome=true, sky_dome_points=8192, sky_dome_shape=:sphere)
+
+    radius = 50f0
+    sky = GaussianSplatting.SkyDome(kab, camera, opt_params;
+        center=zeros(SVector{3, Float32}), radius,
+        color=SVector{3, Float32}(0.2f0, 0.4f0, 0.9f0))
+    @test length(sky) == 8192
+    # The dome must outlive its own far plane, or `project!` culls all of it.
+    @test sky.rast.far_plane > radius
+
+    # No holes: a gap in the shell shows up as a dark speck in the sky, which
+    # is what `SKY_DOME_OVERLAP` is sized to prevent.
+    probe = GaussianSplatting.GaussianRasterizer(kab, camera;
+        mode=:rgbd, far_plane=4f0 * radius)
+    gs = sky.gaussians
+    image = Array(probe(
+        gs.points, gs.opacities, gs.scales, gs.rotations,
+        gs.features_dc, gs.features_rest; camera, sh_degree=0))
+    dome_alpha = image[5, :, :]
+    @test minimum(dome_alpha) > 0.98f0
+
+    # The dome renders the color it was initialized with. Checked where the
+    # shell is opaque: elsewhere the render is legitimately `alpha · color`.
+    rgb = Array(GaussianSplatting.render_sky(sky, camera))
+    @test size(rgb) == (3, width, height)
+    opaque = dome_alpha .> 0.99f0
+    @test any(opaque)
+    for (c, expected) in enumerate((0.2f0, 0.4f0, 0.9f0))
+        @test all(isapprox.(rgb[c, :, :][opaque], expected; atol=1f-2))
+    end
+
+    # Colors are trainable; the frozen geometry is not touched by the optimizer.
+    weights = adapt(kab, randn(Float32, 3, width, height))
+    _, (∇dc,) = Zygote.withgradient(gs.features_dc) do features_dc
+        sum(GaussianSplatting.render_sky(sky, camera, features_dc) .* weights)
+    end
+    @test size(∇dc) == size(gs.features_dc)
+    @test all(isfinite, Array(∇dc))
+    @test maximum(abs, Array(∇dc)) > 0f0
+
+    # Merging for export: one set, dome last, higher SH bands zero-padded to
+    # the scene's degree so external viewers read a constant color.
+    scene = sky_test_scene(kab)
+    scene.max_sh_degree = 3
+    scene.features_rest = adapt(kab, randn(Float32, 3, 15, length(scene)))
+    merged = GaussianSplatting.merge_sky(scene, sky)
+    @test length(merged) == length(scene) + length(sky)
+    @test size(merged.features_rest) == (3, 15, length(merged))
+    @test all(iszero, Array(merged.features_rest)[:, :, (length(scene) + 1):end])
+    @test Array(merged.points)[:, (length(scene) + 1):end] ≈ Array(gs.points)
+end
+
+@testset "Sky dome shape" begin
+    sky_dome_directions = GaussianSplatting.sky_dome_directions
+    up = SVector{3, Float32}(0f0, 0f0, 1f0)
+
+    sphere, sphere_spacing = sky_dome_directions(4096, :sphere, up)
+    @test size(sphere) == (3, 4096)
+    @test any(sphere[3, :] .< 0f0) # Covers below the horizon.
+
+    # The cut keeps the requested count, not half of it: the lattice is
+    # generated oversized so density is the same either way.
+    hemi, hemi_spacing = sky_dome_directions(4096, :hemisphere, up)
+    @test size(hemi, 2) ≈ 4096 rtol=0.05
+    @test hemi_spacing ≈ sqrt(4f0 * Float32(pi) / 8192f0)
+    @test hemi_spacing < sphere_spacing
+
+    # Nothing below the horizon: that is the whole point — downward-looking
+    # rays get no free background, so the ground has to be opaque itself.
+    @test all(hemi[3, :] .≥ 0f0)
+    # Still a full hemisphere of sky, not a cap around the zenith.
+    @test minimum(hemi[3, :]) < 0.05f0 && maximum(hemi[3, :]) > 0.95f0
+
+    # The cut follows `up`, it is not hardcoded to an axis.
+    tilted = normalize(SVector{3, Float32}(1f0, 0f0, 1f0))
+    dirs, _ = sky_dome_directions(2048, :hemisphere, tilted)
+    @test all(vec(sum(dirs .* Array(tilted); dims=1)) .≥ -1f-5)
+
+    @test_throws ErrorException sky_dome_directions(64, :dome, up)
+end
+
+@testset "sky_opacity_loss" begin
+    sky_opacity_loss = GaussianSplatting.sky_opacity_loss
+
+    alpha = adapt(kab, Float32[0.9 0.1; 0.5 1.0])
+    mask = adapt(kab, Float32[1 0; 0 1])
+    # Masked mean of α², normalized by the mask weight.
+    @test sky_opacity_loss(alpha, mask) ≈ (0.9f0^2 + 1f0^2) / 2f0
+
+    _, (∇,) = Zygote.withgradient(a -> sky_opacity_loss(a, mask), alpha)
+    g = Array(∇)
+    @test all(iszero, g[[2, 3]])       # Unmasked pixels are untouched.
+    @test g[1, 1] > 0f0 && g[2, 2] > 0f0 # Masked ones are pushed toward zero.
+    # The saturated pixel is exactly the floater this targets: its gradient
+    # must survive (the trap `clamp` would spring, see `ssi_depth_loss`).
+    @test g[2, 2] ≈ 2f0 * 1f0 / 2f0
+
+    # An empty mask must not divide by zero.
+    @test sky_opacity_loss(alpha, adapt(kab, zeros(Float32, 2, 2))) == 0f0
 end
 
 @testset "Checkpoint" begin

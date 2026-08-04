@@ -319,32 +319,37 @@ end
         vΣ_2D  * J * Σ' +
         vΣ_2D' * J * Σ
 
-    vmean = MVector{3, Float32}(
-        focal[1] * rz * vmean_2D[1],
-        focal[2] * rz * vmean_2D[2],
-        -rz² * (
-            focal[1] * mean[1] * vmean_2D[1] +
-            focal[2] * mean[2] * vmean_2D[2]),
-    )
+    # NOTE: Accumulated in scalars rather than an `MVector`,
+    # otherwise LLVM fails to emit correct code for CUDA.
+    # LLVM builds the return value in the stack frame instead of in registers,
+    # and it then merges two of the writes into one 8-byte store.
+    # This function is not inlined into the kernel, so that store lands in the
+    # caller's `sret` slot - which PTX only guarantees 4-byte alignment for
+    # (`.local .align 4 __local_depot`), giving `ERROR_MISALIGNED_ADDRESS` on CUDA.
+    vmean_x = focal[1] * rz * vmean_2D[1]
+    vmean_y = focal[2] * rz * vmean_2D[2]
+    vmean_z = -rz² * (
+        focal[1] * mean[1] * vmean_2D[1] +
+        focal[2] * mean[2] * vmean_2D[2])
     # FOV clipping: when clamped, `txy = z·lim` does not depend on `x` (`y`),
     # and the `J[·, 3]` contribution goes to `z` instead:
     # ∂J[1, 3]/∂z = f·txy·rz³ = 2f·txy·rz³ (below) - f·txy·rz³ (correction).
     if -lim_xy_neg[1] ≤ (mean[1] * rz) ≤ lim_xy[1]
-        vmean[1] += -focal[1] * rz² * vJ[1, 3]
+        vmean_x += -focal[1] * rz² * vJ[1, 3]
     else
-        vmean[3] += -focal[1] * rz³ * vJ[1, 3] * txy[1]
+        vmean_z += -focal[1] * rz³ * vJ[1, 3] * txy[1]
     end
     if -lim_xy_neg[2] ≤ (mean[2] * rz) ≤ lim_xy[2]
-        vmean[2] += -focal[2] * rz² * vJ[2, 3]
+        vmean_y += -focal[2] * rz² * vJ[2, 3]
     else
-        vmean[3] += -focal[2] * rz³ * vJ[2, 3] * txy[2]
+        vmean_z += -focal[2] * rz³ * vJ[2, 3] * txy[2]
     end
-    vmean[3] +=
+    vmean_z +=
         -focal[1] * rz² * vJ[1, 1] - focal[2] * rz² * vJ[2, 2] +
         2f0 * focal[1] * txy[1] * rz³ * vJ[1, 3] +
         2f0 * focal[2] * txy[2] * rz³ * vJ[2, 3]
 
-    return vΣ, SVector{3, Float32}(vmean)
+    return vΣ, SVector{3, Float32}(vmean_x, vmean_y, vmean_z)
 end
 
 function pos_world_to_cam(
