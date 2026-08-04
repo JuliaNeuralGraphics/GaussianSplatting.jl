@@ -19,7 +19,8 @@ the far end of the fit's support are supervised one-sidedly instead
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
 const DEPTH_LOSS_GRADIENT_WEIGHT = 1f0
-const DEPTH_LOSS_FINAL_SCALE = 0.02f0
+# const DEPTH_LOSS_FINAL_SCALE = 0.02f0
+const DEPTH_LOSS_FINAL_SCALE = 1f0
 
 # Layout of `DepthAnchor`, folded into the anchor cache fingerprint: the
 # sidecar stores the structs themselves, so a field added here has to
@@ -491,17 +492,19 @@ function ssi_depth_loss(
     # silently lose the alpha cotangent this loss exists to produce.
     p = 1f0 ./ (depth_img ./ max.(alpha, 1f-6) .+ depth_floor)
 
-    # REVERTED (under investigation): this used `w_supported`, to keep a large
-    # block of sky at `p ≈ 0` from inflating the residual scale. But excluding
-    # it *shrinks* σ, which raises `iscale` & saturates Geman-McClure sooner —
-    # and the largest residuals in inverse-depth space belong to near objects,
-    # so the tighter scale starves close geometry of gradient. Suspected cause
-    # of a near-field reconstruction regression; back to all valid pixels until
-    # that is settled.
+    # Residual scale from the supported pixels only: a large block of sky at
+    # `p ≈ 0` would otherwise inflate it for the whole image.
+    #
+    # This cuts both ways & the balance is not measured. Excluding the sky also
+    # *shrinks* σ, which raises `iscale` and saturates Geman-McClure sooner;
+    # since the largest residuals in inverse-depth space belong to near objects
+    # (`|dz/dp| = 1/p²`), a tighter scale is felt first by close geometry.
+    # Note the effect is largest early in training — once sky alpha collapses,
+    # `w` is ≈ 0 there anyway and the two variants converge.
     σ = ignore_derivatives() do
-        Σw = max(sum(w), 1f-6)
-        μ = sum(w .* p) / Σw
-        max(sqrt(max(sum(w .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
+        Σw = max(sum(w_supported), 1f-6)
+        μ = sum(w_supported .* p) / Σw
+        max(sqrt(max(sum(w_supported .* (p .- μ).^2) / Σw, 0f0)), 1f-6)
     end
     iscale = 1f0 / (DEPTH_LOSS_RESIDUAL_SCALE * σ)
 
