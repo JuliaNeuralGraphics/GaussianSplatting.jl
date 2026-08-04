@@ -1,4 +1,111 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+Per-term breakdown of the training loss, refreshed by every [`step!`](@ref).
+
+Terms are stored **as weighted**, i.e. exactly the contribution each makes to
+`total`, so they sum to it. That is the form that answers what the breakdown
+exists for — which term is actually driving the optimizer — and it makes a
+mis-scaled weight visible directly rather than requiring mental arithmetic
+against `OptimizationParams`. Divide by the corresponding weight for the raw
+term value.
+
+A term sitting at exactly `0` is one that did not run this step: disabled, or
+still behind its warm-up iteration (`normal_from_iter`, `sky_loss_from_iter`).
+"""
+Base.@kwdef mutable struct LossBreakdown
+    total::Float32 = 0f0
+    l1::Float32 = 0f0
+    ssim::Float32 = 0f0
+    # `regularization_loss` of the active strategy: `0` for `DefaultStrategy`,
+    # opacity + scale L1 for `MCMCStrategy`.
+    reg::Float32 = 0f0
+    tv::Float32 = 0f0
+    depth::Float32 = 0f0
+    sky::Float32 = 0f0
+    flatten::Float32 = 0f0
+    normal::Float32 = 0f0
+end
+
+# Every field, in the order terms are reported.
+const LOSS_TERMS = (:l1, :ssim, :reg, :tv, :depth, :sky, :flatten, :normal)
+const LOSS_FIELDS = (:total, LOSS_TERMS...)
+
+# How often the GUI's train loop reports the breakdown to the console.
+# `main` reports on its own validation cadence.
+const LOSS_REPORT_INTERVAL = 100
+
+# Steps the moving average covers. A few report intervals, so consecutive
+# reports overlap and a trend is visible rather than being resampled.
+const LOSS_EMA_HORIZON = 200
+
+"""
+The step's breakdown plus an exponential moving average of it.
+
+Every step scores a *different randomly sampled view*, so consecutive
+breakdowns differ by view difficulty as much as by optimization progress —
+enough that raw values a hundred steps apart cannot be read as a trend. The
+average is what makes a term's direction legible.
+"""
+mutable struct LossLog
+    current::LossBreakdown
+    # Raw EMA accumulator: biased low early, since it starts from zero.
+    # `smoothed` applies the correction rather than seeding, so a term that
+    # switches on mid-run (`normal_from_iter`) still ramps honestly from zero
+    # instead of jumping to its first observed value.
+    ema::LossBreakdown
+    α::Float32
+    n::Int
+end
+
+LossLog(; horizon::Int = LOSS_EMA_HORIZON) =
+    LossLog(LossBreakdown(), LossBreakdown(), 1f0 / Float32(horizon), 0)
+
+function update_ema!(log::LossLog)
+    log.n += 1
+    for name in LOSS_FIELDS
+        prev = getfield(log.ema, name)
+        setfield!(log.ema, name,
+            prev + log.α * (getfield(log.current, name) - prev))
+    end
+    return log
+end
+
+"""
+Bias-corrected moving average, as a `LossBreakdown`.
+
+The correction is the usual `1 - (1 - α)^n`: without it the first reports read
+far below the truth simply because the accumulator started at zero.
+"""
+function smoothed(log::LossLog)
+    correction = 1f0 - (1f0 - log.α)^log.n
+    correction > 0f0 || return LossBreakdown()
+
+    b = LossBreakdown()
+    for name in LOSS_FIELDS
+        setfield!(b, name, getfield(log.ema, name) / correction)
+    end
+    return b
+end
+
+"""
+Compact one-line rendering of the active terms, e.g.
+`l1=0.01234 ssim=0.00456 depth=0.07891`.
+
+Terms at exactly zero are omitted — those are the ones not running, and
+printing a column of zeros every 100 steps buries the ones that are.
+"""
+function format_breakdown(b::LossBreakdown; digits::Int = 5)
+    io = IOBuffer()
+    for name in LOSS_TERMS
+        v = getfield(b, name)
+        iszero(v) && continue
+        position(io) == 0 || print(io, " ")
+        print(io, name, "=", round(v; digits))
+    end
+    return String(take!(io))
+end
+
 mutable struct Trainer{
     R <: GaussianRasterizer,
     G <: GaussianModel,
@@ -33,6 +140,9 @@ mutable struct Trainer{
     sky_loss::Bool
     # Whether geometry regularization is active (see `geometry_regularization.jl`).
     normals::Bool
+
+    # Per-term loss contributions & their moving average (see `LossLog`).
+    losses::LossLog
 end
 
 function Trainer(
@@ -82,7 +192,7 @@ function Trainer(
     Trainer(
         rast, gs, dataset, optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
-        depth_anchors, bilateral_grid, sky, sky_loss, normals)
+        depth_anchors, bilateral_grid, sky, sky_loss, normals, LossLog())
 end
 
 # `gaussians` is excluded, as in `unsafe_free!`: the model is shared with
@@ -502,38 +612,68 @@ function step!(trainer::Trainer)
             image_tmp = permutedims(image, (2, 3, 1))
             image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
+            # Every term is bound to a local *after* weighting, so the same
+            # value both enters `total` and is recorded below: the breakdown
+            # cannot drift out of sync with the loss it describes.
             l1 = mean(abs.(image_eval .- target_image))
             s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
-            total =
-                (1f0 - params.λ_dssim) * l1 +
-                params.λ_dssim * s +
-                regularization_loss(trainer.strategy, opacities, scales)
+
+            l1_term = (1f0 - params.λ_dssim) * l1
+            ssim_term = params.λ_dssim * s
+            reg_term = regularization_loss(trainer.strategy, opacities, scales)
+            tv_term = 0f0
+            depth_term = 0f0
+            sky_term = 0f0
+            flatten_term = 0f0
+            normal_term = 0f0
+
+            total = l1_term + ssim_term + reg_term
 
             if bgrids ≢ nothing
-                total += params.tv_loss_weight * tv_loss(bgrids)
+                tv_term = params.tv_loss_weight * tv_loss(bgrids)
+                total += tv_term
             end
 
             if depth_data ≢ nothing
-                total +=
+                depth_term =
                     depth_data.weight *
                     ssi_depth_loss(
                         depth_img, alpha_img;
                         depth_data.target, depth_data.half_band,
                         depth_data.valid, depth_data.far_extrap,
                         depth_floor=anchor.floor)
+                total += depth_term
             end
 
             if sky_weight ≢ nothing
-                total += params.sky_loss_weight *
+                sky_term = params.sky_loss_weight *
                     sky_opacity_loss(alpha_img, sky_weight)
+                total += sky_term
             end
 
             if normal_data ≢ nothing
-                total +=
-                    params.normal_flatten_weight * flatten_loss(scales) +
+                flatten_term = params.normal_flatten_weight * flatten_loss(scales)
+                normal_term =
                     params.normal_consistency_weight *
                     depth_normal_consistency_loss(
                         depth_img, alpha_img, image_features[6:8, :, :]; normal_data.rays)
+                total += flatten_term + normal_term
+            end
+
+            # Recording only; `ignore_derivatives` keeps the struct mutation out
+            # of the tape entirely, so Zygote never sees it.
+            ignore_derivatives() do
+                b = trainer.losses.current
+                b.total = total
+                b.l1 = l1_term
+                b.ssim = ssim_term
+                b.reg = reg_term
+                b.tv = tv_term
+                b.depth = depth_term
+                b.sky = sky_term
+                b.flatten = flatten_term
+                b.normal = normal_term
+                nothing
             end
             total
         end
@@ -543,6 +683,9 @@ function step!(trainer::Trainer)
         isfinite(loss) || error(
             "Loss is not finite (`$loss`) at step `$(trainer.step)` " *
             "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
+
+        # Outside the closure: no reason to put this near the tape.
+        update_ema!(trainer.losses)
 
         gsp_debug = GSP_DEBUG[]
 

@@ -10,6 +10,28 @@ where depth supervision only constrains its location.
   which is what makes that min-axis normal well-defined in the first place.
 
 Both are training-time only & are enabled together by `OptimizationParams.use_normal_loss` (see `step!`).
+
+!!! warning "Interaction with `MCMCStrategy`"
+    [`flatten_loss`](@ref) is a *global, unweighted* prior: it presses on a
+    Gaussian carrying irreplaceable structure exactly as hard as on a redundant
+    one, and nothing in it is conditioned on visibility or contribution. Only
+    the photometric loss pushes back, so regions with weak photometric
+    signal — an object's base where it meets the ground, no silhouette edge,
+    low contrast, grazing view angles — have nothing to resist it with.
+
+    Under `MCMCStrategy` that asymmetry is amplified into a runaway (see
+    `mcmc.jl`): flattened, weakly-supervised Gaussians lose opacity to
+    `opacity_reg`, cross into `inject_noise!`'s low-opacity band where they are
+    kicked *every step*, and are eventually declared dead and relocated
+    elsewhere. The region does not soften, it dissolves — observed as an
+    object's base flattening into the ground over a few thousand steps,
+    starting at `normal_from_iter`.
+
+    `normal_flatten_weight` therefore defaults to `0.01`, the same order as
+    MCMC's own `scale_reg`, rather than the `1.0` that reads naturally from the
+    reference. Note it competes with `normal_consistency_weight` (`0.05`),
+    which is the term doing the actual geometry work — flattening exists only
+    to make the min-axis normal well-defined, so it has no business dominating.
 """
 
 # Thresholds taken from LichtFeld.
@@ -167,6 +189,11 @@ flattening each one along its thinnest axis so that its min-axis normal is well-
 
 `scales` are raw (pre-`exp`) and the `argmin` is treated as a constant,
 as in LichtFeld's `add_flatten_regularization_grads`, so only the winning axis receives a gradient.
+
+Weighted by `normal_flatten_weight`, which is deliberately small: this term is
+scaffolding for [`depth_normal_consistency_loss`](@ref), not a goal in itself,
+and it shrinks every Gaussian regardless of whether anything needs it to. See
+the interaction warning at the top of this file before raising it.
 """
 function flatten_loss(scales::AbstractMatrix{Float32})
     n = size(scales, 2)

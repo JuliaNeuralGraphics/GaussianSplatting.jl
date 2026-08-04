@@ -58,10 +58,9 @@ Base.@kwdef struct OptimizationParams
     # Requires a `:rgbdn` rasterizer, which renders the extra normal channels.
     use_normal_loss::Bool = false
     normal_consistency_weight::Float32 = 0.05f0
-    normal_flatten_weight::Float32 = 1f0
-    # Both terms start once the geometry is roughly in place
-    # (LichtFeld's 20% start fraction of a 30k run).
-    normal_from_iter::Int = 6_000
+    normal_flatten_weight::Float32 = 0.01f0
+    # Both terms start once the geometry is roughly in place.
+    normal_from_iter::Int = 15_000
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)

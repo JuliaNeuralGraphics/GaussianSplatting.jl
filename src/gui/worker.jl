@@ -317,6 +317,16 @@ function worker_loop!(gui, w::RenderWorker)
                     w.n_gaussians[] = length(gui.gaussians)
                     refresh_memory!(gui, w)
                     did_train = true
+
+                    # The single loss scalar hides which term is moving, which
+                    # is what matters once several regularizers compete for the
+                    # same scales & opacities (see `LossBreakdown`).
+                    if trainer.step % LOSS_REPORT_INTERVAL == 0
+                        println("step $(trainer.step) | ↓ loss=$(round(loss; digits=5)) | " *
+                            format_breakdown(trainer.losses.current))
+                        println("            ema($LOSS_EMA_HORIZON) | " *
+                            format_breakdown(smoothed(trainer.losses)))
+                    end
                 catch err
                     # E.g. non-finite loss:
                     # stop training instead of killing the worker, the scene stays viewable.

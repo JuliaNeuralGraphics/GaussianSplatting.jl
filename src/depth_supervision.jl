@@ -19,13 +19,7 @@ the far end of the fit's support are supervised one-sidedly instead
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
 const DEPTH_LOSS_GRADIENT_WEIGHT = 1f0
-# const DEPTH_LOSS_FINAL_SCALE = 0.02f0
-const DEPTH_LOSS_FINAL_SCALE = 1f0
-
-# Layout of `DepthAnchor`, folded into the anchor cache fingerprint: the
-# sidecar stores the structs themselves, so a field added here has to
-# invalidate caches written by an older version.
-const ANCHOR_SCHEMA_VERSION = 2
+const DEPTH_LOSS_FINAL_SCALE = 0.02f0
 
 """
 Load a depth prior as a `(width, height)` Float32 map, resized to the training resolution.
@@ -345,8 +339,7 @@ function fit_depth_anchors(
 end
 
 function depth_anchors_fingerprint(points::Matrix{Float32}, cameras::Vector{Camera}, mode::Symbol)
-    h = hash(ANCHOR_SCHEMA_VERSION)
-    h = hash(mode, h)
+    h = hash(mode)
     h = hash(size(points), h)
     h = hash(points, h)
 

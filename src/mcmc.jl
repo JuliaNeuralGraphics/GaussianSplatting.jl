@@ -7,6 +7,38 @@ are relocated onto alive ones with an opacity/scale correction (Eq. 9) that pres
 Position noise scaled by each Gaussian's covariance & opacity keeps the chain
 exploring, while opacity & scale L1 regularization (see [`regularization_loss`](@ref))
 provides the pressure that produces dead Gaussians to recycle.
+
+!!! warning "This strategy amplifies any global prior that weakens geometry"
+    Recycling is a one-way ratchet built out of three stages that feed each
+    other, and a Gaussian that enters the first tends to reach the last:
+
+    1. `opacity_reg` pushes opacity down on *everything*, continuously. Only
+       the photometric loss pushes back, so whatever it cannot see keeps
+       fading.
+    2. [`inject_noise!`](@ref) runs **every step** (not just on refine steps)
+       and its gate, `lr / (1 + exp(100·o - 0.5))`, is essentially off above
+       `o ≈ 0.05` and fully on below `o ≈ 0.005`. Fading geometry crosses into
+       it and starts being kicked, at a magnitude that for a mid-size scene
+       sits at the `max_kick` cap.
+    3. [`relocate_gaussians!`](@ref) then declares it dead at
+       `o ≤ min_opacity` and **teleports it onto a high-opacity Gaussian
+       elsewhere**.
+
+    This is the intended mechanism — it is how capacity migrates toward detail
+    without a pruning heuristic, and each stage is safe when opacity tracks
+    genuine redundancy. It stops being safe when some *other* term lowers
+    opacity or scale on geometry that is real but poorly observed, because
+    stage 1 no longer means "redundant". Such a region is not merely degraded,
+    its Gaussians are recycled away, leaving a smooth surface behind.
+
+    So global unweighted priors need re-tuning here, well below values taken
+    from implementations built on the heuristic strategy — which has none of
+    this, only clone/split/prune on image-space gradients.
+    `normal_flatten_weight` is the known case; see the warning in
+    `geometry_regularization.jl`. `opacity_reg` itself is not the knob to reach
+    for: it is what produces dead Gaussians at all, so cutting it throttles
+    recycling and leaves semi-transparent Gaussians accumulating toward
+    `max_cap`.
 """
 mutable struct MCMCStrategy <: AbstractStrategy
     # Eq. 9 coefficients: binoms[n, k + 1] = C(n-1, k)·(-1)^k/√(k+1).
@@ -61,6 +93,14 @@ end
 KA.unsafe_free!(::MCMCStrategy) = return
 memory_usage(::MCMCStrategy) = 0
 
+"""
+L1 on opacity & scale, the pressure that produces the dead Gaussians this
+strategy recycles. Both act on every Gaussian, unweighted by visibility.
+
+`scale_reg` is the calibration point for any *other* scale prior added on top
+(e.g. `flatten_loss`): a term an order of magnitude above it will dominate the
+shrink and drive geometry into the recycling ratchet described above.
+"""
 function regularization_loss(strategy::MCMCStrategy, opacities, scales)
     return strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +
         strategy.scale_reg * mean(exp.(scales))
