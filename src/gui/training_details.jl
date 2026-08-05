@@ -50,6 +50,65 @@ format_param(x) = string(x)
 format_param(x::Symbol) = ":$x"
 format_param(x::Tuple) = join(x, " × ")
 
+"""
+`seconds` as `1h 23m 45s` / `23m 45s` / `45.6s`.
+
+Coarse units drop the decimal: at that length a tenth of a second is noise, and
+the line is watched for how far a run has come, not measured with.
+"""
+function format_duration(seconds::Real)
+    seconds < 60 && return "$(round(seconds; digits=1))s"
+
+    minutes, secs = divrem(round(Int, seconds), 60)
+    hours, mins = divrem(minutes, 60)
+    return hours > 0 ? "$(hours)h $(mins)m $(secs)s" : "$(mins)m $(secs)s"
+end
+
+"""
+Per-term loss curves over the run (see `LossHistory`).
+
+Log scale on the loss axis: the terms differ by orders of magnitude — a
+regularizer at `1e-4` against an L1 term at `1e-2` — and on a linear axis every
+curve but the largest is flat against zero, which is precisely the comparison
+the plot exists for.
+
+Terms that are identically zero are left out: those are the ones not running,
+and an empty line in the legend claims the term is at zero rather than absent.
+"""
+function loss_plot!(w::RenderWorker)
+    history = loss_history(w)
+    (history ≡ nothing || isempty(history.steps)) && return
+
+    # ImPlot's defaults (10 px around the plot, 5 px around every label) eat a
+    # noticeable share of a docked panel: the curves get that space instead.
+    # Pushed before `BeginPlot`, which is where the frame's padding is read.
+    ImPlot.PushStyleVar(ImPlot.ImPlotStyleVar_PlotPadding, CImGui.ImVec2(2f0, 2f0))
+    ImPlot.PushStyleVar(ImPlot.ImPlotStyleVar_LabelPadding, CImGui.ImVec2(2f0, 2f0))
+    ImPlot.PushStyleVar(ImPlot.ImPlotStyleVar_LegendPadding, CImGui.ImVec2(4f0, 4f0))
+
+    # No axis labels: the tick numbers already read as steps & loss, and the
+    # two labels cost a text line at the bottom and a rotated one on the left.
+    # Both axes refit every frame: the curves grow while training runs, and a
+    # plot that keeps the limits of an earlier step would walk off its own data.
+    if ImPlot.BeginPlot("##loss-history", "", "",
+        CImGui.ImVec2(-1f0, 220f0);
+        x_flags=ImPlot.ImPlotAxisFlags_AutoFit,
+        y_flags=ImPlot.ImPlotAxisFlags_AutoFit,
+    )
+        ImPlot.SetupAxisScale(ImPlot.ImAxis_Y1, ImPlot.ImPlotScale_Log10)
+        for name in LOSS_FIELDS
+            values = getfield(history.terms, name)
+            any(!iszero, values) || continue
+            ImPlot.PlotLine(String(name), history.steps, values)
+        end
+        ImPlot.EndPlot()
+    end
+    # Popped unconditionally: `BeginPlot` returning `false` (a collapsed or
+    # clipped panel) still leaves the three vars on the stack.
+    ImPlot.PopStyleVar(3)
+    return
+end
+
 # Two columns: field names left, values right. `id` keeps the tables distinct.
 function param_table!(id::String, rows)
     CImGui.BeginTable(id, 2)
@@ -81,6 +140,27 @@ function training_details_window!(gui, dockspace_id)
         training_details!(gui)
     end
     CImGui.End()
+    return
+end
+
+function training_time_line!(w::RenderWorker)
+    seconds = w.train_time[]
+    steps = w.train_steps[]
+    if steps == 0
+        CImGui.Text("Train time: —")
+        CImGui.SetItemTooltip("Nothing trained yet in this scene.")
+        return
+    end
+
+    per_step = 1_000.0 * seconds / steps
+    CImGui.Text(
+        "Train time: $(format_duration(seconds)) " *
+        "($(round(per_step; digits=1)) ms/step)")
+    CImGui.SetItemTooltip(
+        "Wall time spent inside training steps since this scene was loaded, " *
+        "over $steps steps.\nExcludes view rendering & time spent paused, and " *
+        "a resumed checkpoint starts this back at zero.\nThe first step " *
+        "includes GPU kernel compilation, so it weighs on the average early.")
     return
 end
 
@@ -142,6 +222,8 @@ function training_controls!(gui)
             "The population MCMC densification grows to; " *
             "never below the count the scene already has.")
     end
+
+    training_time_line!(w)
     return
 end
 
@@ -154,8 +236,11 @@ function training_details!(gui)
     params = trainer.opt_params
 
     training_controls!(gui)
-    CImGui.Separator()
 
+    CImGui.SeparatorText("Loss")
+    loss_plot!(gui.worker)
+
+    CImGui.Separator()
     CImGui.Text("Strategy: $(gui.ui_state.is_mcmc ? "mcmc" : "default")")
     CImGui.Text("Max SH degree: $(gui.ui_state.max_sh_degree)")
     CImGui.Text("Rasterizer mode: $(training_rasterizer_mode(params))")

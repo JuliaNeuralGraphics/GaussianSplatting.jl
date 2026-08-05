@@ -837,12 +837,18 @@ end
 
 function launch!(gui::GSGUI)
     start_worker!(gui)
+    # ImPlot draws the loss curves (see `loss_plot!`). It keeps a context of
+    # its own, bound to the ImGui one `NGL.Context` created; only the render
+    # loop below draws through it, so its lifetime is this call's.
+    implot_ctx = ImPlot.CreateContext()
+    ImPlot.SetImGuiContext(gui.context.imgui_ctx)
     try
         NGL.render_loop(gui.context) do
             loop!(gui)
             return true
         end
     finally
+        ImPlot.DestroyContext(implot_ctx)
         stop_worker!(gui.worker)
         close_video!(gui.capture_mode)
     end

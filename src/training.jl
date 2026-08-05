@@ -39,6 +39,54 @@ const LOSS_REPORT_INTERVAL = 100
 # reports overlap and a trend is visible rather than being resampled.
 const LOSS_EMA_HORIZON = 200
 
+# Steps between samples of the per-term history the GUI plots, and how many
+# samples it keeps.
+const LOSS_HISTORY_INTERVAL = 10
+const LOSS_HISTORY_CAPACITY = 512
+
+"""
+Per-term loss curves for the whole run: what the `Training Details` plot draws.
+
+Sampled every `interval` steps; once the run outgrows `LOSS_HISTORY_CAPACITY`
+samples, every second one is dropped and the interval doubles. So the curves
+always span the whole run at bounded cost, rather than a window scrolling over
+its tail — a training curve is read against where it started.
+
+Values are the bias-corrected moving averages, not the per-step breakdowns:
+each step scores a different view, and at one sample per 10 steps the raw
+values would be an unreadable band of view difficulty.
+"""
+mutable struct LossHistory
+    steps::Vector{Float32}
+    terms::NamedTuple{LOSS_FIELDS, NTuple{length(LOSS_FIELDS), Vector{Float32}}}
+    interval::Int
+    # Bumped on every sample, so the GUI can publish a snapshot to its UI
+    # thread only when there is something new to plot (see `RenderWorker`).
+    version::Int
+end
+
+LossHistory() = LossHistory(
+    Float32[],
+    NamedTuple{LOSS_FIELDS}(ntuple(_ -> Float32[], length(LOSS_FIELDS))),
+    LOSS_HISTORY_INTERVAL, 0)
+
+# Halve the sample count & double the interval, keeping every second sample.
+function thin!(history::LossHistory)
+    history.steps = history.steps[1:2:end]
+    history.terms = map(values -> values[1:2:end], history.terms)
+    history.interval *= 2
+    return history
+end
+
+"""
+Copy of the curves, for a thread that does not own the history: the trainer
+keeps appending to (and reallocating) its own vectors.
+"""
+snapshot(history::LossHistory) = (;
+    steps=copy(history.steps),
+    terms=map(copy, history.terms),
+    version=history.version)
+
 """
 The step's breakdown plus an exponential moving average of it.
 
@@ -56,10 +104,12 @@ mutable struct LossLog
     ema::LossBreakdown
     α::Float32
     n::Int
+    # Sampled averages over the run, for the GUI's plot.
+    history::LossHistory
 end
 
-LossLog(; horizon::Int = LOSS_EMA_HORIZON) =
-    LossLog(LossBreakdown(), LossBreakdown(), 1f0 / Float32(horizon), 0)
+LossLog(; horizon::Int = LOSS_EMA_HORIZON) = LossLog(
+    LossBreakdown(), LossBreakdown(), 1f0 / Float32(horizon), 0, LossHistory())
 
 function update_ema!(log::LossLog)
     log.n += 1
@@ -88,6 +138,31 @@ function smoothed(log::LossLog)
         setfield!(b, name, getfield(log.ema, name) / correction)
     end
     return b
+end
+
+"""
+Append the current averages to `history`, if `step` lands on a sampling point.
+`step` is the trainer's own step, so a resumed checkpoint's curves continue
+from where the run left off rather than restarting at zero.
+
+Defined here rather than beside `LossHistory`: it needs `smoothed`.
+"""
+function record!(history::LossHistory, log::LossLog, step::Int)
+    # Measured from the last sample rather than as `step % interval`: after a
+    # `thin!` the kept samples sit on the old grid, so a modulo rule would leave
+    # one short gap at every doubling.
+    isempty(history.steps) ||
+        step - history.steps[end] ≥ history.interval || return history
+
+    averages = smoothed(log)
+    push!(history.steps, Float32(step))
+    for name in LOSS_FIELDS
+        push!(getfield(history.terms, name), getfield(averages, name))
+    end
+    history.version += 1
+
+    length(history.steps) > LOSS_HISTORY_CAPACITY && thin!(history)
+    return history
 end
 
 function smoothed_total(log::LossLog)
@@ -683,6 +758,7 @@ function step!(trainer::Trainer)
 
         # Outside the closure: no reason to put this near the tape.
         update_ema!(trainer.losses)
+        record!(trainer.losses.history, trainer.losses, trainer.step)
 
         gsp_debug = GSP_DEBUG[]
 

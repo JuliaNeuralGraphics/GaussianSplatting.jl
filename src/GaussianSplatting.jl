@@ -37,6 +37,7 @@ import AcceleratedKernels as AK
 import BSON
 import ChainRulesCore as CRC
 import ImageFiltering
+import ImPlot
 import KernelAbstractions as KA
 import NerfUtils as NU
 import NeuralGraphicsGL as NGL

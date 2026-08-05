@@ -1042,6 +1042,52 @@ end
     @test Array(gaussians.features_dc) == Array(gs0.features_dc)
 end
 
+@testset "Loss history sampling & thinning" begin
+    GS = GaussianSplatting
+    log = GS.LossLog()
+    history = log.history
+    @test history.interval == GS.LOSS_HISTORY_INTERVAL
+
+    n_steps = 40 * GS.LOSS_HISTORY_CAPACITY * GS.LOSS_HISTORY_INTERVAL ÷ 10
+    for step in 1:n_steps
+        log.current.total = 1f0 / step
+        log.current.l1 = 0.5f0 / step
+        # A term that switches on mid-run, like `normal_from_iter`.
+        log.current.normal = step > n_steps ÷ 2 ? 1f-4 : 0f0
+        GS.update_ema!(log)
+        GS.record!(history, log, step)
+    end
+
+    # Bounded memory, and every curve as long as the step axis.
+    @test length(history.steps) ≤ GS.LOSS_HISTORY_CAPACITY
+    @test all(length(values) == length(history.steps) for values in history.terms)
+    @test history.interval > GS.LOSS_HISTORY_INTERVAL # Thinned at least once.
+
+    # Thinning keeps the whole run's span, evenly spaced, not just its tail:
+    # a training curve is read against where it started.
+    @test history.steps[1] ≤ 2 * history.interval
+    @test n_steps - history.steps[end] < history.interval
+    @test all(diff(history.steps) .== history.interval)
+
+    @test history.terms.total[1] > history.terms.total[end] # Decreasing.
+    @test iszero(history.terms.normal[1]) # Not running yet.
+    @test history.terms.normal[end] > 0f0
+
+    # A snapshot is what the GUI thread reads: it must not alias the vectors
+    # the trainer keeps appending to.
+    snap = GS.snapshot(history)
+    n = length(snap.steps)
+    GS.record!(history, log, n_steps + history.interval)
+    @test length(snap.steps) == n
+    @test length(snap.terms.total) == n
+    @test snap.version < history.version
+
+    # Nothing recorded until the interval has elapsed.
+    version = history.version
+    GS.record!(history, log, Int(history.steps[end]) + 1)
+    @test history.version == version
+end
+
 @testset "OptimizationParams TOML round-trip" begin
     OP = GaussianSplatting.OptimizationParams
     params = OP(;

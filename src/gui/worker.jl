@@ -87,6 +87,12 @@ mutable struct RenderWorker
     # worker → UI stats.
     loss::Threads.Atomic{Float32}
     loss_ema::Threads.Atomic{Float32} # See `smoothed_total`.
+    # Wall time spent inside `step!` & the steps it covers, both since this
+    # scene was installed. Time *in* the steps, not since training started: the
+    # worker also renders views & sits idle, and a checkpoint carries no record
+    # of what its earlier run cost.
+    train_time::Threads.Atomic{Float64}
+    train_steps::Threads.Atomic{Int}
     step::Threads.Atomic{Int}
     n_gaussians::Threads.Atomic{Int}
     memory::Threads.Atomic{Int} # Device bytes; see `refresh_memory!`.
@@ -98,6 +104,10 @@ mutable struct RenderWorker
     # worker → UI, rare (under `lock`).
     error_msg::String # Empty when no error.
     pick_result::Maybe{SVector{3, Float32}}
+    # Per-term loss curves for the plot: a copy of the trainer's `LossHistory`,
+    # republished whenever it takes a new sample. The UI thread must not read
+    # the trainer's own vectors, which the worker keeps appending to.
+    loss_history::Maybe{NamedTuple}
 
     # Worker-local: the snapshot of the last render, so commands that
     # inspect `rast.image` (orbit picking) know the matching camera.
@@ -115,12 +125,39 @@ function RenderWorker(; width::Int, height::Int)
         Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
         UInt64(0), UInt64(0),
-        # loss, loss_ema, step, n_gaussians, memory
+        # loss, loss_ema, train_time, train_steps, step, n_gaussians, memory
         Threads.Atomic{Float32}(0f0), Threads.Atomic{Float32}(0f0),
+        Threads.Atomic{Float64}(0.0), Threads.Atomic{Int}(0),
         Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
         # activity, activity_since
         Threads.Atomic{Int32}(Int32(ActivityIdle)), Threads.Atomic{Float64}(0.0),
-        "", nothing, nothing)
+        # error_msg, pick_result, loss_history
+        "", nothing, nothing,
+        nothing)
+end
+
+"""
+Republish the trainer's loss curves for the UI thread, if they grew since the
+last publish. Copying is what makes them safe to read off-thread, so it only
+happens on the steps that actually sampled (see `LossHistory`).
+"""
+function publish_loss_history!(w::RenderWorker, trainer)
+    history = trainer.losses.history
+    published = lock(w.lock) do
+        w.loss_history ≡ nothing ? -1 : w.loss_history.version
+    end
+    published == history.version && return
+
+    published_history = snapshot(history)
+    lock(w.lock) do
+        w.loss_history = published_history
+    end
+    return
+end
+
+# Latest published loss curves, or `nothing` before the first sample.
+loss_history(w::RenderWorker) = lock(w.lock) do
+    w.loss_history
 end
 
 """
@@ -326,13 +363,19 @@ function worker_loop!(gui, w::RenderWorker)
             if w.train[] && trainer ≢ nothing
                 trainer.densify = w.densify[]
                 try
+                    step_started = time()
                     loss = with_activity(w, ActivityTraining) do
                         step!(trainer)
                     end
+                    # Only the worker writes these, so a plain read-modify-write
+                    # is enough; the UI thread only reads them.
+                    w.train_time[] += time() - step_started
+                    w.train_steps[] += 1
                     w.loss[] = loss
                     # Each step scores a different view, so the raw loss jitters
                     # on view difficulty: the average is what shows a trend.
                     w.loss_ema[] = smoothed_total(trainer.losses)
+                    publish_loss_history!(w, trainer)
                     w.step[] = trainer.step
                     w.n_gaussians[] = length(gui.gaussians)
                     refresh_memory!(gui, w)
@@ -426,6 +469,12 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         gui.trainer = loaded.trainer
         w.loss[] = 0f0
         w.loss_ema[] = 0f0
+        # The new scene's curves start empty: the old ones are another run.
+        lock(w.lock) do
+            w.loss_history = nothing
+        end
+        w.train_time[] = 0.0
+        w.train_steps[] = 0
         w.step[] = loaded.trainer.step
         w.n_gaussians[] = length(loaded.gaussians)
         refresh_memory!(gui, w)
@@ -438,6 +487,12 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         gui.sky_rasterizer = nothing
         w.loss[] = 0f0
         w.loss_ema[] = 0f0
+        # The new scene's curves start empty: the old ones are another run.
+        lock(w.lock) do
+            w.loss_history = nothing
+        end
+        w.train_time[] = 0.0
+        w.train_steps[] = 0
         w.step[] = 0
         w.n_gaussians[] = length(gaussians)
         refresh_memory!(gui, w)
@@ -481,6 +536,11 @@ function handle_close_scene!(gui, w::RenderWorker)
 
     w.loss[] = 0f0
     w.loss_ema[] = 0f0
+    lock(w.lock) do
+        w.loss_history = nothing
+    end
+    w.train_time[] = 0.0
+    w.train_steps[] = 0
     w.step[] = 0
     w.n_gaussians[] = 0
     # `rast.image` no longer holds the depth an orbit pick would unproject.
