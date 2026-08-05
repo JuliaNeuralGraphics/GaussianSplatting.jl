@@ -72,13 +72,15 @@ function update_ema!(log::LossLog)
 end
 
 """
-Bias-corrected moving average, as a `LossBreakdown`.
+The `1 - (1 - α)^n` de-biasing factor.
+"""
+bias_correction(log::LossLog) = 1f0 - (1f0 - log.α)^log.n
 
-The correction is the usual `1 - (1 - α)^n`: without it the first reports read
-far below the truth simply because the accumulator started at zero.
+"""
+Bias-corrected moving average, as a `LossBreakdown`.
 """
 function smoothed(log::LossLog)
-    correction = 1f0 - (1f0 - log.α)^log.n
+    correction = bias_correction(log)
     correction > 0f0 || return LossBreakdown()
 
     b = LossBreakdown()
@@ -88,13 +90,12 @@ function smoothed(log::LossLog)
     return b
 end
 
-"""
-Compact one-line rendering of the active terms, e.g.
-`l1=0.01234 ssim=0.00456 depth=0.07891`.
+function smoothed_total(log::LossLog)
+    correction = bias_correction(log)
+    correction > 0f0 || return 0f0
+    return log.ema.total / correction
+end
 
-Terms at exactly zero are omitted — those are the ones not running, and
-printing a column of zeros every 100 steps buries the ones that are.
-"""
 function format_breakdown(b::LossBreakdown; digits::Int = 5)
     io = IOBuffer()
     for name in LOSS_TERMS
@@ -454,12 +455,7 @@ function validate(trainer::Trainer; quantize::Bool = false)
     return (; eval_ssim, eval_mse, eval_psnr)
 end
 
-# Post-mortem for a non-finite gradient: NaN/Inf counts for every parameter
-# & the forward state of the first few offending Gaussians, to localize
-# the origin (culled, degenerate, behind camera, ...).
-function nonfinite_gradient_report(
-    trainer::Trainer, θ, θ_names, ∇, camera::Camera, view_idx::Int,
-)
+function nonfinite_gradient_report(trainer::Trainer, θ, θ_names, ∇, camera::Camera, view_idx::Int)
     gs = trainer.gaussians
     n = length(gs)
     io = IOBuffer()

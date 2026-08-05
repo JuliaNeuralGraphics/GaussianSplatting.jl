@@ -1,11 +1,17 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+
+const DEFAULT_MAX_STEPS = Int32(30_000)
+
 Base.@kwdef mutable struct UIState
     train::Ref{Bool} = Ref(false)
     render::Ref{Bool} = Ref(true)
     densify::Ref{Bool} = Ref(true)
+    # Training stops itself at this step; `0` means no limit.
+    max_steps::Ref{Int32} = Ref(DEFAULT_MAX_STEPS)
     scene_hovered::Bool = false
 
     loss::Float32 = 0f0
+    loss_ema::Float32 = 0f0
 
     # Dataset camera overlay (see `draw_dataset_frustums!`).
     draw_cameras::Ref{Bool} = Ref(false)

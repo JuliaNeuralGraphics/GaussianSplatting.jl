@@ -486,7 +486,9 @@ end
 function reset_ui!(ui_state::UIState)
     ui_state.train[] = false
     ui_state.densify[] = true
+    ui_state.max_steps[] = DEFAULT_MAX_STEPS
     ui_state.loss = 0f0
+    ui_state.loss_ema = 0f0
     ui_state.selected_view[] = 0
     ui_state.selected_mode[] = 0
     ui_state.sh_degree[] = -1
@@ -773,6 +775,7 @@ function loop!(gui::GSGUI)
 
     # Worker results: stats, errors, orbit-target picks.
     gui.ui_state.loss = w.loss[]
+    gui.ui_state.loss_ema = w.loss_ema[]
     err = take_error!(w)
     if err ≢ nothing
         gui.ui_state.worker_error = err
@@ -1156,7 +1159,11 @@ function scene_tab!(gui::GSGUI)
         CImGui.TableNextColumn()
         CImGui.Text("Steps: $(w.step[])")
         CImGui.TableNextColumn()
-        CImGui.Text("Loss: $(round(gui.ui_state.loss; digits=4))")
+        # The raw value swings with the difficulty of the view sampled for
+        # that step; the average next to it is the one that shows a trend.
+        CImGui.Text(
+            "Loss: $(round(gui.ui_state.loss; digits=4)) " *
+            "(ema $(round(gui.ui_state.loss_ema; digits=4)))")
 
         # Row 2.
         CImGui.TableNextRow()
@@ -1164,12 +1171,18 @@ function scene_tab!(gui::GSGUI)
         # Reflect worker-side stops (e.g. training error)
         # before drawing the checkbox.
         gui.ui_state.train[] = w.train[]
+        # Disable `Train` checkbox if no more steps left, until it's raised.
+        training_steps_left = w.max_steps[] ≤ 0 || w.step[] < w.max_steps[]
+        training_steps_left || disabled_begin()
         if CImGui.Checkbox("Train", gui.ui_state.train)
             GC.gc(false)
             GC.gc(true)
             w.train[] = gui.ui_state.train[]
             notify(w.wakeup)
         end
+        training_steps_left || CImGui.SetItemTooltip(
+            "Step limit reached: raise `Max Steps` to train further.")
+        training_steps_left || disabled_end()
         CImGui.TableNextColumn()
         CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
         CImGui.SetItemTooltip(
@@ -1188,6 +1201,17 @@ function scene_tab!(gui::GSGUI)
         gui.ui_state.draw_cameras[] || disabled_end()
 
         CImGui.EndTable()
+
+        CImGui.PushItemWidth(-100)
+        if CImGui.InputInt("Max Steps", gui.ui_state.max_steps, 1_000, 5_000)
+            gui.ui_state.max_steps[] = max(Int32(0), gui.ui_state.max_steps[])
+            w.max_steps[] = Int(gui.ui_state.max_steps[])
+            # Raising the limit past the current step lets training resume.
+            notify(w.wakeup)
+        end
+        CImGui.SetItemTooltip(
+            "Training stops itself once it has taken this many steps. " *
+            "0 means no limit.")
 
         if gui.ui_state.draw_cameras[]
             CImGui.PushItemWidth(-100)

@@ -70,6 +70,8 @@ mutable struct RenderWorker
     train::Threads.Atomic{Bool}
     densify::Threads.Atomic{Bool}
     render::Threads.Atomic{Bool}
+    # Step to stop training at; `0` means no limit.
+    max_steps::Threads.Atomic{Int}
 
     running::Threads.Atomic{Bool}
 
@@ -84,6 +86,7 @@ mutable struct RenderWorker
 
     # worker → UI stats.
     loss::Threads.Atomic{Float32}
+    loss_ema::Threads.Atomic{Float32} # See `smoothed_total`.
     step::Threads.Atomic{Int}
     n_gaussians::Threads.Atomic{Int}
     memory::Threads.Atomic{Int} # Device bytes; see `refresh_memory!`.
@@ -105,14 +108,16 @@ function RenderWorker(; width::Int, height::Int)
     RenderWorker(
         nothing, ReentrantLock(), Base.Event(true), Channel{Any}(32),
         nothing, UInt64(0),
-        # train, densify, render
+        # train, densify, render, max_steps
         Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(true), Threads.Atomic{Bool}(true),
+        Threads.Atomic{Int}(Int(DEFAULT_MAX_STEPS)),
         # running
         Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
         UInt64(0), UInt64(0),
-        Threads.Atomic{Float32}(0f0), Threads.Atomic{Int}(0),
-        Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
+        # loss, loss_ema, step, n_gaussians, memory
+        Threads.Atomic{Float32}(0f0), Threads.Atomic{Float32}(0f0),
+        Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
         # activity, activity_since
         Threads.Atomic{Int32}(Int32(ActivityIdle)), Threads.Atomic{Float64}(0.0),
         "", nothing, nothing)
@@ -248,12 +253,20 @@ function publish_view!(gui)::UInt64
     return version
 end
 
+"""
+Whether the trainer may take another step.
+A non-positive `max_steps` means unlimited number of training steps.
+"""
+training_steps_left(w::RenderWorker, trainer) =
+    w.max_steps[] ≤ 0 || trainer.step < w.max_steps[]
+
 # Push the UI toggles to the worker flags (after `reset_ui!`).
 function sync_worker_flags!(gui)
     w = gui.worker
     w.train[] = gui.ui_state.train[]
     w.densify[] = gui.ui_state.densify[]
     w.render[] = gui.ui_state.render[]
+    w.max_steps[] = Int(gui.ui_state.max_steps[])
     notify(w.wakeup)
     return
 end
@@ -306,6 +319,10 @@ function worker_loop!(gui, w::RenderWorker)
 
             did_train = false
             trainer = gui.trainer
+            if w.train[] && trainer ≢ nothing && !training_steps_left(w, trainer)
+                w.train[] = false
+            end
+
             if w.train[] && trainer ≢ nothing
                 trainer.densify = w.densify[]
                 try
@@ -313,6 +330,9 @@ function worker_loop!(gui, w::RenderWorker)
                         step!(trainer)
                     end
                     w.loss[] = loss
+                    # Each step scores a different view, so the raw loss jitters
+                    # on view difficulty: the average is what shows a trend.
+                    w.loss_ema[] = smoothed_total(trainer.losses)
                     w.step[] = trainer.step
                     w.n_gaussians[] = length(gui.gaussians)
                     refresh_memory!(gui, w)
@@ -405,6 +425,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         gui.sky_rasterizer = loaded.gui_sky_rasterizer
         gui.trainer = loaded.trainer
         w.loss[] = 0f0
+        w.loss_ema[] = 0f0
         w.step[] = loaded.trainer.step
         w.n_gaussians[] = length(loaded.gaussians)
         refresh_memory!(gui, w)
@@ -416,6 +437,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         gui.trainer = nothing
         gui.sky_rasterizer = nothing
         w.loss[] = 0f0
+        w.loss_ema[] = 0f0
         w.step[] = 0
         w.n_gaussians[] = length(gaussians)
         refresh_memory!(gui, w)
@@ -458,6 +480,7 @@ function handle_close_scene!(gui, w::RenderWorker)
     release_scene_buffers!(gui.rasterizer)
 
     w.loss[] = 0f0
+    w.loss_ema[] = 0f0
     w.step[] = 0
     w.n_gaussians[] = 0
     # `rast.image` no longer holds the depth an orbit pick would unproject.
