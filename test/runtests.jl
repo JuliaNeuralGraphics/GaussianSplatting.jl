@@ -430,7 +430,8 @@ end
 
     loss(z, fe) = ssi_depth_loss(
         on_target .* (1f0 .- sel) .+ z .* sel, alpha;
-        target, half_band, valid, far_extrap=fe, depth_floor=dfloor)
+        target, half_band, valid, far_extrap=fe, depth_floor=dfloor,
+        λ_grad=GaussianSplatting.OptimizationParams().depth_loss_gradient_weight)
 
     sky_z = on_target[2, 2]
     grad(z, fe) = Zygote.gradient(x -> loss(x, fe), z)[1]
@@ -1039,6 +1040,54 @@ end
     @test gaussians.max_sh_degree == 0
     @test size(gaussians.features_rest) == (3, 0, n)
     @test Array(gaussians.features_dc) == Array(gs0.features_dc)
+end
+
+@testset "OptimizationParams TOML round-trip" begin
+    OP = GaussianSplatting.OptimizationParams
+    params = OP(;
+        use_sky_dome=true, sky_dome_shape=:sphere, depth_loss_weight=3.5f0,
+        bilateral_grid_size=(8, 8, 4), normal_from_iter=15_000)
+
+    path = joinpath(mktempdir(), "params.toml")
+    GaussianSplatting.save_opt_params(path, params)
+    loaded = GaussianSplatting.load_opt_params(path)
+    # Exact, field by field: a hyperparameter that comes back rounded is a
+    # reconstruction that cannot be repeated.
+    for name in fieldnames(OP)
+        @test getfield(loaded, name) === getfield(params, name)
+    end
+
+    # A file may specify only what it changes; the rest stays default.
+    partial = joinpath(mktempdir(), "partial.toml")
+    write(partial, """
+    use_normal_loss = true
+    depth_loss_weight = 2
+    depth_loss_mode = "ssi_depth"
+    """)
+    partial_params = GaussianSplatting.load_opt_params(partial)
+    @test partial_params.use_normal_loss
+    @test partial_params.depth_loss_weight === 2f0 # Integer where a float is due.
+    @test partial_params.depth_loss_mode ≡ :ssi_depth
+    @test partial_params.lr_feature === OP().lr_feature
+
+    overridden = GaussianSplatting.with_params(partial_params;
+        use_normal_loss=false, use_sky_dome=true)
+    @test !overridden.use_normal_loss
+    @test overridden.use_sky_dome
+    @test overridden.depth_loss_mode ≡ :ssi_depth
+
+    # Rejected rather than silently dropped: a hyperparameter that did not
+    # apply is indistinguishable from one that did.
+    for content in (
+        "lr_feature_typo = 1.0\n",       # Unknown field.
+        "sky_dome_shape = \"cube\"\n",   # Not one of the shapes.
+        "use_depth_loss = 1\n",          # Wrong type.
+        "bilateral_grid_size = [16, 16]\n", # Wrong length.
+    )
+        bad = joinpath(mktempdir(), "bad.toml")
+        write(bad, content)
+        @test_throws ErrorException GaussianSplatting.load_opt_params(bad)
+    end
 end
 
 end

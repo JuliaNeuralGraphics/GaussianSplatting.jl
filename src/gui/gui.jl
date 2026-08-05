@@ -5,6 +5,7 @@ include("worker.jl")
 include("frustums.jl")
 include("camera_path.jl")
 include("capture_mode.jl")
+include("training_details.jl")
 
 const CIM_HEADER =
     CImGui.ImGuiTreeNodeFlags_CollapsingHeader |
@@ -329,18 +330,13 @@ in `apply_dataset!`.
 """
 function load_dataset(kab, dataset_path::String;
     scale::Int, width::Int, height::Int, strategy::Symbol = :default,
-    use_depth_loss::Bool = true, use_bilateral_grid::Bool = false,
-    use_normal_loss::Bool = false, random_background::Bool = false,
-    use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
+    opt_params::OptimizationParams = OptimizationParams(),
     max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
     dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
     camera = dataset.train_cameras[1]
 
-    opt_params = OptimizationParams(;
-        use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -563,6 +559,98 @@ function menu_bar!(gui::GSGUI)
 end
 
 """
+The hyperparameters a new trainer would start with:
+the loaded file (or plain defaults) with the modal's own controls laid over the fields they expose,
+so a click after a load still works.
+"""
+effective_opt_params(ui_state::UIState) = with_params(
+    ui_state.dataset_opt_params;
+    use_depth_loss = ui_state.dataset_depth_loss[],
+    use_bilateral_grid = ui_state.dataset_bilateral_grid[],
+    use_normal_loss = ui_state.dataset_normal_loss[],
+    random_background = ui_state.dataset_random_background[],
+    use_sky_dome = ui_state.dataset_sky_dome[],
+    sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1])
+
+# The reverse: seed the controls from a just-loaded file, so what the modal
+# shows is what the file asked for rather than the previous selection.
+function sync_params_controls!(ui_state::UIState, params::OptimizationParams)
+    ui_state.dataset_depth_loss[] = params.use_depth_loss
+    ui_state.dataset_bilateral_grid[] = params.use_bilateral_grid
+    ui_state.dataset_normal_loss[] = params.use_normal_loss
+    ui_state.dataset_random_background[] = params.random_background
+    ui_state.dataset_sky_dome[] = params.use_sky_dome
+    shape = findfirst(==(params.sky_dome_shape), SKY_DOME_SHAPES)
+    ui_state.dataset_sky_dome_shape[] = Int32(something(shape, 1) - 1)
+    return
+end
+
+"""
+`Open Dataset` row for the full hyperparameter set: everything
+`OptimizationParams` holds, of which the checkboxes above expose a handful.
+
+Loading & saving a file is what makes a reconstruction repeatable — the values
+a run used outlive the session that picked them (see `params_io.jl`).
+"""
+function params_file_row!(ui_state::UIState)
+    CImGui.Text("Hyperparameters:")
+    CImGui.SameLine()
+    CImGui.TextDisabled(isempty(ui_state.dataset_params_file) ? "defaults" : basename(ui_state.dataset_params_file))
+    isempty(ui_state.dataset_params_file) || CImGui.SetItemTooltip(ui_state.dataset_params_file)
+
+    CImGui.SameLine()
+    if CImGui.Button("Load...##params")
+        params_file = pick_file(homedir(); filterlist="toml") # Empty when cancelled.
+        if !isempty(params_file)
+            try
+                params = load_opt_params(params_file)
+                ui_state.dataset_opt_params = params
+                ui_state.dataset_params_file = params_file
+                sync_params_controls!(ui_state, params)
+                ui_state.dataset_error = ""
+            catch err
+                # The message names the offending key, so it is worth showing
+                # rather than pointing at the log.
+                ui_state.dataset_error = "Invalid params file: $(sprint(showerror, err))"
+                @error "Failed to load `OptimizationParams`:" exception=(err, catch_backtrace())
+            end
+        end
+    end
+    CImGui.SetItemTooltip(
+        "Read every `OptimizationParams` value from a `.toml` file: " *
+        "learning rates, loss weights, warm-up iterations.\n" *
+        "Omitted fields keep their default; the options above override the ones they expose.")
+
+    CImGui.SameLine()
+    if CImGui.Button("Save...##params")
+        params_file = save_file(homedir(); filterlist="toml") # Empty when cancelled.
+        if !isempty(params_file)
+            endswith(params_file, ".toml") || (params_file *= ".toml")
+            try
+                save_opt_params(params_file, effective_opt_params(ui_state))
+                ui_state.dataset_params_file = params_file
+                ui_state.dataset_error = ""
+            catch err
+                ui_state.dataset_error = "Failed to write params file. See logs for details."
+                @error "Failed to write `OptimizationParams`:" exception=(err, catch_backtrace())
+            end
+        end
+    end
+    CImGui.SetItemTooltip(
+        "Write the values this dialog would train with, " *
+        "so the same reconstruction can be repeated later.")
+
+    CImGui.SameLine()
+    if CImGui.Button("Reset##params")
+        ui_state.dataset_opt_params = OptimizationParams()
+        ui_state.dataset_params_file = ""
+        sync_params_controls!(ui_state, ui_state.dataset_opt_params)
+    end
+    CImGui.SetItemTooltip("Back to the built-in defaults.")
+    return
+end
+
+"""
 Modal window for selecting a COLMAP dataset folder & its scale.
 Opened via the `File` menu; must be submitted at the same ID stack
 level as `OpenPopup`, hence outside of `menu_bar!`.
@@ -711,6 +799,8 @@ function open_dataset_modal!(gui::GSGUI)
             "supplies the background itself.")
     end
 
+    params_file_row!(ui_state)
+
     # Always occupy the error line to keep the window height constant.
     if isempty(ui_state.dataset_error)
         CImGui.Text(" ")
@@ -728,18 +818,12 @@ function open_dataset_modal!(gui::GSGUI)
         kab = get_backend(gui.rasterizer)
         scale = Int(ui_state.dataset_scale[])
         strategy = STRATEGIES[ui_state.dataset_strategy[] + 1]
-        use_depth_loss = ui_state.dataset_depth_loss[]
-        use_bilateral_grid = ui_state.dataset_bilateral_grid[]
-        use_normal_loss = ui_state.dataset_normal_loss[]
-        random_background = ui_state.dataset_random_background[]
-        use_sky_dome = ui_state.dataset_sky_dome[]
-        sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1]
+        opt_params = effective_opt_params(ui_state)
         max_sh_degree = Int(ui_state.dataset_max_sh_degree[])
         (; width, height) = resolution(gui.camera)
         ui_state.dataset_load_task = Threads.@spawn load_dataset(
             kab, dataset_path; scale, width, height, strategy,
-            use_depth_loss, use_bilateral_grid, use_normal_loss,
-            random_background, use_sky_dome, sky_dome_shape, max_sh_degree)
+            opt_params, max_sh_degree)
     end
     can_open || disabled_end()
 
@@ -791,6 +875,7 @@ function loop!(gui::GSGUI)
     mouse_in_ui = is_mouse_in_ui() && !gui.ui_state.scene_hovered
 
     handle_ui!(gui; frame_time)
+    training_details_window!(gui, dockspace_id)
 
     # The camera follows the path while capturing: no manual control.
     capture = gui.capture_mode
@@ -863,8 +948,7 @@ function scene_window!(
     allow_resize::Bool = true,
 )
     CImGui.SetNextWindowDockID(dockspace_id, CImGui.ImGuiCond_FirstUseEver)
-    CImGui.PushStyleVar(
-        CImGui.ImGuiStyleVar_WindowPadding, CImGui.ImVec2(0f0, 0f0))
+    CImGui.PushStyleVar(CImGui.ImGuiStyleVar_WindowPadding, CImGui.ImVec2(0f0, 0f0))
     visible = CImGui.Begin("Scene")
     CImGui.PopStyleVar()
 
@@ -912,7 +996,6 @@ function scene_window!(
         end
     end
     CImGui.End()
-
     gui.ui_state.scene_hovered = hovered
     return
 end
@@ -935,8 +1018,7 @@ function worker_busy_overlay!(gui::GSGUI, rect_min)
     elapsed < SPINNER_DELAY && return
 
     label = "$(activity_label(activity))... ($(round(elapsed; digits=1)) s)"
-    hint = elapsed < SPINNER_HINT_DELAY ? "" :
-        "GPU kernels are compiled on first use: this can take ~30 s."
+    hint = elapsed < SPINNER_HINT_DELAY ? "" : "GPU kernels are compiled on first use: this can take ~30 s."
 
     pad, radius, thickness = 8f0, 7f0, 3f0
     line_height = CImGui.GetTextLineHeight()
@@ -1069,8 +1151,8 @@ function handle_ui!(gui::GSGUI; frame_time)
                 CImGui.EndTabItem()
             end
 
-            # Selecting the tab is what enters capture mode: the
-            # camera path is drawn & editable while it is open.
+            # Selecting the tab is what enters capture mode:
+            # the camera path is drawn & editable while it is open.
             if CImGui.BeginTabItem("Capture")
                 gui.ui_state.capture_tab = true
                 capture_ui!(gui.capture_mode, gui)
@@ -1143,15 +1225,12 @@ function scene_tab!(gui::GSGUI)
 
     # GUI rasterizers always render in `:rgbd` mode.
     CImGui.PushItemWidth(-100)
-    if CImGui.Combo("Mode", gui.ui_state.selected_mode,
-        gui.ui_state.render_modes,
-    )
+    if CImGui.Combo("Mode", gui.ui_state.selected_mode, gui.ui_state.render_modes)
         gui.render_state.need_render = true
     end
 
     if !viewer_only(gui)
         CImGui.Separator()
-
         CImGui.BeginTable("##checkbox-table", 2)
 
         # Row 1.
@@ -1165,36 +1244,14 @@ function scene_tab!(gui::GSGUI)
             "Loss: $(round(gui.ui_state.loss; digits=4)) " *
             "(ema $(round(gui.ui_state.loss_ema; digits=4)))")
 
-        # Row 2.
+        # Row 2. The training controls themselves live in the
+        # `Training Details` window (see `training_controls!`).
         CImGui.TableNextRow()
-        CImGui.TableNextColumn()
-        # Reflect worker-side stops (e.g. training error)
-        # before drawing the checkbox.
-        gui.ui_state.train[] = w.train[]
-        # Disable `Train` checkbox if no more steps left, until it's raised.
-        training_steps_left = w.max_steps[] ≤ 0 || w.step[] < w.max_steps[]
-        training_steps_left || disabled_begin()
-        if CImGui.Checkbox("Train", gui.ui_state.train)
-            GC.gc(false)
-            GC.gc(true)
-            w.train[] = gui.ui_state.train[]
-            notify(w.wakeup)
-        end
-        training_steps_left || CImGui.SetItemTooltip(
-            "Step limit reached: raise `Max Steps` to train further.")
-        training_steps_left || disabled_end()
         CImGui.TableNextColumn()
         CImGui.Checkbox("Draw Cameras", gui.ui_state.draw_cameras)
         CImGui.SetItemTooltip(
             "Overlay the dataset views as camera frustums, " *
             "each showing the image it was trained on.")
-
-        # Row 3.
-        CImGui.TableNextRow()
-        CImGui.TableNextColumn()
-        if CImGui.Checkbox("Densify", gui.ui_state.densify)
-            w.densify[] = gui.ui_state.densify[]
-        end
         CImGui.TableNextColumn()
         gui.ui_state.draw_cameras[] || disabled_begin()
         CImGui.Checkbox("Camera Images", gui.ui_state.draw_camera_images)
@@ -1202,37 +1259,12 @@ function scene_tab!(gui::GSGUI)
 
         CImGui.EndTable()
 
-        CImGui.PushItemWidth(-100)
-        if CImGui.InputInt("Max Steps", gui.ui_state.max_steps, 1_000, 5_000)
-            gui.ui_state.max_steps[] = max(Int32(0), gui.ui_state.max_steps[])
-            w.max_steps[] = Int(gui.ui_state.max_steps[])
-            # Raising the limit past the current step lets training resume.
-            notify(w.wakeup)
-        end
-        CImGui.SetItemTooltip(
-            "Training stops itself once it has taken this many steps. " *
-            "0 means no limit.")
-
         if gui.ui_state.draw_cameras[]
             CImGui.PushItemWidth(-100)
-            CImGui.SliderFloat("Camera Size",
-                gui.ui_state.camera_size, 0.2f0, 5f0, "%.2fx")
+            CImGui.SliderFloat("Camera Size", gui.ui_state.camera_size, 0.2f0, 5f0, "%.2fx")
             if gui.ui_state.draw_camera_images[]
                 CImGui.PushItemWidth(-100)
-                CImGui.SliderFloat("Image Opacity",
-                    gui.ui_state.camera_image_opacity, 0.1f0, 1f0, "%.2f")
-            end
-        end
-
-        if gui.ui_state.is_mcmc
-            # Benign cross-thread write: `max_cap` is a
-            # word-sized Int the worker only reads at
-            # densification time.
-            strategy = gui.trainer.strategy
-            max_cap_ref = Ref{Int32}(strategy.max_cap)
-            CImGui.PushItemWidth(-100)
-            if CImGui.InputInt("Max Gaussians", max_cap_ref, 100_000, 500_000)
-                strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
+                CImGui.SliderFloat("Image Opacity", gui.ui_state.camera_image_opacity, 0.1f0, 1f0, "%.2f")
             end
         end
 

@@ -22,7 +22,16 @@ Base.@kwdef struct OptimizationParams
     use_depth_loss::Bool = true
     depth_loss_weight::Float32 = 2f0
     depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
-    depth_loss_steps::Int = 30_000 # Weight decays to 2% by this step.
+    depth_loss_steps::Int = 30_000 # Weight decays to `depth_loss_final_scale` by this step.
+    # What the depth weight decays *to*, as a fraction of itself: depth
+    # dominates early geometry formation & the photometric loss has to win fine
+    # detail late, but the constraint is not dropped entirely (see `step!`).
+    depth_loss_final_scale::Float32 = 0.02f0
+    # Weight of the depth loss' gradient-matching term relative to its data
+    # term: aligns depth *edges* rather than absolute values, so raising it
+    # buys sharper discontinuities at the cost of following the prior's own
+    # (see `ssi_depth_loss`).
+    depth_loss_gradient_weight::Float32 = 1f0
 
     # Sky dome (see `sky_dome.jl`): a frozen far-field shell of Gaussians
     # composited behind the scene, so sky pixels have a parallax-free place to

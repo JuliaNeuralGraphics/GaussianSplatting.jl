@@ -35,6 +35,7 @@ Rotations = "6038ab10-8711-5258-84ad-4b1120ba62dc"
 SIMD = "fdea26ae-647d-5447-a871-4b548cad5224"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 VideoIO = "d6d074c3-1acf-5d4c-9a43-ef38773959a2"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 

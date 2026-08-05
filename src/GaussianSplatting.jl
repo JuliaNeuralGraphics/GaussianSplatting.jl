@@ -17,6 +17,7 @@ using Random
 using Rotations
 using StaticArrays
 using Statistics
+using TOML
 using ImageCore
 using ImageIO
 using ImageTransformations
@@ -72,6 +73,7 @@ include("densification.jl")
 include("mcmc.jl")
 include("rasterization/rasterizer.jl")
 include("sky_dome.jl")
+include("params_io.jl")
 include("training.jl")
 include("gui/gui.jl")
 

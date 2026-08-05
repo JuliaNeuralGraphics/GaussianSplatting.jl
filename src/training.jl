@@ -539,7 +539,7 @@ function step!(trainer::Trainer)
                 anchor, prior, trainer.dataset.train_depth_qsteps[idx])
             # Depth dominates early geometry formation,
             # photometric loss wins fine detail late.
-            decay = DEPTH_LOSS_FINAL_SCALE^clamp(
+            decay = params.depth_loss_final_scale^clamp(
                 Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
             weight = params.depth_loss_weight * decay
             (; target, half_band, valid, far_extrap, weight)
@@ -637,7 +637,8 @@ function step!(trainer::Trainer)
                         depth_img, alpha_img;
                         depth_data.target, depth_data.half_band,
                         depth_data.valid, depth_data.far_extrap,
-                        depth_floor=anchor.floor)
+                        depth_floor=anchor.floor,
+                        λ_grad=params.depth_loss_gradient_weight)
                 total += depth_term
             end
 

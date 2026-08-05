@@ -2,10 +2,9 @@
 Geometry regularization constrains shape of the surface
 where depth supervision only constrains its location.
 
-- [`depth_normal_consistency_loss`](@ref) pins surface orientation: normals
-  derived from the rendered depth map must agree with the alpha-blended
-  per-Gaussian normals (see `gaussian_normal` in `rasterization/projection.jl`,
-  rendered as channels 6:8 by a `:rgbdn` rasterizer).
+- [`depth_normal_consistency_loss`](@ref) pins surface orientation:
+  normals derived from the rendered depth map must agree with the alpha-blended per-Gaussian normals
+  (see `gaussian_normal` in `rasterization/projection.jl`, rendered as channels 6:8 by a `:rgbdn` rasterizer).
 - [`flatten_loss`](@ref) pins surface flatness: L1 on the smallest scale axis,
   which is what makes that min-axis normal well-defined in the first place.
 

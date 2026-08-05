@@ -18,8 +18,6 @@ the far end of the fit's support are supervised one-sidedly instead
 
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
-const DEPTH_LOSS_GRADIENT_WEIGHT = 1f0
-const DEPTH_LOSS_FINAL_SCALE = 0.02f0
 
 """
 Load a depth prior as a `(width, height)` Float32 map, resized to the training resolution.
@@ -469,7 +467,7 @@ function ssi_depth_loss(
     valid::AbstractMatrix{Bool},
     far_extrap::AbstractMatrix{Bool},
     depth_floor::Float32,
-    λ_grad::Float32 = DEPTH_LOSS_GRADIENT_WEIGHT,
+    λ_grad::Float32, # `OptimizationParams.depth_loss_gradient_weight`.
 )
     α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))

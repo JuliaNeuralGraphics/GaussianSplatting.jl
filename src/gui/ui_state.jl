@@ -58,6 +58,12 @@ Base.@kwdef mutable struct UIState
     dataset_sky_dome_shape::Ref{Int32} = Ref{Int32}(0)
     # Composite train renders over a random background (see `OptimizationParams`).
     dataset_random_background::Ref{Bool} = Ref(false)
+    # Hyperparameters the new trainer starts from: defaults, or everything a
+    # loaded TOML file specifies (see `params_io.jl`). The controls above own
+    # the fields they expose & are applied over this on `Open`.
+    dataset_opt_params::OptimizationParams = OptimizationParams()
+    # Where those came from; empty means untouched defaults.
+    dataset_params_file::String = ""
     dataset_path::Vector{UInt8} = Vector{UInt8}("\0"^1024)
     dataset_error::String = ""
     dataset_load_task::Maybe{Task} = nothing
