@@ -31,6 +31,21 @@ end
 # Offset image plane to avoid z-fighting.
 const IMAGE_PLANE_INSET = 0.995f0
 
+# Core profiles are only required to support a line width of `1` and macOS
+# raises `GL_INVALID_VALUE` for anything wider instead of clamping to the
+# supported range, so ask for the range and stay within it.
+const MAX_LINE_WIDTH = Ref{Float32}(0f0)
+
+function max_line_width()
+    if MAX_LINE_WIDTH[] == 0f0
+        range = Float32[1f0, 1f0]
+        glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, range)
+        glGetError() # Discard the error if the query is unsupported.
+        MAX_LINE_WIDTH[] = max(1f0, range[2])
+    end
+    MAX_LINE_WIDTH[]
+end
+
 """
 Geometry & shaders shared by every camera frustum drawn in the scene:
 a wireframe pyramid (with an "up" marker over the top edge) and a textured quad for the view's image.
@@ -181,7 +196,7 @@ function draw_wireframes(
     NGL.upload_uniform(p, "proj", P)
     NGL.upload_uniform(p, "view", V)
 
-    glLineWidth(1.5f0) # Silently clamped to 1 by core profiles.
+    glLineWidth(min(1.5f0, max_line_width()))
     for (i, pose) in enumerate(poses)
         NGL.upload_uniform(p, "model", pose.model)
         NGL.upload_uniform(p, "extent", extent(pose, scale))
