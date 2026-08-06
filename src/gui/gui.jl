@@ -380,29 +380,28 @@ function apply_dataset!(gui::GSGUI, loaded)
 end
 
 """
-Load a `.bson` model checkpoint for viewer-only mode.
+Load a `.safetensors` model checkpoint for viewer-only mode.
 
 Runs on a background thread (see `menu_bar!`), so it must not touch OpenGL state:
 the results are applied on the render thread in `apply_model!`.
 """
-function load_bson(kab, state_file::String)
-    θ = load_checkpoint(state_file)
+function load_checkpoint_model(kab, state_file::String)
+    ckpt = load_checkpoint(state_file)
     gaussians = GaussianModel(kab)
-    set_from_bson!(gaussians, θ[:gaussians])
+    read_state!(gaussians, ckpt, "gaussians")
 
     # Viewer-only mode has no trainer to hold a dome, so fold it into the model
-    # the same way `export_ply` does. Older checkpoints have no `:sky` key.
-    sky = get(θ, :sky, nothing)
-    if sky ≢ nothing
+    # the same way `export_ply` does. A scene trained without one has no keys.
+    if haskey(ckpt, "sky.gaussians.points")
         sky_gaussians = GaussianModel(kab)
-        set_from_bson!(sky_gaussians, sky.gaussians)
+        read_state!(sky_gaussians, ckpt, "sky.gaussians")
         gaussians = merge_sky(gaussians, sky_gaussians)
     end
 
     # H2D copies above run on this task's stream: make sure they are
     # done before the worker task touches the new arrays.
     KA.synchronize(kab)
-    return (; camera=θ[:camera]::Camera, gaussians)
+    return (; camera=read_state(Camera, ckpt, "camera"), gaussians)
 end
 
 """
@@ -483,6 +482,10 @@ function reset_ui!(ui_state::UIState)
     ui_state.train[] = false
     ui_state.densify[] = true
     ui_state.max_steps[] = DEFAULT_MAX_STEPS
+    # The path names files for the scene that is going away.
+    ui_state.autosave[] = false
+    ui_state.autosave_every[] = DEFAULT_AUTOSAVE_EVERY
+    ui_state.autosave_path = ""
     ui_state.loss = 0f0
     ui_state.loss_ema = 0f0
     ui_state.selected_view[] = 0
@@ -504,12 +507,13 @@ function menu_bar!(gui::GSGUI)
         # Both load into viewer-only mode: no trainer.
         # Disabled while a load is in flight, so its task cannot be dropped.
         can_load = gui.ui_state.model_load_task ≡ nothing
-        if CImGui.MenuItem("Open BSON...", C_NULL, false, can_load)
-            state_file = pick_file(homedir(); filterlist="bson") # Empty when cancelled.
+        if CImGui.MenuItem("Open Checkpoint...", C_NULL, false, can_load)
+            state_file = pick_file(homedir(); filterlist="safetensors") # Empty when cancelled.
             if !isempty(state_file)
                 # Only the backend type is read here: safe from the UI thread.
                 kab = get_backend(gui.rasterizer)
-                gui.ui_state.model_load_task = Threads.@spawn load_bson(kab, state_file)
+                gui.ui_state.model_load_task =
+                    Threads.@spawn load_checkpoint_model(kab, state_file)
             end
         end
 
@@ -525,17 +529,18 @@ function menu_bar!(gui::GSGUI)
         CImGui.Separator()
 
         # Saving needs a trainer: it stores optimizers & training step.
-        if CImGui.MenuItem("Save BSON...", C_NULL, false, !viewer_only(gui))
-            state_file = save_file(homedir(); filterlist="bson") # Empty when cancelled.
+        if CImGui.MenuItem("Save Checkpoint...", C_NULL, false, !viewer_only(gui))
+            state_file = save_file(homedir(); filterlist="safetensors") # Empty when cancelled.
             if !isempty(state_file)
-                endswith(state_file, ".bson") || (state_file *= ".bson")
+                endswith(state_file, ".safetensors") ||
+                    (state_file *= ".safetensors")
                 # Saving reads GPU arrays: run on the worker so it is ordered with training steps.
-                submit!(gui.worker, (:save_bson, state_file))
+                submit!(gui.worker, (:save_state, state_file))
             end
         end
 
         # Exporting only needs the gaussians, so it also works in viewer-only mode;
-        # drops the optimizers & the training step, unlike `Save BSON`.
+        # drops the optimizers & the training step, unlike `Save Checkpoint`.
         if CImGui.MenuItem("Export PLY...", C_NULL, false, gui.worker.n_gaussians[] > 0)
             ply_file = save_file(homedir(); filterlist="ply") # Empty when cancelled.
             if !isempty(ply_file)

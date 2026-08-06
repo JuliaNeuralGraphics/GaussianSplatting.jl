@@ -319,15 +319,15 @@ function sky_opacity_loss(
     return sum(sky_weight .* alpha .^ 2) / Σw
 end
 
-function bson_params(sky::SkyDome)
-    return (;
-        gaussians=bson_params(sky.gaussians),
-        optimizer=bson_params(sky.optimizer),
-        radius=sky.radius)
+function write_state!(tensors, meta, prefix::String, sky::SkyDome)
+    write_state!(tensors, meta, "$prefix.gaussians", sky.gaussians)
+    write_state!(tensors, meta, "$prefix.optimizer", sky.optimizer)
+    write_scalar!(meta, "$prefix.radius", sky.radius)
+    return
 end
 
-function set_from_bson!(sky::SkyDome, θ)
-    set_from_bson!(sky.gaussians, θ.gaussians)
-    set_from_bson!(sky.optimizer, θ.optimizer)
+function read_state!(sky::SkyDome, ckpt::Checkpoint, prefix::String)
+    read_state!(sky.gaussians, ckpt, "$prefix.gaussians")
+    read_state!(sky.optimizer, ckpt, "$prefix.optimizer")
     return
 end

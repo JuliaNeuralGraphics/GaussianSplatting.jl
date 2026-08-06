@@ -902,76 +902,81 @@ end
 end
 
 @testset "Checkpoint" begin
-    # Mirrors what `save_state` writes: nested named tuples of arrays, a
-    # `Camera`, plain scalars.
-    adam(dims) = (;
-        μ=[fill(1.5f0, d) for d in dims],
-        ν=[fill(2.5f0, d) for d in dims],
-        current_step=7)
-    gaussians(n) = (;
-        points=rand(Float32, 3, n),
-        features_dc=rand(Float32, 3, 1, n),
-        features_rest=rand(Float32, 3, 15, n),
-        scales=rand(Float32, 3, n),
-        rotations=rand(Float32, 4, n),
-        opacities=rand(Float32, 1, n),
-        sh_degree=2, max_sh_degree=3)
+    NU = GaussianSplatting.NU
+    n = 100
+    model(n) = GaussianSplatting.GaussianModel(kab,
+        rand(Float32, 3, n), rand(Float32, 3, n), rand(Float32, 3, n);
+        max_sh_degree=3)
 
-    camera = GaussianSplatting.Camera(; fx=100f0, fy=100f0, width=64, height=48)
-    doc = Dict(
-        :gaussians => gaussians(100),
-        :optimizers => (; points=adam([(3, 100)]), scales=adam([(3, 100)])),
-        :bilateral => (;
-            grids=rand(Float32, 12, 8, 8, 4, 5),
-            opt=adam([(12, 8, 8, 4, 5)])),
-        :step => 30_000,
-        :camera => camera,
-        :ids => Int32[1, 2, 3])
+    gs = model(n)
+    gs.sh_degree = 2
+    opt = NU.Adam(kab, gs.points; lr=1f-3)
+    opt.current_step = UInt32(7)
+    fill!(opt.μ[1], 1.5f0)
+    fill!(opt.ν[1], 2.5f0)
+
+    camera = GaussianSplatting.Camera(; fx=100f0, fy=110f0, width=64, height=48)
+    camera.img_name = "IMG_0001.jpg"
+    grids = rand(Float32, 12, 8, 8, 4, 5)
 
     dir = mktempdir()
-    path = joinpath(dir, "state.bson")
-    GaussianSplatting.save_checkpoint(path, doc)
-    θ = GaussianSplatting.load_checkpoint(path)
+    path = joinpath(dir, "state.safetensors")
 
-    for k in keys(doc[:gaussians])
-        @test getproperty(θ[:gaussians], k) == getproperty(doc[:gaussians], k)
+    tensors = Dict{String, AbstractArray}("bilateral.grids" => grids)
+    meta = Dict{String, String}()
+    GaussianSplatting.write_state!(tensors, meta, "gaussians", gs)
+    GaussianSplatting.write_state!(tensors, meta, "optimizers.points", opt)
+    GaussianSplatting.write_state!(tensors, meta, "camera", camera)
+    GaussianSplatting.write_scalar!(meta, "step", 30_000)
+    GaussianSplatting.save_checkpoint(path, tensors, meta)
+
+    ckpt = GaussianSplatting.load_checkpoint(path)
+
+    # An empty model reads the checkpoint's arrays back, shapes & all.
+    gs2 = GaussianSplatting.GaussianModel(kab)
+    GaussianSplatting.read_state!(gs2, ckpt, "gaussians")
+    for f in (:points, :features_dc, :features_rest, :scales, :rotations, :opacities)
+        @test Array(getfield(gs2, f)) == Array(getfield(gs, f))
     end
-    @test θ[:optimizers].points.μ == doc[:optimizers].points.μ
-    @test θ[:optimizers].points.ν == doc[:optimizers].points.ν
-    @test θ[:optimizers].scales.current_step == 7
-    @test θ[:bilateral].grids == doc[:bilateral].grids
-    @test θ[:bilateral].opt.μ == doc[:bilateral].opt.μ
-    @test θ[:step] == 30_000
-    @test θ[:ids] == Int32[1, 2, 3]
-    @test θ[:ids] isa Vector{Int32}
+    @test gs2.sh_degree == 2
+    @test gs2.max_sh_degree == 3
 
-    # Structs stay in the document: the static arrays inside them are not
-    # payload & must survive as-is.
-    @test θ[:camera] isa GaussianSplatting.Camera
-    @test θ[:camera].w2c == camera.w2c
-    @test θ[:camera].c2w == camera.c2w
-    @test θ[:camera].intrinsics.resolution == camera.intrinsics.resolution
+    opt2 = NU.Adam(kab, gs2.points; lr=1f-3)
+    GaussianSplatting.read_state!(opt2, ckpt, "optimizers.points")
+    @test Array(opt2.μ[1]) == Array(opt.μ[1])
+    @test Array(opt2.ν[1]) == Array(opt.ν[1])
+    @test opt2.current_step == 7
 
-    header_bytes(f) = open(f) do io
-        seek(io, length(GaussianSplatting.CHECKPOINT_MAGIC))
-        filesize(f) - read(io, UInt64)
-    end
+    @test GaussianSplatting.tensor(ckpt, "bilateral.grids") == grids
+    @test GaussianSplatting.read_scalar(ckpt, "step", Int) == 30_000
 
-    # The point of the format: BSON caps a document at 2 GiB (its length is an
-    # `Int32`), so the document must not grow with the array data.
-    big = joinpath(dir, "big.bson")
-    GaussianSplatting.save_checkpoint(big,
-        Dict(doc..., :gaussians => gaussians(1000)))
-    @test header_bytes(big) == header_bytes(path)
-    @test filesize(big) > filesize(path)
+    # The camera is rebuilt from `w2c` & its intrinsics, so everything the
+    # constructor derives from them must come back identical.
+    camera2 = GaussianSplatting.read_state(GaussianSplatting.Camera, ckpt, "camera")
+    @test camera2.w2c == camera.w2c
+    @test camera2.c2w == camera.c2w
+    @test camera2.full_projection == camera.full_projection
+    @test camera2.intrinsics.focal == camera.intrinsics.focal
+    @test camera2.intrinsics.principal == camera.intrinsics.principal
+    @test camera2.intrinsics.resolution == camera.intrinsics.resolution
+    @test camera2.intrinsics.distortion ≡ nothing
+    @test camera2.original_focal == camera.original_focal
+    @test camera2.original_resolution == camera.original_resolution
+    @test camera2.img_name == "IMG_0001.jpg"
 
-    # Checkpoints written before the blob format are plain BSON.
-    legacy = joinpath(dir, "legacy.bson")
-    GaussianSplatting.BSON.bson(legacy,
-        Dict(:step => 1234, :points => rand(Float32, 3, 10)))
-    old = GaussianSplatting.load_checkpoint(legacy)
-    @test old[:step] == 1234
-    @test size(old[:points]) == (3, 10)
+    # Optional groups are simply absent, not empty.
+    @test !haskey(ckpt, "sky.gaussians.points")
+
+    # It is a plain safetensors file: shapes are as Julia sees them & the
+    # payload is out of the header, so no 2 GiB document limit applies.
+    st = GaussianSplatting.SafeTensors.deserialize(path)
+    @test size(st["gaussians.points"]) == (3, n)
+    @test size(st["gaussians.features_rest"]) == (3, 15, n)
+    @test st.metadata["format"] == GaussianSplatting.CHECKPOINT_FORMAT
+
+    junk = joinpath(dir, "junk.safetensors")
+    write(junk, rand(UInt8, 64))
+    @test_throws Exception GaussianSplatting.load_checkpoint(junk)
 end
 
 @testset "PLY export/import" begin

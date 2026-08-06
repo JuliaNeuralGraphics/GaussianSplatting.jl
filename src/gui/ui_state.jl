@@ -1,6 +1,5 @@
-# Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
-
 const DEFAULT_MAX_STEPS = Int32(30_000)
+const DEFAULT_AUTOSAVE_EVERY = Int32(10_000)
 
 Base.@kwdef mutable struct UIState
     train::Ref{Bool} = Ref(false)
@@ -8,6 +7,13 @@ Base.@kwdef mutable struct UIState
     densify::Ref{Bool} = Ref(true)
     # Training stops itself at this step; `0` means no limit.
     max_steps::Ref{Int32} = Ref(DEFAULT_MAX_STEPS)
+    # Periodic checkpointing (see `maybe_autosave!`): every `autosave_every`
+    # steps & on the run's final step. `0` steps saves only the final one.
+    autosave::Ref{Bool} = Ref(false)
+    autosave_every::Ref{Int32} = Ref(DEFAULT_AUTOSAVE_EVERY)
+    # Base path the saved filenames are derived from; empty until one is
+    # picked, which is also what keeps `autosave` from being switched on.
+    autosave_path::String = ""
     scene_hovered::Bool = false
 
     loss::Float32 = 0f0
@@ -68,7 +74,7 @@ Base.@kwdef mutable struct UIState
     dataset_error::String = ""
     dataset_load_task::Maybe{Task} = nothing
 
-    # `Open BSON` / `Open PLY` model loading
-    # (see `load_bson`, `load_ply` & `poll_model_load!`).
+    # `Open Checkpoint` / `Open PLY` model loading
+    # (see `load_checkpoint_model`, `load_ply` & `poll_model_load!`).
     model_load_task::Maybe{Task} = nothing
 end

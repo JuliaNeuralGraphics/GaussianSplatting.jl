@@ -79,11 +79,11 @@ julia> GaussianSplatting.save_opt_params("params.toml", opt_params)
 
 ## Viewer mode
 
-Once you've trained a model and saved it to `.bson` file you can open it
+Once you've trained a model and saved it to a `.safetensors` file you can open it
 in a viewer-only mode by providing its path.
 
 ```julia
-julia> GaussianSplatting.gui(kab, "path-to-checkpoint.bson")
+julia> GaussianSplatting.gui(kab, "path-to-checkpoint.safetensors")
 ```
 
 Alternative, you can load a checkpoint

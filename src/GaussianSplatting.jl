@@ -34,7 +34,6 @@ using NativeFileDialog
 import CImGui.lib as iglib
 
 import AcceleratedKernels as AK
-import BSON
 import ChainRulesCore as CRC
 import ImageFiltering
 import ImPlot
@@ -44,6 +43,7 @@ import NeuralGraphicsGL as NGL
 import SIMD
 import PlyIO
 import ProgressMeter
+import SafeTensors
 
 const Maybe{T} = Union{T, Nothing}
 

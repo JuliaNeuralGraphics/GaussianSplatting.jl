@@ -393,77 +393,78 @@ function setup_sky_supervision(
     return true
 end
 
-function bson_params(opt::NU.Adam)
-    (;
-        μ=[adapt(CPU(), i) for i in opt.μ],
-        ν=[adapt(CPU(), i) for i in opt.ν],
-        current_step=opt.current_step)
-end
-
-function set_from_bson!(opt::NU.Adam, θ)
-    kab = get_backend(opt)
-    opt.μ = [adapt(kab, i) for i in θ.μ]
-    opt.ν = [adapt(kab, i) for i in θ.ν]
-    opt.current_step = θ.current_step
+# An `Adam` holds one moment pair per parameter array, so they are numbered.
+function write_state!(tensors, meta, prefix::String, opt::NU.Adam)
+    for (i, (μ, ν)) in enumerate(zip(opt.μ, opt.ν))
+        tensors["$prefix.mu.$i"] = adapt(CPU(), μ)
+        tensors["$prefix.nu.$i"] = adapt(CPU(), ν)
+    end
+    write_scalar!(meta, "$prefix.n_moments", length(opt.μ))
+    write_scalar!(meta, "$prefix.current_step", opt.current_step)
     return
 end
 
+function read_state!(opt::NU.Adam, ckpt::Checkpoint, prefix::String)
+    kab = get_backend(opt)
+    n = read_scalar(ckpt, "$prefix.n_moments", Int)
+    opt.μ = [adapt(kab, tensor(ckpt, "$prefix.mu.$i")) for i in 1:n]
+    opt.ν = [adapt(kab, tensor(ckpt, "$prefix.nu.$i")) for i in 1:n]
+    opt.current_step = read_scalar(ckpt, "$prefix.current_step", UInt32)
+    return
+end
+
+const OPTIMIZER_NAMES = (
+    :points, :features_dc, :features_rest, :opacities, :scales, :rotations)
+
 function save_state(trainer::Trainer, filename::String)
-    optimizers = (;
-        points=bson_params(trainer.optimizers.points),
-        features_dc=bson_params(trainer.optimizers.features_dc),
-        features_rest=bson_params(trainer.optimizers.features_rest),
-        opacities=bson_params(trainer.optimizers.opacities),
-        scales=bson_params(trainer.optimizers.scales),
-        rotations=bson_params(trainer.optimizers.rotations))
+    tensors = Dict{String, AbstractArray}()
+    meta = Dict{String, String}()
 
-    bilateral = trainer.bilateral_grid ≡ nothing ? nothing : (;
-        grids=adapt(CPU(), trainer.bilateral_grid.grids),
-        opt=bson_params(trainer.bilateral_grid.optimizer))
+    write_state!(tensors, meta, "gaussians", trainer.gaussians)
+    for name in OPTIMIZER_NAMES
+        write_state!(tensors, meta,
+            "optimizers.$name", getproperty(trainer.optimizers, name))
+    end
 
-    sky = trainer.sky ≡ nothing ? nothing : bson_params(trainer.sky)
+    if trainer.bilateral_grid ≢ nothing
+        tensors["bilateral.grids"] = adapt(CPU(), trainer.bilateral_grid.grids)
+        write_state!(tensors, meta,
+            "bilateral.opt", trainer.bilateral_grid.optimizer)
+    end
 
-    camera = trainer.dataset.train_cameras[1]
-    save_checkpoint(filename, Dict(
-        :gaussians => bson_params(trainer.gaussians),
-        :optimizers => optimizers,
-        :bilateral => bilateral,
-        :sky => sky,
-        :step => trainer.step,
-        :camera => camera,
-    ))
+    trainer.sky ≡ nothing ||
+        write_state!(tensors, meta, "sky", trainer.sky)
+
+    write_state!(tensors, meta, "camera", trainer.dataset.train_cameras[1])
+    write_scalar!(meta, "step", trainer.step)
+
+    save_checkpoint(filename, tensors, meta)
     return
 end
 
 function load_state!(trainer::Trainer, filename::String)
-    θ = load_checkpoint(filename)
-    optimizers = θ[:optimizers]
-    set_from_bson!(trainer.gaussians, θ[:gaussians])
+    ckpt = load_checkpoint(filename)
+    read_state!(trainer.gaussians, ckpt, "gaussians")
+    for name in OPTIMIZER_NAMES
+        read_state!(getproperty(trainer.optimizers, name), ckpt, "optimizers.$name")
+    end
 
-    set_from_bson!(trainer.optimizers.points, optimizers.points)
-    set_from_bson!(trainer.optimizers.features_dc, optimizers.features_dc)
-    set_from_bson!(trainer.optimizers.features_rest, optimizers.features_rest)
-    set_from_bson!(trainer.optimizers.opacities, optimizers.opacities)
-    set_from_bson!(trainer.optimizers.scales, optimizers.scales)
-    set_from_bson!(trainer.optimizers.rotations, optimizers.rotations)
-
-    # Older checkpoints have no grids; a checkpoint with grids restores them
-    # only if the trainer has them enabled (they must match the same dataset).
-    bilateral = get(θ, :bilateral, nothing)
-    if trainer.bilateral_grid ≢ nothing && bilateral ≢ nothing
+    # A checkpoint with grids restores them only if the trainer has them
+    # enabled (they must match the same dataset).
+    if trainer.bilateral_grid ≢ nothing && haskey(ckpt, "bilateral.grids")
         kab = get_backend(trainer.gaussians)
-        copyto!(trainer.bilateral_grid.grids, adapt(kab, bilateral.grids))
-        set_from_bson!(trainer.bilateral_grid.optimizer, bilateral.opt)
+        copyto!(trainer.bilateral_grid.grids,
+            adapt(kab, tensor(ckpt, "bilateral.grids")))
+        read_state!(trainer.bilateral_grid.optimizer, ckpt, "bilateral.opt")
     end
 
     # Same as the grids: restored only when both sides have a dome, since its
     # geometry is derived from the dataset the checkpoint was trained on.
-    sky = get(θ, :sky, nothing)
-    if trainer.sky ≢ nothing && sky ≢ nothing
-        set_from_bson!(trainer.sky, sky)
+    if trainer.sky ≢ nothing && haskey(ckpt, "sky.gaussians.points")
+        read_state!(trainer.sky, ckpt, "sky")
     end
 
-    trainer.step = θ[:step]
+    trainer.step = read_scalar(ckpt, "step", Int)
     return
 end
 

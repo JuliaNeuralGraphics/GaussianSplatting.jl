@@ -364,15 +364,19 @@ function load_or_fit_depth_anchors(
     mode::Symbol = :ssi,
 )
     fingerprint = depth_anchors_fingerprint(points, cameras, mode)
-    cache_path = joinpath(dirname(depths_dir), "$(basename(depths_dir))_anchors.bson")
+    cache_path = joinpath(dirname(depths_dir), "$(basename(depths_dir))_anchors.toml")
 
     if isfile(cache_path)
         try
-            cached = BSON.load(cache_path)
-            if cached[:fingerprint] == fingerprint
-                by_name = cached[:anchors]::Dict
+            cached = TOML.parsefile(cache_path)
+            # The hash is a `UInt`: TOML integers are signed, so it is a string.
+            if parse(UInt, cached["fingerprint"]) == fingerprint
+                by_name = cached["anchors"]::Dict
                 @info "Loaded cached depth anchors from `$cache_path`."
-                return Maybe{DepthAnchor}[get(by_name, cam.img_name, nothing) for cam in cameras]
+                return Maybe{DepthAnchor}[
+                    haskey(by_name, cam.img_name) ?
+                        DepthAnchor(Float32.(by_name[cam.img_name])...) : nothing
+                    for cam in cameras]
             end
 
             @warn "Depth anchor cache is stale `$cache_path`, recomputing..."
@@ -383,11 +387,18 @@ function load_or_fit_depth_anchors(
 
     anchors = fit_depth_anchors(points, cameras, priors; mode)
 
-    by_name = Dict{String, DepthAnchor}()
+    by_name = Dict{String, Any}()
     for (cam, a) in zip(cameras, anchors)
-        a ≡ nothing || (by_name[cam.img_name] = a)
+        a ≡ nothing || (by_name[cam.img_name] =
+            [to_toml(getfield(a, f)) for f in fieldnames(DepthAnchor)])
     end
-    BSON.bson(cache_path, Dict(:fingerprint => fingerprint, :anchors => by_name))
+    open(cache_path, "w") do io
+        println(io, "# GaussianSplatting.jl depth anchor cache.")
+        println(io, "# `[a, b, floor, disparity, p_far]` per image, see `DepthAnchor`.")
+        TOML.print(io, Dict{String, Any}(
+            "fingerprint" => string(fingerprint),
+            "anchors" => by_name); sorted=true)
+    end
     @info "Saved depth anchors to `$cache_path`."
     return anchors
 end

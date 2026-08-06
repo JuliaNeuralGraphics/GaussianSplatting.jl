@@ -44,6 +44,46 @@ function Camera(; fx::Float32, fy::Float32, width::Int, height::Int)
         intrinsics, img_name="")
 end
 
+# A checkpoint stores one camera, so the viewer opens the scene from a pose the
+# model was trained on. `R`/`t` come back out of `w2c`, everything the
+# constructor derives from them is recomputed on load.
+function write_state!(tensors, meta, prefix::String, c::Camera)
+    tensors["$prefix.w2c"] = Matrix{Float32}(c.w2c)
+
+    (; distortion, focal, principal, resolution) = c.intrinsics
+    distortion ≡ nothing || write_vec!(meta, "$prefix.distortion", distortion)
+    write_vec!(meta, "$prefix.focal", focal)
+    write_vec!(meta, "$prefix.principal", principal)
+    write_vec!(meta, "$prefix.resolution", resolution)
+
+    write_vec!(meta, "$prefix.original_focal", c.original_focal)
+    write_vec!(meta, "$prefix.original_resolution", c.original_resolution)
+    meta["$prefix.img_name"] = c.img_name
+    return
+end
+
+function read_state(::Type{Camera}, ckpt::Checkpoint, prefix::String)
+    w2c = tensor(ckpt, "$prefix.w2c")::Matrix{Float32}
+    R = SMatrix{3, 3, Float32, 9}(@view(w2c[1:3, 1:3]))
+    t = SVector{3, Float32}(@view(w2c[1:3, 4]))
+
+    distortion = haskey(ckpt.meta, "$prefix.distortion") ?
+        read_vec(ckpt, "$prefix.distortion", SVector{4, Float32}) : nothing
+    intrinsics = NU.CameraIntrinsics(distortion,
+        read_vec(ckpt, "$prefix.focal", SVector{2, Float32}),
+        read_vec(ckpt, "$prefix.principal", SVector{2, Float32}),
+        read_vec(ckpt, "$prefix.resolution", SVector{2, UInt32}))
+
+    camera = Camera(R, t; intrinsics, img_name=ckpt.meta["$prefix.img_name"])
+    # `set_resolution!` rescales the focal from these, so they have to survive
+    # the round-trip: the constructor would reset them to the saved resolution.
+    camera.original_focal =
+        read_vec(ckpt, "$prefix.original_focal", SVector{2, Float32})
+    camera.original_resolution =
+        read_vec(ckpt, "$prefix.original_resolution", SVector{2, UInt32})
+    return camera
+end
+
 function set_resolution!(c::Camera; width::Int, height::Int)
     scale::Float32 = height / c.original_resolution[2]
     resolution = SVector{2, UInt32}(width, height)

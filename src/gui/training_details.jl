@@ -209,6 +209,8 @@ function training_controls!(gui)
     end
     CImGui.SetItemTooltip("Training stops itself once it has taken this many steps. 0 means no limit.")
 
+    autosave_controls!(gui)
+
     if ui_state.is_mcmc
         # Benign cross-thread write: `max_cap` is a word-sized Int
         # the worker only reads at densification time.
@@ -224,6 +226,74 @@ function training_controls!(gui)
     end
 
     training_time_line!(w)
+    return
+end
+
+# Where the autosaved checkpoints go, through the same dialog as
+# `Save Checkpoint...`. Empty when cancelled.
+function pick_autosave_path()
+    path = save_file(homedir(); filterlist="safetensors")
+    isempty(path) && return ""
+    endswith(path, ".safetensors") || (path *= ".safetensors")
+    return path
+end
+
+"""
+Periodic checkpointing: one every N steps & one when the run reaches
+`Max Steps`, so a run left alone cannot end with nothing on disk.
+
+Each file is the picked path with its step number appended
+(see `autosave_filename`), so they accumulate rather than overwrite.
+"""
+function autosave_controls!(gui)
+    w = gui.worker
+    ui_state = gui.ui_state
+
+    # The worker turns this off when a write fails.
+    ui_state.autosave[] = w.autosave[]
+    if CImGui.Checkbox("Autosave", ui_state.autosave)
+        # Nowhere to write yet: ask now, so it cannot be switched on for a run
+        # that then saves nothing.
+        if ui_state.autosave[] && isempty(ui_state.autosave_path)
+            ui_state.autosave_path = pick_autosave_path()
+            isempty(ui_state.autosave_path) && (ui_state.autosave[] = false)
+            set_autosave_path!(w, ui_state.autosave_path)
+        end
+        w.autosave[] = ui_state.autosave[]
+    end
+    CImGui.SetItemTooltip(
+        "Save a checkpoint every N steps, and once more when training " *
+        "reaches `Max Steps`.")
+
+    ui_state.autosave[] || disabled_begin()
+
+    CImGui.PushItemWidth(-120)
+    if CImGui.InputInt("Every N Steps", ui_state.autosave_every, 1_000, 5_000)
+        ui_state.autosave_every[] = max(Int32(0), ui_state.autosave_every[])
+        w.autosave_every[] = Int(ui_state.autosave_every[])
+    end
+    CImGui.SetItemTooltip(
+        "0 saves only the final step. A save costs a few seconds on a large " *
+        "scene & training waits for it.")
+
+    if CImGui.Button("Save To...")
+        path = pick_autosave_path()
+        if !isempty(path)
+            ui_state.autosave_path = path
+            set_autosave_path!(w, path)
+        end
+    end
+    CImGui.SameLine()
+    # A name a save would actually write, rather than the picked base: the step
+    # suffix is what tells the files apart on disk.
+    example = isempty(ui_state.autosave_path) ? "" :
+        autosave_filename(ui_state.autosave_path, w.step[])
+    CImGui.Text(isempty(example) ? "no path set" : basename(example))
+    CImGui.SetItemTooltip(isempty(example) ?
+        "Pick where the checkpoints go." :
+        "Named like `$example`, with the step of each save.")
+
+    ui_state.autosave[] || disabled_end()
     return
 end
 

@@ -88,30 +88,30 @@ function KA.unsafe_free!(gs::GaussianModel)
     return
 end
 
-function bson_params(m::GaussianModel)
-    return (;
-        points=adapt(CPU(), m.points),
-        features_dc=adapt(CPU(), m.features_dc),
-        features_rest=adapt(CPU(), m.features_rest),
-        scales=adapt(CPU(), m.scales),
-        rotations=adapt(CPU(), m.rotations),
-        opacities=adapt(CPU(), m.opacities),
+function write_state!(tensors, meta, prefix::String, m::GaussianModel)
+    tensors["$prefix.points"] = adapt(CPU(), m.points)
+    tensors["$prefix.features_dc"] = adapt(CPU(), m.features_dc)
+    tensors["$prefix.features_rest"] = adapt(CPU(), m.features_rest)
+    tensors["$prefix.scales"] = adapt(CPU(), m.scales)
+    tensors["$prefix.rotations"] = adapt(CPU(), m.rotations)
+    tensors["$prefix.opacities"] = adapt(CPU(), m.opacities)
 
-        sh_degree=m.sh_degree,
-        max_sh_degree=m.max_sh_degree)
+    write_scalar!(meta, "$prefix.sh_degree", m.sh_degree)
+    write_scalar!(meta, "$prefix.max_sh_degree", m.max_sh_degree)
+    return
 end
 
-function set_from_bson!(m::GaussianModel, θ)
+function read_state!(m::GaussianModel, ckpt::Checkpoint, prefix::String)
     kab = get_backend(m)
-    m.points = adapt(kab, θ.points)
-    m.features_dc = adapt(kab, θ.features_dc)
-    m.features_rest = adapt(kab, θ.features_rest)
-    m.scales = adapt(kab, θ.scales)
-    m.rotations = adapt(kab, θ.rotations)
-    m.opacities = adapt(kab, θ.opacities)
+    m.points = adapt(kab, tensor(ckpt, "$prefix.points"))
+    m.features_dc = adapt(kab, tensor(ckpt, "$prefix.features_dc"))
+    m.features_rest = adapt(kab, tensor(ckpt, "$prefix.features_rest"))
+    m.scales = adapt(kab, tensor(ckpt, "$prefix.scales"))
+    m.rotations = adapt(kab, tensor(ckpt, "$prefix.rotations"))
+    m.opacities = adapt(kab, tensor(ckpt, "$prefix.opacities"))
 
-    m.sh_degree = θ.sh_degree
-    m.max_sh_degree = θ.max_sh_degree
+    m.sh_degree = read_scalar(ckpt, "$prefix.sh_degree", Int)
+    m.max_sh_degree = read_scalar(ckpt, "$prefix.max_sh_degree", Int)
     return
 end
 

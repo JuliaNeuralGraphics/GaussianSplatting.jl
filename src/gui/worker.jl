@@ -72,6 +72,12 @@ mutable struct RenderWorker
     render::Threads.Atomic{Bool}
     # Step to stop training at; `0` means no limit.
     max_steps::Threads.Atomic{Int}
+    # Periodic checkpointing (see `maybe_autosave!`). `autosave_path` is a
+    # `String`, so unlike the flags around it, it is guarded by `lock`
+    # (see `autosave_path` & `set_autosave_path!`).
+    autosave::Threads.Atomic{Bool}
+    autosave_every::Threads.Atomic{Int}
+    autosave_path::String
 
     running::Threads.Atomic{Bool}
 
@@ -121,6 +127,9 @@ function RenderWorker(; width::Int, height::Int)
         # train, densify, render, max_steps
         Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(true), Threads.Atomic{Bool}(true),
         Threads.Atomic{Int}(Int(DEFAULT_MAX_STEPS)),
+        # autosave, autosave_every, autosave_path
+        Threads.Atomic{Bool}(false),
+        Threads.Atomic{Int}(Int(DEFAULT_AUTOSAVE_EVERY)), "",
         # running
         Threads.Atomic{Bool}(false),
         FrameBuffer(width, height), FrameBuffer(width, height), false,
@@ -297,13 +306,67 @@ A non-positive `max_steps` means unlimited number of training steps.
 training_steps_left(w::RenderWorker, trainer) =
     w.max_steps[] ≤ 0 || trainer.step < w.max_steps[]
 
+autosave_path(w::RenderWorker) = lock(() -> w.autosave_path, w.lock)
+
+function set_autosave_path!(w::RenderWorker, path::String)
+    lock(w.lock) do
+        w.autosave_path = path
+    end
+    return
+end
+
+"""
+`base` with the step number appended, so a run leaves an ordered series behind
+instead of overwriting itself: `scene.safetensors` at step 7000 becomes
+`scene_007000.safetensors`.
+"""
+function autosave_filename(base::String, step::Int)
+    stem = endswith(base, ".safetensors") ? base[1:end - length(".safetensors")] : base
+    return "$(stem)_$(lpad(step, 6, '0')).safetensors"
+end
+
+"""
+Write a checkpoint on the autosave schedule: every `autosave_every` steps, and
+on the run's final step, so an unattended run always leaves one behind.
+
+Called right after a step rather than next to the loop's stop check, which runs
+on every idle iteration & would save the same state over and over. A failed
+write switches autosave off: the next one is `autosave_every` steps of training
+away and would fail the same way.
+"""
+function maybe_autosave!(w::RenderWorker, trainer)
+    w.autosave[] || return
+    every = w.autosave_every[]
+    is_final = !training_steps_left(w, trainer)
+    (is_final || (every > 0 && trainer.step % every == 0)) || return
+
+    base = autosave_path(w)
+    isempty(base) && return
+    filename = autosave_filename(base, trainer.step)
+    try
+        with_activity(w, ActivitySaving) do
+            save_state(trainer, filename)
+        end
+        @info "Autosaved at step $(trainer.step): `$filename`."
+    catch err
+        w.autosave[] = false
+        set_error!(w, "Autosave failed, autosave turned off. See logs for details.")
+        @error "Autosave to `$filename` failed, turning autosave off." exception=(err, catch_backtrace())
+    end
+    return
+end
+
 # Push the UI toggles to the worker flags (after `reset_ui!`).
 function sync_worker_flags!(gui)
     w = gui.worker
-    w.train[] = gui.ui_state.train[]
-    w.densify[] = gui.ui_state.densify[]
-    w.render[] = gui.ui_state.render[]
-    w.max_steps[] = Int(gui.ui_state.max_steps[])
+    ui_state = gui.ui_state
+    w.train[] = ui_state.train[]
+    w.densify[] = ui_state.densify[]
+    w.render[] = ui_state.render[]
+    w.max_steps[] = Int(ui_state.max_steps[])
+    w.autosave[] = ui_state.autosave[]
+    w.autosave_every[] = Int(ui_state.autosave_every[])
+    set_autosave_path!(w, ui_state.autosave_path)
     notify(w.wakeup)
     return
 end
@@ -380,6 +443,9 @@ function worker_loop!(gui, w::RenderWorker)
                     w.n_gaussians[] = length(gui.gaussians)
                     refresh_memory!(gui, w)
                     did_train = true
+                    # After the stats: an autosave is slow enough that the UI
+                    # should show this step's numbers while it runs.
+                    maybe_autosave!(w, trainer)
 
                     # The single loss scalar hides which term is moving, which
                     # is what matters once several regularizers compete for the
@@ -449,7 +515,7 @@ end
 # What the UI shows while a command is being handled.
 function command_activity(tag::Symbol)
     (tag ≡ :install_scene || tag ≡ :install_model) && return ActivityLoadingScene
-    tag ≡ :save_bson && return ActivitySaving
+    tag ≡ :save_state && return ActivitySaving
     tag ≡ :export_ply && return ActivityExporting
     tag ≡ :close_scene && return ActivityClosingScene
     return ActivityRendering # `:pick_orbit` reads the rendered depth.
@@ -499,7 +565,7 @@ function handle_command!(gui, w::RenderWorker, cmd::Tuple)
         return true
     elseif tag ≡ :close_scene
         return handle_close_scene!(gui, w)
-    elseif tag ≡ :save_bson
+    elseif tag ≡ :save_state
         gui.trainer ≡ nothing || save_state(gui.trainer, cmd[2]::String)
         return false
     elseif tag ≡ :export_ply
