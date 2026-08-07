@@ -11,16 +11,26 @@ struct FrustumPose
     tan_half::SVector{2, Float32}
 end
 
-function FrustumPose(c::Camera)
-    c2w = c.c2w
+FrustumPose(c::Camera) = FrustumPose(
+    SMatrix{3, 3, Float32, 9}(@view(c.c2w[1:3, 1:3])),
+    SVector{3, Float32}(@view(c.c2w[1:3, 4])), camera_tan_half(c))
+
+# tan(fov / 2) == (resolution / 2) / focal.
+camera_tan_half(c::Camera) = SVector{2, Float32}(
+    0.5f0 .* c.intrinsics.resolution ./ c.intrinsics.focal)
+
+# `R` & `t` are the camera's c2w rotation & center, which is what a
+# `NU.CameraKeyframe` stores - a path keyframe is drawn without a `Camera`.
+function FrustumPose(
+    R::SMatrix{3, 3, Float32, 9}, t::SVector{3, Float32},
+    tan_half::SVector{2, Float32},
+)
     model = SMatrix{4, 4, Float32, 16}(
-        c2w[1, 1], c2w[2, 1], c2w[3, 1], 0f0,
-        c2w[1, 2], c2w[2, 2], c2w[3, 2], 0f0,
-        c2w[1, 3], c2w[2, 3], c2w[3, 3], 0f0,
-        c2w[1, 4], c2w[2, 4], c2w[3, 4], 1f0)
-    # tan(fov / 2) == (resolution / 2) / focal.
-    tan_half = 0.5f0 .* c.intrinsics.resolution ./ c.intrinsics.focal
-    FrustumPose(model, SVector{2, Float32}(tan_half))
+        R[1, 1], R[2, 1], R[3, 1], 0f0,
+        R[1, 2], R[2, 2], R[3, 2], 0f0,
+        R[1, 3], R[2, 3], R[3, 3], 0f0,
+        t[1], t[2], t[3], 1f0)
+    FrustumPose(model, tan_half)
 end
 
 # World-space size of the frustum drawn at `scale` depth.

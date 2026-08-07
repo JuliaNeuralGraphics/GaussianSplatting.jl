@@ -23,7 +23,11 @@ Base.@kwdef mutable struct CaptureMode
     save_frames::Ref{Bool} = Ref(false)
     steps_ref::Ref{Int32} = Ref{Int32}(24)
     framerate_ref::Ref{Int32} = Ref{Int32}(24)
-    save_dir::Vector{UInt8} = Vector{UInt8}("./" * "\0"^254)
+    # The video file to write. Empty until the user picks it: a video written
+    # next to whatever the process was launched from is easy to lose.
+    save_path::Vector{UInt8} = Vector{UInt8}("\0"^256)
+    # Why the last camera path load/save failed ("" when it did not).
+    path_error::String = ""
 end
 
 # Frames the current path produces: `steps_ref` per keyframe segment.
@@ -51,26 +55,39 @@ called whenever the scene the path was drawn for goes away.
 function reset!(c::CaptureMode)
     stop_capture!(c)
     empty!(c.camera_path)
+    c.path_error = ""
     return
 end
 
-save_directory(c::CaptureMode) = unsafe_string(pointer(c.save_dir))
+video_path(c::CaptureMode) = unsafe_string(pointer(c.save_path))
 
 # Replace the save path, keeping the buffer NUL-padded so that the
 # `InputText` field stays editable afterwards.
-function set_save_directory!(c::CaptureMode, dir::AbstractString)
-    c.save_dir = Vector{UInt8}(dir * "\0"^256)
+function set_video_path!(c::CaptureMode, path::AbstractString)
+    c.save_path = Vector{UInt8}(path * "\0"^256)
     return
 end
 
+# Where `save_frames` puts the `.png`s: a directory named after the video,
+# next to it, so two captures into the same folder do not mix their frames.
+function frames_directory(path::AbstractString)
+    joinpath(dirname(path), first(splitext(basename(path))) * "-frames")
+end
+
 function start_capture!(c::CaptureMode, gui)
+    # The `Capture` button is disabled without one; without this guard an
+    # empty path would quietly write into the current directory.
+    video_file = video_path(c)
+    isempty(video_file) && return
+
     reset_time!(c.camera_path)
     close_video!(c)
 
-    # Create directories for video & images.
-    save_dir = save_directory(c)
-    mkpath(save_dir)
-    c.save_frames[] && mkpath(joinpath(save_dir, "images"))
+    # Create directories for the video & its frames. The video's own directory
+    # may not exist yet: the path can be typed rather than picked.
+    video_dir = dirname(video_file) # Empty for a bare, typed-in file name.
+    isempty(video_dir) || mkpath(video_dir)
+    c.save_frames[] && mkpath(frames_directory(video_file))
 
     (; width, height) = resolution(gui.camera)
     c.width, c.height = width, height
@@ -79,7 +96,7 @@ function start_capture!(c::CaptureMode, gui)
 
     # Open video writer stream.
     c.writer = open_video_out(
-        joinpath(save_dir, "out.mp4"), zeros(RGB{N0f8}, height, width);
+        video_file, zeros(RGB{N0f8}, height, width);
         framerate=c.framerate_ref[],
         target_pix_fmt=VideoIO.AV_PIX_FMT_YUV420P)
 
@@ -136,7 +153,7 @@ function write_frame!(c::CaptureMode, frame::Array{Float32, 3})
 
     if c.save_frames[]
         image_file = "gsp-$(lpad(c.frame_index, 6, '0')).png"
-        save(joinpath(save_directory(c), "images", image_file), image)
+        save(joinpath(frames_directory(video_path(c)), image_file), image)
     end
     write(c.writer, image)
     return
@@ -174,40 +191,95 @@ function capture_ui!(c::CaptureMode, gui)
         CImGui.PushItemWidth(-100)
         CImGui.SliderInt("Frame rate", c.framerate_ref, 1, 60, "%d")
 
-        CImGui.Text("Save Directory:")
+        CImGui.Text("Video File:")
         CImGui.PushItemWidth(-1)
-        CImGui.InputText("##save-dir", pointer(c.save_dir), length(c.save_dir))
+        CImGui.InputText("##save-path", pointer(c.save_path), length(c.save_path))
+        isempty(video_path(c)) && CImGui.TextColored(
+            (1f0, 0.3f0, 0.3f0, 1f0), "Required: pick where the video goes.")
         if CImGui.Button("Browse...", CImGui.ImVec2(-1, 0))
-            save_dir = pick_folder(homedir()) # Empty when cancelled.
-            isempty(save_dir) || set_save_directory!(c, save_dir)
+            video_file = save_file(homedir(); filterlist="mp4") # Empty when cancelled.
+            if !isempty(video_file)
+                endswith(video_file, ".mp4") || (video_file *= ".mp4")
+                set_video_path!(c, video_file)
+            end
         end
 
         CImGui.PushItemWidth(-100)
         CImGui.Checkbox("Save frames", c.save_frames)
         CImGui.SetItemTooltip(
-            "Also write every frame as a `.png` into an `images` " *
-            "subdirectory, next to the video.")
+            "Also write every frame as a `.png`, into a directory named " *
+            "after the video & next to it.")
     end
 
     CImGui.BeginTable("##capture-buttons-table", 2)
     CImGui.TableNextRow()
     CImGui.TableNextColumn()
 
-    # Capturing an empty scene would just write a blank video.
-    can_capture = length(c.camera_path) ≥ 2 && gui.worker.n_gaussians[] > 0
+    # Capturing an empty scene would just write a blank video, and the video
+    # file has no default - `Video Settings` is where it is set.
+    can_capture =
+        length(c.camera_path) ≥ 2 &&
+        gui.worker.n_gaussians[] > 0 &&
+        !isempty(video_path(c))
     can_capture || disabled_begin()
     if CImGui.Button("Capture", CImGui.ImVec2(-1, 0))
         start_capture!(c, gui)
     end
     can_capture || disabled_end()
-    CImGui.SetItemTooltip("Stops training for the duration of the capture.")
+    CImGui.SetItemTooltip(
+        "Needs 2+ keyframes & a video file (see `Video Settings`).\n" *
+        "Stops training for the duration of the capture.")
 
     CImGui.TableNextColumn()
     red_button_begin()
     if CImGui.Button("Clear Path", CImGui.ImVec2(-1, 0))
         empty!(c.camera_path)
+        c.path_error = ""
     end
     red_button_end()
+
+    # A path outlives the session that flew it: saved keyframes can be loaded
+    # back into a later run of the same scene & captured again (see `camera_path_io.jl`).
+    CImGui.TableNextRow()
+    CImGui.TableNextColumn()
+    can_save = !isempty(c.camera_path)
+    can_save || disabled_begin()
+    if CImGui.Button("Save Path...", CImGui.ImVec2(-1, 0))
+        path_file = save_file(homedir(); filterlist="toml") # Empty when cancelled.
+        if !isempty(path_file)
+            endswith(path_file, ".toml") || (path_file *= ".toml")
+            try
+                save_camera_path(path_file, c.camera_path)
+                c.path_error = ""
+            catch err
+                c.path_error = "Failed to write camera path. See logs for details."
+                @error "Failed to write camera path:" exception=(err, catch_backtrace())
+            end
+        end
+    end
+    can_save || disabled_end()
+    CImGui.SetItemTooltip("Write the keyframes of this path as a `.toml` file.")
+
+    CImGui.TableNextColumn()
+    if CImGui.Button("Load Path...", CImGui.ImVec2(-1, 0))
+        path_file = pick_file(homedir(); filterlist="toml") # Empty when cancelled.
+        if !isempty(path_file)
+            try
+                load_camera_path!(
+                    c.camera_path, path_file, camera_tan_half(gui.camera))
+                c.path_error = ""
+            catch err
+                # The message names the offending keyframe, so it is worth
+                # showing rather than pointing at the log.
+                c.path_error = "Invalid camera path: $(sprint(showerror, err))"
+                @error "Failed to load camera path:" exception=(err, catch_backtrace())
+            end
+        end
+    end
+    CImGui.SetItemTooltip("Replace this path with the keyframes from a `.toml` file.")
     CImGui.EndTable()
+
+    isempty(c.path_error) ||
+        CImGui.TextColored((1f0, 0.3f0, 0.3f0, 1f0), c.path_error)
     return
 end

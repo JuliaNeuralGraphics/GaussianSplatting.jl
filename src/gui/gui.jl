@@ -4,6 +4,7 @@ include("render_state.jl")
 include("worker.jl")
 include("frustums.jl")
 include("camera_path.jl")
+include("camera_path_io.jl")
 include("capture_mode.jl")
 include("training_details.jl")
 

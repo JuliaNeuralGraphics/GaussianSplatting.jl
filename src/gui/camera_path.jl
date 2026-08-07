@@ -9,14 +9,21 @@ Base.@kwdef mutable struct CameraPath
     line_program::NGL.ShaderProgram = NGL.get_program(NGL.Line)
 end
 
-function Base.push!(p::CameraPath, camera::Camera)
-    new_keyframe = NU.CameraKeyframe(camera)
-    push!(p.keyframes, new_keyframe)
-    push!(p.frustums, FrustumPose(camera))
+Base.push!(p::CameraPath, camera::Camera) =
+    push!(p, NU.CameraKeyframe(camera), camera_tan_half(camera))
+
+# A keyframe loaded from a file has no `Camera` behind it, so the size of the
+# frustum drawn for it is given explicitly (see `load_camera_path!`).
+function Base.push!(
+    p::CameraPath, keyframe::NU.CameraKeyframe, tan_half::SVector{2, Float32},
+)
+    push!(p.keyframes, keyframe)
+    push!(p.frustums, FrustumPose(
+        NU.get_rotation(keyframe), keyframe.t, tan_half))
     length(p.keyframes) == 1 && return
 
     from = p.keyframes[end - 1].t
-    push!(p.gui_lines, NGL.Line(from, new_keyframe.t; program=p.line_program))
+    push!(p.gui_lines, NGL.Line(from, keyframe.t; program=p.line_program))
     return
 end
 

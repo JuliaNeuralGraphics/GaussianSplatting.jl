@@ -1,6 +1,6 @@
 name = "GaussianSplatting"
 uuid = "991e6b22-92f0-46ac-8b70-8a93e7beee5d"
-version = "1.2.0"
+version = "2.0.0"
 authors = ["Anton Smirnov <tonysmn97@gmail.com>"]
 
 [deps]
@@ -55,7 +55,7 @@ AMDGPU = "2"
 AcceleratedKernels = "0.4.3"
 Adapt = "4"
 CImGui = "6"
-CUDA = "5, 6"
+CUDA = "6"
 ChainRulesCore = "1"
 Distributions = "0.25"
 FileIO = "1.16"
@@ -84,4 +84,4 @@ SafeTensors = "1.2.1"
 StaticArrays = "1.9"
 VideoIO = "1.1"
 Zygote = "0.7"
-julia = "1.10"
+julia = "1.12"
