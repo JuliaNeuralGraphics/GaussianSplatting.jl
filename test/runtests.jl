@@ -468,26 +468,20 @@ end
     mask = Float32[1f0 1f0; 0f0 0f0]
     masked_valid = valid .& GaussianSplatting.mask_hard(mask)
 
-    loss(depth, v, m) = ssi_depth_loss(
+    loss(depth, v) = ssi_depth_loss(
         depth, alpha; target, half_band, valid=v, far_extrap,
-        depth_floor=dfloor, λ_grad=1f0, mask=m)
+        depth_floor=dfloor, λ_grad=1f0)
 
-    # Wrong only where the mask drops it: nothing to answer for.
+    # Depth is gated by the mask: wrong where it drops, nothing to answer for.
     outside = copy(on_target)
     outside[2, :] .*= 5f0
-    @test loss(outside, masked_valid, mask) ≈ 0f0 atol=1f-8
-    @test loss(outside, valid, nothing) > 0f0
+    @test loss(outside, masked_valid) ≈ 0f0 atol=1f-8
+    @test loss(outside, valid) > 0f0
 
-    # Wrong inside the mask: still supervised, and at full strength. The
-    # normalizer follows the mask, so hiding half the frame does not halve the
-    # term (which would quietly downweight depth on masked views).
+    # Wrong inside the mask is still supervised.
     inside = copy(on_target)
     inside[1, :] .*= 2f0
-    @test loss(inside, masked_valid, mask) ≈ 2f0 * loss(inside, masked_valid, nothing)
-    @test loss(inside, masked_valid, mask) > 0f0
-
-    # No mask given is the same as a mask that keeps everything.
-    @test loss(inside, valid, ones(Float32, 2, 2)) ≈ loss(inside, valid, nothing)
+    @test loss(inside, masked_valid) > 0f0
 end
 
 @testset "MCMC relocation (Eq. 9)" begin

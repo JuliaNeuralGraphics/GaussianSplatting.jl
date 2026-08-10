@@ -60,7 +60,15 @@ Base.@kwdef struct OptimizationParams
     # Pull of the accumulated alpha toward zero outside the mask. Without it
     # the black target is just as happily met by an opaque black gaussian, and
     # the emptied region fills with floaters that only show from other views.
-    mask_opacity_weight::Float32 = 1f0
+    #
+    # Deliberately weak & late. The complement of a tight mask is most of the
+    # frame and its border *is* the subject's silhouette, so a gaussian on the
+    # rim always spills a little past it: at the sky loss' weight of `1` this
+    # term outweighs the photometric one several times over and erodes the
+    # subject into a blob. It only has to break the tie between empty and
+    # black-painted, and it fades on its own as alpha goes to zero.
+    mask_opacity_weight::Float32 = 0.1f0
+    mask_opacity_from_iter::Int = 500
 
     # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
     # per-train-image low-res affine color grids applied to the render before

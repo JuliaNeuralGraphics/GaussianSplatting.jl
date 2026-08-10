@@ -646,7 +646,11 @@ function step!(trainer::Trainer)
         hard_mask = mask ≡ nothing ? nothing : mask_hard(mask)
         # Weight of the alpha term that empties the rest of the frame; the
         # black target alone would accept an opaque black gaussian instead.
-        empty_weight = mask ≡ nothing ? nothing : 1f0 .- mask
+        # Held back like the sky loss: squeezing alpha before the subject has
+        # formed just eats its silhouette.
+        empty_weight =
+            (mask ≡ nothing || trainer.step < params.mask_opacity_from_iter) ?
+            nothing : 1f0 .- mask
         mask ≡ nothing || (target_image = apply_mask(target_image, mask))
 
         # Depth supervision target for this view.
@@ -662,7 +666,7 @@ function step!(trainer::Trainer)
             decay = params.depth_loss_final_scale^clamp(
                 Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
             weight = params.depth_loss_weight * decay
-            (; target, half_band, valid, far_extrap, weight, mask)
+            (; target, half_band, valid, far_extrap, weight)
         end
 
         # Geometry regularization starts once the geometry is roughly in place:
@@ -765,7 +769,7 @@ function step!(trainer::Trainer)
                     ssi_depth_loss(
                         depth_img, alpha_img;
                         depth_data.target, depth_data.half_band,
-                        depth_data.valid, depth_data.far_extrap, depth_data.mask,
+                        depth_data.valid, depth_data.far_extrap,
                         depth_floor=anchor.floor,
                         λ_grad=params.depth_loss_gradient_weight)
                 total += depth_term

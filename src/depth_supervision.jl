@@ -468,10 +468,7 @@ aligning depth edges rather than absolute values. Extrapolated pixels are
 excluded from it altogether: a finite difference across the sky/scene boundary
 compares a real depth edge against an invented one.
 
-The sum is normalized by the total alpha, restricted to the view's coverage
-`mask` when it has one: masked pixels are already out of `valid`, and leaving
-them in the normalizer alone would shrink the term while the region still has
-alpha to clear.
+The sum is normalized by the total alpha.
 """
 function ssi_depth_loss(
     depth_img::AbstractMatrix{Float32},
@@ -482,12 +479,10 @@ function ssi_depth_loss(
     far_extrap::AbstractMatrix{Bool},
     depth_floor::Float32,
     λ_grad::Float32, # `OptimizationParams.depth_loss_gradient_weight`.
-    mask::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     α = ignore_derivatives(clamp.(alpha, 0f0, 1f0))
     w = ignore_derivatives(ifelse.(valid .& (α .> DEPTH_LOSS_MIN_ALPHA), α, 0f0))
-    Σα = ignore_derivatives(
-        max(mask ≡ nothing ? sum(α) : sum(α .* mask), 1f0))
+    Σα = ignore_derivatives(max(sum(α), 1f0))
     # `1` where the data term's residual goes one-sided, and `w` restricted to
     # the pixels the fit's support actually covers — i.e. whose target is an
     # interpolation & so means something as a location, not just as a bound.

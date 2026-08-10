@@ -24,7 +24,7 @@ const OPT_PARAM_SECTIONS = (
     (title="Sky mask supervision", flag=:use_sky_loss, fields=(
         :sky_loss_weight, :sky_loss_from_iter)),
     (title="Coverage masks", flag=:use_masks, fields=(
-        :mask_opacity_weight,)),
+        :mask_opacity_weight, :mask_opacity_from_iter)),
     (title="Bilateral grid", flag=:use_bilateral_grid, fields=(
         :bilateral_grid_size, :bilateral_grid_lr,
         :bilateral_grid_lr_steps, :tv_loss_weight)),
