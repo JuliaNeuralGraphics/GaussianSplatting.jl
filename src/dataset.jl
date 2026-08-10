@@ -29,10 +29,17 @@ struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
 
     # Sky masks for sky supervision (`nothing` when an image has none).
     # Soft weights in `[0, 1]`, so antialiased mask borders contribute
-    # proportionally instead of snapping (see `load_sky_mask`).
+    # proportionally instead of snapping (see `load_mask`).
     train_sky_masks::Vector{Maybe{Matrix{Float32}}}
     has_sky_masks::Bool
     sky_dir::Maybe{String}
+
+    # Coverage masks (`nothing` when an image has none), applied to the targets
+    # of both splits so training & scoring see the same image (`masking.jl`).
+    train_masks::Vector{Maybe{Matrix{Float32}}}
+    test_masks::Vector{Maybe{Matrix{Float32}}}
+    has_masks::Bool
+    masks_dir::Maybe{String}
 
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
@@ -76,6 +83,8 @@ function ColmapDataset(;
     has_depth_dir = isdir(depths_dir)
     sky_dir = joinpath(dirname(images_dir), "sky")
     has_sky_dir = isdir(sky_dir)
+    masks_dir = joinpath(dirname(images_dir), "masks")
+    has_masks_dir = isdir(masks_dir)
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)
@@ -107,6 +116,8 @@ function ColmapDataset(;
     depth_qsteps = Float32[]
     sky_masks_count = 0
     sky_masks = Maybe{Matrix{Float32}}[]
+    masks = Maybe{Matrix{Float32}}[]
+    empty_masks = 0
 
     image_filenames = String[]
     images_list = Array{UInt8, 3}[]
@@ -115,6 +126,17 @@ function ColmapDataset(;
         image_path = joinpath(images_dir, img.name)
         if !isfile(image_path)
             @info "Image files does not exist, skipping: `$image_path`."
+            continue
+        end
+
+        # Read before the image is decoded: a mask that keeps nothing leaves an
+        # all-black target, so the view is dropped rather than trained on.
+        mask = has_masks_dir ?
+            load_view_mask(masks_dir, img.name,
+                Int(new_resolution[1]), Int(new_resolution[2])) :
+            nothing
+        if mask ≢ nothing && mask_is_empty(mask)
+            empty_masks += 1
             continue
         end
 
@@ -153,13 +175,21 @@ function ColmapDataset(;
         sky_path = has_sky_dir ?
             joinpath(sky_dir, "$(splitext(img.name)[1]).png") : ""
         if has_sky_dir && isfile(sky_path)
-            push!(sky_masks, load_sky_mask(
+            push!(sky_masks, load_mask(
                 sky_path, Int(new_resolution[1]), Int(new_resolution[2])))
             sky_masks_count += 1
         else
             push!(sky_masks, nothing)
         end
+
+        # Same tolerance as the sky masks: an unmasked view is used whole.
+        push!(masks, mask)
     end
+    # Loud: a broken mask pipeline blacks out everything, and the symptom would
+    # otherwise be a dataset that quietly shrank.
+    empty_masks > 0 &&
+        @warn "Dropped $empty_masks image(s): their mask keeps no pixels."
+
     @info "Loaded `$(length(images_list))` images."
     images = cat(images_list...; dims=4)
 
@@ -194,10 +224,12 @@ function ColmapDataset(;
     train_depths = depth_maps[train_ids]
     train_depth_qsteps = depth_qsteps[train_ids]
     train_sky_masks = sky_masks[train_ids]
+    train_masks = masks[train_ids]
 
     test_cameras = cameras[test_ids]
     test_images = images[:, :, :, test_ids]
     test_image_filenames = image_filenames[test_ids]
+    test_masks = masks[test_ids]
 
     depth_priors_count > 0 &&
         @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."
@@ -205,6 +237,10 @@ function ColmapDataset(;
     n_train_sky = count(!isnothing, train_sky_masks)
     sky_masks_count > 0 &&
         @info "Found sky masks for $n_train_sky / $(length(train_sky_masks)) train images."
+
+    n_masks = count(!isnothing, masks)
+    n_masks > 0 &&
+        @info "Found masks for $n_masks / $(length(masks)) images."
 
     ColmapDataset(
         Float32.(points.points_3d),
@@ -214,6 +250,7 @@ function ColmapDataset(;
         train_depths, train_depth_qsteps, depth_priors_count > 0,
         has_depth_dir ? depths_dir : nothing,
         train_sky_masks, n_train_sky > 0, has_sky_dir ? sky_dir : nothing,
+        train_masks, test_masks, n_masks > 0, has_masks_dir ? masks_dir : nothing,
         test_image_filenames, test_cameras, test_images,
         camera_extent)
 end

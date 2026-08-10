@@ -83,11 +83,15 @@ Pixels are used only where the geometry is unambiguous:
 the interior of the image, opaque center & 4-neighborhood (`α ≥ 0.5`),
 and no relative depth jump above `NORMAL_MAX_REL_DEPTH_JUMP` (not across a silhouette).
 A view with too few valid pixels contributes nothing.
+
+`valid`, when given, restricts the term further: the view's thresholded
+coverage mask (see `masking.jl`), behind which there is no surface.
 """
 function depth_normal_consistency_loss(
     depth::AbstractMatrix{Float32}, alpha::AbstractMatrix{Float32},
     normals::AbstractArray{Float32, 3};
     rays::Tuple{AbstractVector{Float32}, AbstractVector{Float32}},
+    valid::Maybe{AbstractMatrix{Bool}} = nothing,
 )
     width, height = size(depth)
     (width > 2 && height > 2) || return 0f0
@@ -171,6 +175,7 @@ function depth_normal_consistency_loss(
             isfinite.(e_c) .&
             (n_sq .≥ NORMAL_MIN_CROSS_NORM_SQ) .&
             (nr_sq .≥ NORMAL_MIN_RENDER_NORM^2)
+        valid ≡ nothing || (ok = ok .& valid[ix, iy])
         ifelse.(ok, α_c, 0f0), Float32(sum(ok))
     end
 

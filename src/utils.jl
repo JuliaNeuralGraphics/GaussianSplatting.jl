@@ -53,6 +53,15 @@ Base.@kwdef struct OptimizationParams
     sky_loss_weight::Float32 = 1f0
     sky_loss_from_iter::Int = 500
 
+    # Coverage masks (see `masking.jl`): a `masks/` directory next to the
+    # dataset images, applied to the targets so the subject trains against
+    # black. Inert unless masks were found, hence on by default.
+    use_masks::Bool = true
+    # Pull of the accumulated alpha toward zero outside the mask. Without it
+    # the black target is just as happily met by an opaque black gaussian, and
+    # the emptied region fills with floaters that only show from other views.
+    mask_opacity_weight::Float32 = 1f0
+
     # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
     # per-train-image low-res affine color grids applied to the render before
     # the photometric loss, absorbing exposure / white-balance drift.
@@ -106,7 +115,11 @@ memory_usage(opt::NU.Adam) =
 
 mse(x, y) = mean((x .- y).^2)
 
-psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))
+# Split from `psnr` for the callers that already have the MSE — a masked one,
+# say (see `masking.jl`) — and must not recompute it unmasked.
+psnr_from_mse(v::Real) = 20f0 * log10(1f0 / sqrt(v))
+
+psnr(x, y) = psnr_from_mse(mse(x, y))
 
 """
 Round a render to the 8-bit sRGB grid the ground truth lives on.

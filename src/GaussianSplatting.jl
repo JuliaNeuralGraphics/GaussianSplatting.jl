@@ -63,6 +63,7 @@ include("checkpoint.jl")
 include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
+include("masking.jl")
 include("dataset.jl")
 include("depth_supervision.jl")
 
