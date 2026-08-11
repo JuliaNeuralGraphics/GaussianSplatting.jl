@@ -511,9 +511,9 @@ then averaged (the reference implementation's reduction).
 numbers measure - see [`quantize8`](@ref). It costs a bit of accuracy on the
 metric, so it is off for the in-training readout & on for benchmarks.
 
-Masked views are scored against their masked target, exactly as training sees
-them (see `masking.jl`), so the easy black region counts toward the numbers &
-they are not comparable to published ones.
+Masked views are scored against their masked target (see `masking.jl`), so the
+easy black region counts toward the numbers & they are not comparable to
+published ones.
 """
 function validate(trainer::Trainer; quantize::Bool = false)
     gs = trainer.gaussians
@@ -529,6 +529,8 @@ function validate(trainer::Trainer; quantize::Bool = false)
     for (idx, camera) in enumerate(dataset.test_cameras)
         target_image = get_image(trainer, idx, :test)
         mask = view_mask(trainer, idx, :test)
+        # `apply_mask`, not `composite_mask`: the pass below renders over the
+        # rasterizer's default black, whatever the training background was.
         mask ≡ nothing || (target_image = apply_mask(target_image, mask))
 
         image_features = rast(
@@ -651,7 +653,10 @@ function step!(trainer::Trainer)
         empty_weight =
             (mask ≡ nothing || trainer.step < params.mask_opacity_from_iter) ?
             nothing : 1f0 .- mask
-        mask ≡ nothing || (target_image = apply_mask(target_image, mask))
+        # Composited over the same background the pass renders through, so that
+        # `random_background` states the same thing photometrically & at full
+        # weight: over black this is the plain masked target (see `masking.jl`).
+        mask ≡ nothing || (target_image = composite_mask(target_image, mask, background))
 
         # Depth supervision target for this view.
         depth_data = if anchor ≡ nothing

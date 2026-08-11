@@ -50,7 +50,8 @@ end
 
 function ColmapDataset(dataset_dir::String;
     scale::Int = 1, holdout::Int = 8, max_extent::Float32 = Inf32,
-    with_thumbnails::Bool = false,
+    with_thumbnails::Bool = false, carve_with_masks::Bool = true,
+    carve_tolerance::Float32 = 0.1f0,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -58,7 +59,8 @@ function ColmapDataset(dataset_dir::String;
     images_dir = joinpath(dataset_dir, "images")
     ColmapDataset(;
         cameras_file, images_file, points_file,
-        scale, images_dir, holdout, max_extent, with_thumbnails)
+        scale, images_dir, holdout, max_extent, with_thumbnails,
+        carve_with_masks, carve_tolerance)
 end
 
 """
@@ -72,11 +74,16 @@ end
 - `with_thumbnails`: also downscale every train image to `THUMBNAIL_WIDTH`
   (`train_thumbnails`). Done here, while the image is already decoded, so
   the GUI does not have to resize anything to display the views.
+- `carve_with_masks`: drop init points the coverage masks place off the subject
+  (see [`carve_points`](@ref)). Inert without a `masks/` directory.
+  `carve_tolerance` is the fraction of the views seeing a point that may
+  disagree before it is kept anyway.
 """
 function ColmapDataset(;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, holdout::Int = 8,
     max_extent::Float32 = Inf32, with_thumbnails::Bool = false,
+    carve_with_masks::Bool = true, carve_tolerance::Float32 = 0.1f0,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
     depths_dir = joinpath(dirname(images_dir), "depths")
@@ -204,7 +211,28 @@ function ColmapDataset(;
             " (clamped from $(round(scene_radius; digits=3)) by `max_extent`)." :
             ".")
 
-    scales = compute_scales(points.points_3d)
+    # The masks carve the init cloud before anything derives from it: the
+    # scales below are nearest-neighbour distances, and a cloud that still has
+    # the room in it hands the subject's points the wrong neighbours.
+    points_3d = Float32.(points.points_3d)
+    points_colors = Float32.(points.points_colors) .* (1f0 / 255f0)
+    if carve_with_masks && any(!isnothing, masks)
+        keep = carve_points(points_3d, cameras, masks; tolerance=carve_tolerance)
+        n_keep = count(keep)
+        if n_keep < MIN_CARVED_POINTS
+            @warn "Coverage masks would carve the init cloud down to " *
+                "`$n_keep` point(s) — keeping it whole. Check that the masks " *
+                "match their images & that the poses are the ones they were " *
+                "drawn on."
+        else
+            @info "Coverage masks carved the init cloud: " *
+                "`$(size(points_3d, 2))` → `$n_keep` points."
+            points_3d = points_3d[:, keep]
+            points_colors = points_colors[:, keep]
+        end
+    end
+
+    scales = compute_scales(points_3d)
 
     # Views in filename order: the order the split is defined in & the one
     # other implementations report their per-view metrics in.
@@ -243,8 +271,8 @@ function ColmapDataset(;
         @info "Found masks for $n_masks / $(length(masks)) images."
 
     ColmapDataset(
-        Float32.(points.points_3d),
-        Float32.(points.points_colors) .* (1f0 / 255f0),
+        points_3d,
+        points_colors,
         scales,
         train_image_filenames, train_cameras, train_images, train_thumbnails,
         train_depths, train_depth_qsteps, depth_priors_count > 0,
