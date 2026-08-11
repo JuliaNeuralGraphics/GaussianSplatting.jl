@@ -32,6 +32,10 @@ Base.@kwdef mutable struct UIState
     selected_mode::Ref{Int32} = Ref{Int32}(0)
     render_modes::Vector{String} = ["Color", "Depth"]
 
+    # Color the splats are composited over in the viewer (RGB in [0, 1]).
+    # A `Vector` because ImGui's color picker writes through the pointer.
+    background_color::Vector{Float32} = zeros(Float32, 3)
+
     # UI-side caches of worker-owned state (set on scene install).
     max_sh_degree::Int = 0
     is_mcmc::Bool = false

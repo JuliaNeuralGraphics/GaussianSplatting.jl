@@ -94,17 +94,16 @@ KA.unsafe_free!(::MCMCStrategy) = return
 memory_usage(::MCMCStrategy) = 0
 
 """
-L1 on opacity & scale, the pressure that produces the dead Gaussians this
-strategy recycles. Both act on every Gaussian, unweighted by visibility.
+L1 on opacity & scale, the pressure that produces the dead Gaussians this strategy recycles.
+Both act on every Gaussian, unweighted by visibility.
 
 `scale_reg` is the calibration point for any *other* scale prior added on top
 (e.g. `flatten_loss`): a term an order of magnitude above it will dominate the
 shrink and drive geometry into the recycling ratchet described above.
 """
-function regularization_loss(strategy::MCMCStrategy, opacities, scales)
-    return strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +
-        strategy.scale_reg * mean(exp.(scales))
-end
+regularization_loss(strategy::MCMCStrategy, opacities, scales) =
+    strategy.opacity_reg * mean(NU.sigmoid.(opacities)) +
+    strategy.scale_reg * mean(exp.(scales))
 
 function post_train_step!(
     strategy::MCMCStrategy, gs::GaussianModel, optimizers,

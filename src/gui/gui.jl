@@ -1241,6 +1241,18 @@ function scene_tab!(gui::GSGUI)
         gui.render_state.need_render = true
     end
 
+    # Only the color view composites over the background.
+    color_mode = gui.ui_state.selected_mode[] == 0
+    color_mode || disabled_begin()
+    CImGui.PushItemWidth(-100)
+    if CImGui.ColorEdit3("Background", gui.ui_state.background_color)
+        gui.render_state.need_render = true
+    end
+    CImGui.SetItemTooltip(
+        "Color the splats are composited over. " *
+        "Affects only the viewer, not training.")
+    color_mode || disabled_end()
+
     if !viewer_only(gui)
         CImGui.Separator()
         CImGui.BeginTable("##checkbox-table", 2)

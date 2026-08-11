@@ -660,6 +660,7 @@ function step!(trainer::Trainer)
             prior = adapt(kab, trainer.dataset.train_depths[idx])
             target, half_band, valid, far_extrap = depth_target(
                 anchor, prior, trainer.dataset.train_depth_qsteps[idx])
+            # If masks are present in dataset, use depth supervision only inside masks.
             hard_mask ≡ nothing || (valid = valid .& hard_mask)
             # Depth dominates early geometry formation,
             # photometric loss wins fine detail late.
@@ -694,10 +695,10 @@ function step!(trainer::Trainer)
         end
 
         loss, ∇ = Zygote.withgradient(
-            θ..., bgrid ≡ nothing ? nothing : bgrid.grids,
+            θ...,
+            bgrid ≡ nothing ? nothing : bgrid.grids,
             sky ≡ nothing ? nothing : sky.gaussians.features_dc,
-        ) do means_3d, features_dc, features_rest, opacities, scales, rotations,
-                bgrids, sky_features
+        ) do means_3d, features_dc, features_rest, opacities, scales, rotations, bgrids, sky_features
             image_features = rast(
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
@@ -710,13 +711,14 @@ function step!(trainer::Trainer)
             # gradient accumulation with a shape mismatch.
             image = image_features[1:3, :, :]
 
-            # Sliced once & shared by the depth, normal, sky & mask terms, for
-            # the same reason: re-slicing a channel for a second consumer trips
-            # the gradient mis-routing described above.
+            # Sliced once & shared by the depth, normal, sky & mask terms, for the same reason:
+            # re-slicing a channel for a second consumer trips the gradient mis-routing described above.
             # All of them imply a `:rgbd`/`:rgbdn` rasterizer, so the rows exist whenever they run.
             depth_img, alpha_img = if (
-                depth_data ≡ nothing && normal_data ≡ nothing &&
-                sky_features ≡ nothing && empty_weight ≡ nothing
+                depth_data ≡ nothing &&
+                normal_data ≡ nothing &&
+                sky_features ≡ nothing &&
+                empty_weight ≡ nothing
             )
                 nothing, nothing
             else
@@ -727,8 +729,7 @@ function step!(trainer::Trainer)
             # appearance correction, which models the camera's response and so
             # applies to the sky as much as to the scene.
             if sky_features ≢ nothing
-                image = composite_sky(
-                    image, alpha_img, render_sky(sky, camera, sky_features))
+                image = composite_sky(image, alpha_img, render_sky(sky, camera, sky_features))
             end
 
             # Per-view appearance correction before the photometric loss.
@@ -776,14 +777,11 @@ function step!(trainer::Trainer)
             end
 
             if sky_weight ≢ nothing
-                sky_term = params.sky_loss_weight *
-                    zero_alpha_loss(alpha_img, sky_weight)
+                sky_term = params.sky_loss_weight * zero_alpha_loss(alpha_img, sky_weight)
                 total += sky_term
             end
-
             if empty_weight ≢ nothing
-                mask_term = params.mask_opacity_weight *
-                    zero_alpha_loss(alpha_img, empty_weight)
+                mask_term = params.mask_opacity_weight * zero_alpha_loss(alpha_img, empty_weight)
                 total += mask_term
             end
 
