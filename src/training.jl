@@ -329,7 +329,7 @@ function setup_depth_supervision(
     end
     @assert dataset.depths_dir ≢ nothing
 
-    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+    width, height = view_resolution(dataset)
     load_prior(i) = begin
         path = dataset.train_depth_paths[i]
         path ≡ nothing ? nothing : load_depth_prior(path, width, height)[1]
@@ -353,7 +353,7 @@ function sky_init_color(dataset::ColmapDataset)
     n_views = length(dataset)
     n_views == 0 && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
 
-    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+    width, height = view_resolution(dataset)
     band_height = max(1, height ÷ 8)
 
     totals = zeros(Float64, 3, n_views)

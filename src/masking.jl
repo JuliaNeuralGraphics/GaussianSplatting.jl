@@ -28,15 +28,15 @@ behind a mask to describe.
 """
 
 """
-Load a mask as a `(width, height)` Float32 weight map in `[0, 1]`, resized to
+Load a mask as a `(width, height)` Float32 weight map in `[0, 1]`, resampled to
 the training resolution. Mirrors `load_depth_prior`'s layout conventions.
 
-Kept soft rather than thresholded: a resized mask has genuinely fractional
+Kept soft rather than thresholded: a resampled mask has genuinely fractional
 border pixels. Consumers that cannot act on a fraction of a pixel threshold it
 themselves (see [`mask_hard`](@ref)). Also loads the sky masks of `sky/`.
 """
 load_mask(path::String, width::Int, height::Int) =
-    resize_mask(load_mask_raw(path), width, height)
+    clamp!(fit_resolution(load_mask_raw(path), (width, height)), 0f0, 1f0)
 
 """
 A mask at the resolution it is stored at. Its file is typically far smaller
@@ -46,11 +46,6 @@ the uses that do not need training resolution (the emptiness check &
 """
 load_mask_raw(path::String) =
     clamp!(permutedims(Float32.(Gray.(load(path))), (2, 1)), 0f0, 1f0)
-
-resize_mask(mask::Matrix{Float32}, width::Int, height::Int) =
-    size(mask) == (width, height) ?
-        mask :
-        clamp!(imresize(mask, (width, height)), 0f0, 1f0)
 
 """
 Whether a mask keeps less than a single pixel's worth of weight. Such a view
@@ -141,7 +136,8 @@ function carve_points(
         intrinsics = camera.intrinsics
         resolution = intrinsics.resolution
         focal, principal = intrinsics.focal, intrinsics.principal
-        # Pixels of the training resolution to pixels of the mask.
+        # Pixels of the training resolution to pixels of the mask: the mask
+        # covers the same frame, at whatever size it is stored.
         sx = Float32(mask_width) / Float32(resolution[1])
         sy = Float32(mask_height) / Float32(resolution[2])
 

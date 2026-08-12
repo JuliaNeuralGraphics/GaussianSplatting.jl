@@ -20,7 +20,7 @@ const DEPTH_LOSS_MIN_ALPHA = 1f-3
 const DEPTH_LOSS_RESIDUAL_SCALE = 2f0
 
 """
-Load a depth prior as a `(width, height)` Float32 map, resized to the training resolution.
+Load a depth prior as a `(width, height)` Float32 map, resampled to the training resolution.
 Also return the quantization step of the source encoding
 (1/255 for 8-bit, 1/65535 for 16-bit, 0 for float formats):
 it sizes the loss deadband so the model is not pulled onto the prior's quantization staircase.
@@ -31,7 +31,7 @@ function load_depth_prior(path::String, width::Int, height::Int)
     qstep = T <: AbstractFloat ? 0f0 : Float32(eps(T))
 
     depth = Float32.(Gray.(raw))
-    depth = imresize(depth, (height, width))
+    depth = fit_resolution(depth, (height, width))
     return permutedims(depth, (2, 1)), qstep
 end
 

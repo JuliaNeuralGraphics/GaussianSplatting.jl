@@ -20,7 +20,7 @@ struct ColmapDataset
     scales::Matrix{Float32}
 
     # Directory the images are read from (already `_$scale`-suffixed) & the
-    # `×16`-rounded resolution every map is loaded at.
+    # resolution every view is loaded at: the images' own, scaled by `scale`.
     images_dir::String
     resolution::SVector{2, UInt32}
 
@@ -113,17 +113,18 @@ function ColmapDataset(;
     width, height = cam.resolution
     fx, fy, cx, cy = cam.intrinsics
 
+    # The views are used at their own resolution: the rasterizer renders
+    # partial tiles (see `tile_ndrange`), so nothing has to be rounded to a
+    # multiple of the tile size, and neither the resample that a round-up used
+    # to cost nor the pixels a round-down threw away buy anything. `focal` and
+    # the principal point stay exactly what COLMAP measured, scaled.
     focal = SVector{2, Float32}(fx, fy) ./ Float32(scale)
-    principal = SVector{2, Float32}(cx, cy) ./ SVector{2, Float32}(width, height)
     resolution = round.(UInt32, SVector{2, Float32}(width, height) ./ Float32(scale))
-    # Round resolution to a multiple of 16.
-    new_resolution = 16u32 .* cld.(resolution, 16u32)
-    new_focal = Float32(new_resolution[2] / resolution[2]) .* focal
+    principal = (SVector{2, Float32}(cx, cy) ./ Float32(scale)) ./ SVector{2, Float32}(resolution)
 
     # NOTE: no distortion.
-    intrinsics = NU.CameraIntrinsics(nothing, new_focal, principal, new_resolution)
-    @info "Dataset has following resolution: ($(Int(resolution[1])) x $(Int(resolution[2]))) (width x height)."
-    @info "Scaled dataset resolution to multiple of 16: ($(Int(new_resolution[1])) x $(Int(new_resolution[2]))) (width x height)."
+    intrinsics = NU.CameraIntrinsics(nothing, focal, principal, resolution)
+    @info "Dataset resolution: ($(Int(resolution[1])) x $(Int(resolution[2]))) (width x height)."
     with_thumbnails && @info "Creating thumbnails for the dataset, `width = $THUMBNAIL_WIDTH`."
 
     # Resolve the cameras & the per-view file paths. Nothing is decoded here:
@@ -254,7 +255,7 @@ function ColmapDataset(;
         points_3d,
         points_colors,
         scales,
-        images_dir, new_resolution,
+        images_dir, resolution,
         train_image_filenames, train_cameras, train_thumbnails,
         train_depth_paths, n_train_depths > 0,
         has_depth_dir ? depths_dir : nothing,
@@ -327,13 +328,28 @@ view_image_path(dataset::ColmapDataset, idx::Int, set::Symbol) = joinpath(
         dataset.train_image_filenames[idx] : dataset.test_image_filenames[idx])
 
 """
+The dataset's resolution as `(width, height)` `Int`s.
+"""
+view_resolution(dataset::ColmapDataset) =
+    (Int(dataset.resolution[1]), Int(dataset.resolution[2]))
+
+"""
+Bring a loaded image or map to `target`, given in the array's own axis order.
+
+An image is already there & is returned untouched — the views are used at their
+own resolution, so the common path costs nothing. A map stored at a fraction of
+the image size, a mask or a depth prior, is resampled up to it.
+"""
+fit_resolution(image::AbstractMatrix, target::Tuple{Int, Int}) =
+    size(image) == target ? image : imresize(image, target)
+
+"""
 Decode a train/test image into the `(channels, width, height)` `UInt8` layout
-the loss is computed from, resized to the dataset's `×16`-rounded resolution
-(the same rounding the cameras got).
+the loss is computed from, at the dataset's resolution.
 """
 function load_image(dataset::ColmapDataset, idx::Int, set::Symbol)
     image = load(view_image_path(dataset, idx, set))
-    image = imresize(image, reverse((Int.(dataset.resolution)...,)))
+    image = fit_resolution(image, reverse(view_resolution(dataset)))
     raw = floor.(UInt8, Float32.(channelview(image)) .* 255f0)
     return permutedims(raw, (1, 3, 2))
 end
@@ -347,7 +363,7 @@ Only train views have depth priors & sky masks; coverage masks apply to both
 splits, so training & scoring see the same image (`masking.jl`).
 """
 function load_view(dataset::ColmapDataset, idx::Int, set::Symbol)
-    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+    width, height = view_resolution(dataset)
 
     mask_paths = set == :train ? dataset.train_mask_paths : dataset.test_mask_paths
     mask_path = mask_paths[idx]

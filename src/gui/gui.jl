@@ -215,7 +215,9 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
 
     enable_docking!()
 
-    # Set up renderer.
+    # Set up renderer. Tile-aligned like `scene_window!`, & for the same
+    # reason: it is about how often the rasterizer is rebuilt, not about what
+    # it can render.
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
@@ -286,7 +288,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
-    # Set-up separate renderer camera & rasterizer.
+    # Set-up separate renderer camera & rasterizer. Tile-aligned for the same
+    # reason as in `app`: rebuild frequency, not a rasterizer requirement.
     camera = deepcopy(camera)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
@@ -967,6 +970,11 @@ function scene_window!(
     hovered = false
     if visible && allow_resize
         avail = CImGui.GetContentRegionAvail()
+        # Snapped to whole tiles. Not a rasterizer requirement — it renders
+        # partial tiles fine (see `tile_ndrange`) — but every changed size
+        # rebuilds its geometry & image state (`render_view!`), so quantizing
+        # keeps a resize drag from reallocating on every pixel. The cost is up
+        # to 15px of slack between the render & the `Scene` window.
         width = 16 * max(1, floor(Int, avail.x / 16))
         height = 16 * max(1, floor(Int, avail.y / 16))
         res = resolution(gui.camera)

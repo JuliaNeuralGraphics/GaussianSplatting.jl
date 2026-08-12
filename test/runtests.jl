@@ -785,6 +785,94 @@ end
     @test maximum(abs, Array(∇rot)) > 0f0
 end
 
+@testset "Partial tiles (resolution not a multiple of the tile size)" begin
+    NU = GaussianSplatting.NU
+
+    # The same scene rendered through the same *pixel grid* twice: once at a
+    # tile-aligned resolution, once at one that leaves the last tile of every
+    # row & column short. Nothing about the camera changes but how much of the
+    # grid is kept, so the smaller render has to equal the larger one over the
+    # region they share — which is the claim `render!`'s `inside` gating makes.
+    big_w, big_h = 64, 48
+    small_w, small_h = 61, 45
+
+    focal = SVector{2, Float32}(100f0, 100f0)
+    # `principal` is a fraction of the resolution, so holding the *pixel*
+    # principal point fixed across the two takes different fractions.
+    principal_px = SVector{2, Float32}(0.5f0 * big_w, 0.5f0 * big_h)
+    function grid_camera(width, height)
+        intrinsics = NU.CameraIntrinsics(
+            nothing, focal,
+            principal_px ./ SVector{2, Float32}(width, height),
+            SVector{2, UInt32}(width, height))
+        return GaussianSplatting.Camera(
+            SMatrix{3, 3, Float32, 9}(I), zeros(SVector{3, Float32});
+            intrinsics, img_name="")
+    end
+
+    xs = range(-0.6f0, 0.6f0; length=8)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n_points = size(points, 2)
+    colors = adapt(kab, rand(Float32, 3, n_points))
+    scales = adapt(kab, repeat(Float32[log(0.2f0), log(0.2f0), log(0.01f0)], 1, n_points))
+
+    gaussians = GaussianSplatting.GaussianModel(kab,
+        points, colors, scales; max_sh_degree=0, isotropic=false)
+    gaussians.opacities .= 5f0
+
+    render(camera) = Array(GaussianSplatting.GaussianRasterizer(
+        kab, camera; mode=:rgbdn)(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+            camera, sh_degree=0))
+
+    small_camera = grid_camera(small_w, small_h)
+    big = render(grid_camera(big_w, big_h))
+    small = render(small_camera)
+
+    @test size(small) == (8, small_w, small_h)
+
+    # Loose on purpose. `principal` is stored as a *fraction* of the resolution
+    # & multiplied back in `perspective_projection`, so the pixel principal
+    # point only round-trips exactly when the resolution divides it evenly
+    # (`32/64*64` does, `32/61*61` lands an ulp low). That shifts the projected
+    # means by ~4f-6 px, which is enough to flip a tile-boundary comparison in
+    # `get_rect` & bin a gaussian into one more or fewer marginal tile — worth
+    # about `exp(-4.5)` of contribution at 3σ. A dropped or garbage tile is an
+    # O(1) error, which this still catches; ulp-level rebinning is not what
+    # this test is about.
+    @test small ≈ big[:, 1:small_w, 1:small_h] atol=2f-2
+    # Specifically over the partial tiles, where a mis-covered frame shows up.
+    @test small[:, (end - 15):end, :] ≈ big[:, (small_w - 15):small_w, 1:small_h] atol=2f-2
+    @test small[:, :, (end - 15):end] ≈ big[:, 1:small_w, (small_h - 15):small_h] atol=2f-2
+
+    # Sharp invariants: these break on garbage, not on rebinning.
+    α = small[5, :, :]
+    @test all(isfinite, small)
+    @test all(0f0 .≤ α .≤ 1f0)
+    # The partial edge is rendered at all — a skipped tile leaves it zero.
+    @test any(α[(end - 15):end, :] .> 0.5f0)
+    @test any(α[:, (end - 15):end] .> 0.5f0)
+    # Every covered pixel still satisfies the plane's `normal == -alpha`.
+    @test all(isapprox.(small[8, :, :][α .> 0.5f0], -α[α .> 0.5f0]; atol=1f-3))
+    @test maximum(abs, small[6, :, :]) < 1f-4
+    @test maximum(abs, small[7, :, :]) < 1f-4
+
+    # ...and the backward kernel's own `inside` gating.
+    weights = adapt(kab, randn(Float32, 3, small_w, small_h))
+    rast = GaussianSplatting.GaussianRasterizer(kab, small_camera; mode=:rgbdn)
+    _, (∇rot,) = Zygote.withgradient(gaussians.rotations) do rotations
+        features = rast(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            rotations, gaussians.features_dc, gaussians.features_rest;
+            camera=small_camera, sh_degree=0)
+        sum(features[6:8, :, :] .* weights)
+    end
+    @test all(isfinite, Array(∇rot))
+    @test maximum(abs, Array(∇rot)) > 0f0
+end
+
 # A partially transparent scene, so `alpha` spans (0, 1) and the composite is
 # actually exercised rather than being trivially 0 or 1 everywhere.
 function sky_test_scene(kab; opacity::Float32 = 0.5f0)
