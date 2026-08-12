@@ -35,22 +35,22 @@ Kept soft rather than thresholded: a resized mask has genuinely fractional
 border pixels. Consumers that cannot act on a fraction of a pixel threshold it
 themselves (see [`mask_hard`](@ref)). Also loads the sky masks of `sky/`.
 """
-function load_mask(path::String, width::Int, height::Int)
-    raw = load(path)
-    mask = Float32.(Gray.(raw))
-    mask = imresize(mask, (height, width))
-    return clamp!(permutedims(mask, (2, 1)), 0f0, 1f0)
-end
+load_mask(path::String, width::Int, height::Int) =
+    resize_mask(load_mask_raw(path), width, height)
 
 """
-The mask of `image_name` under `masks_dir`, or `nothing` when that view has
-none — a partially masked dataset is fine.
+A mask at the resolution it is stored at. Its file is typically far smaller
+than the images — resizing it up is what makes a resident mask expensive, so
+the uses that do not need training resolution (the emptiness check &
+[`carve_points`](@ref)) read it through this.
 """
-function load_view_mask(masks_dir::String, image_name::String, width::Int, height::Int)
-    path = joinpath(masks_dir, "$(splitext(image_name)[1]).png")
-    isfile(path) || return nothing
-    return load_mask(path, width, height)
-end
+load_mask_raw(path::String) =
+    clamp!(permutedims(Float32.(Gray.(load(path))), (2, 1)), 0f0, 1f0)
+
+resize_mask(mask::Matrix{Float32}, width::Int, height::Int) =
+    size(mask) == (width, height) ?
+        mask :
+        clamp!(imresize(mask, (width, height)), 0f0, 1f0)
 
 """
 Whether a mask keeps less than a single pixel's worth of weight. Such a view
@@ -117,47 +117,66 @@ construction, in front of the cameras.
 """
 function carve_points(
     points::AbstractMatrix{Float32}, cameras::Vector{Camera},
-    masks::Vector{Maybe{Matrix{Float32}}}; tolerance::Float32 = 0.1f0,
+    mask_paths::Vector{Maybe{String}}; tolerance::Float32 = 0.1f0,
 )
-    length(cameras) == length(masks) || throw(ArgumentError(
-        "`cameras` ($(length(cameras))) & `masks` ($(length(masks))) " *
+    length(cameras) == length(mask_paths) || throw(ArgumentError(
+        "`cameras` ($(length(cameras))) & `mask_paths` ($(length(mask_paths))) " *
         "must be the same per-view vectors."))
 
-    # Only masked views carve: an unmasked one is no evidence either way, the
-    # same tolerance for a partially masked dataset as everywhere else here.
-    views = [
-        (c.w2c, c.intrinsics, m)
-        for (c, m) in zip(cameras, masks) if m ≢ nothing]
+    n_points = size(points, 2)
+    seen = zeros(Int, n_points)
+    outside = zeros(Int, n_points)
 
-    # `Vector{Bool}`, not a `BitVector`: neighbouring bits of the latter share a
-    # word, so the threaded writes below would race on it.
-    keep = fill(false, size(points, 2))
-    Threads.@threads for i in axes(points, 2)
-        p = SVector{3, Float32}(points[1, i], points[2, i], points[3, i])
-        seen, outside = 0, 0
-        for (w2c, intrinsics, mask) in views
+    # Views outer, points inner, so only one mask is ever resident — and at the
+    # resolution it is stored at, projections being cheaper to scale than the
+    # mask is to resize. Only masked views carve: an unmasked one is no evidence
+    # either way, the same tolerance for a partially masked dataset as
+    # everywhere else here.
+    for (camera, path) in zip(cameras, mask_paths)
+        path ≡ nothing && continue
+        mask = load_mask_raw(path)
+        mask_width, mask_height = size(mask)
+
+        w2c = camera.w2c
+        intrinsics = camera.intrinsics
+        resolution = intrinsics.resolution
+        focal, principal = intrinsics.focal, intrinsics.principal
+        # Pixels of the training resolution to pixels of the mask.
+        sx = Float32(mask_width) / Float32(resolution[1])
+        sy = Float32(mask_height) / Float32(resolution[2])
+
+        # `seen`/`outside` are plain `Vector{Int}` & every iteration writes its
+        # own index, so the threaded accumulation below cannot race.
+        Threads.@threads for i in 1:n_points
+            p = SVector{3, Float32}(points[1, i], points[2, i], points[3, i])
             # `R * p + t`, the rasterizer's `pos_world_to_cam` (`projection.jl`).
             z = w2c[3, 1] * p[1] + w2c[3, 2] * p[2] + w2c[3, 3] * p[3] + w2c[3, 4]
             z > 0f0 || continue
             x = w2c[1, 1] * p[1] + w2c[1, 2] * p[2] + w2c[1, 3] * p[3] + w2c[1, 4]
             y = w2c[2, 1] * p[1] + w2c[2, 2] * p[2] + w2c[2, 3] * p[3] + w2c[2, 4]
 
-            resolution = intrinsics.resolution
-            focal, principal = intrinsics.focal, intrinsics.principal
             # Continuous pixel coordinates in `[0, resolution)`, as
             # `perspective_projection` produces them.
             u = focal[1] * x / z + principal[1] * resolution[1]
             v = focal[2] * y / z + principal[2] * resolution[2]
             # Bounds-checked before truncating: `u`/`v` are unbounded (and a
             # degenerate pose can make them `NaN`), which `trunc(Int, _)` is not.
-            (0f0 ≤ u < Float32(size(mask, 1)) && 0f0 ≤ v < Float32(size(mask, 2))) ||
-                continue
-            px, py = trunc(Int, u) + 1, trunc(Int, v) + 1
+            (0f0 ≤ u < Float32(resolution[1]) && 0f0 ≤ v < Float32(resolution[2])) || continue
+            # `min` guards the last pixel: `u` just under `resolution[1]` can
+            # still scale onto `mask_width` itself.
+            px = min(trunc(Int, u * sx) + 1, mask_width)
+            py = min(trunc(Int, v * sy) + 1, mask_height)
 
-            seen += 1
-            mask[px, py] > 0.5f0 || (outside += 1)
+            seen[i] += 1
+            mask[px, py] > 0.5f0 || (outside[i] += 1)
         end
-        keep[i] = seen > 0 && outside ≤ tolerance * seen
+    end
+
+    # `Vector{Bool}`, not a `BitVector`: neighbouring bits of the latter share a
+    # word, so the threaded writes below would race on it.
+    keep = fill(false, n_points)
+    Threads.@threads for i in 1:n_points
+        keep[i] = seen[i] > 0 && outside[i] ≤ tolerance * seen[i]
     end
     return keep
 end

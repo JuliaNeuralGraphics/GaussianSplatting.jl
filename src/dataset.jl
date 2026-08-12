@@ -4,46 +4,57 @@
 # screen, ~50 KiB of device memory per view once uploaded.
 const THUMBNAIL_WIDTH = 128
 
-struct ColmapDataset{I <: AbstractArray{UInt8, 4}}
+"""
+Nothing a view is supervised against is held resident: the dataset stores one
+path per view & per map, and [`load_view`](@ref) reads them at the step that
+trains on that view (see [`ViewLoader`](@ref) for the prefetch that hides it).
+
+Keeping them was what made full resolution unaffordable. The maps are stored
+`Float32` at *training* resolution, so each one costs more than the `UInt8`
+image it belongs to even when its file is a tiny thumbnail on disk — a 130-view
+12.9 Mpx dataset with coverage masks & depth priors needs ~18 GB of them.
+"""
+struct ColmapDataset
     points::Matrix{Float32}
     colors::Matrix{Float32}
     scales::Matrix{Float32}
 
+    # Directory the images are read from (already `_$scale`-suffixed) & the
+    # `×16`-rounded resolution every map is loaded at.
+    images_dir::String
+    resolution::SVector{2, UInt32}
+
     train_image_filenames::Vector{String}
     train_cameras::Vector{Camera}
-    train_images::I
     # Downscaled train images for display (the GUI maps them onto the
     # camera frustums); empty unless the dataset was loaded
     # `with_thumbnails`. Each is `(channels, width, height)`, like the
-    # slices of `train_images`.
+    # images `load_image` returns.
     train_thumbnails::Vector{Array{UInt8, 3}}
 
-    # Monocular depth priors for depth supervision (`nothing` when an image has no prior)
-    # + their encoding quantization steps.
-    train_depths::Vector{Maybe{Matrix{Float32}}}
-    train_depth_qsteps::Vector{Float32}
+    # Monocular depth priors for depth supervision (`nothing` when an image has no prior).
+    train_depth_paths::Vector{Maybe{String}}
     has_depth_priors::Bool
-    # Directory the depth priors were loaded from (`nothing` when absent);
+    # Directory the depth priors are loaded from (`nothing` when absent);
     # the fitted-anchor sidecar cache lives next to it.
     depths_dir::Maybe{String}
 
     # Sky masks for sky supervision (`nothing` when an image has none).
     # Soft weights in `[0, 1]`, so antialiased mask borders contribute
     # proportionally instead of snapping (see `load_mask`).
-    train_sky_masks::Vector{Maybe{Matrix{Float32}}}
+    train_sky_paths::Vector{Maybe{String}}
     has_sky_masks::Bool
     sky_dir::Maybe{String}
 
     # Coverage masks (`nothing` when an image has none), applied to the targets
     # of both splits so training & scoring see the same image (`masking.jl`).
-    train_masks::Vector{Maybe{Matrix{Float32}}}
-    test_masks::Vector{Maybe{Matrix{Float32}}}
+    train_mask_paths::Vector{Maybe{String}}
+    test_mask_paths::Vector{Maybe{String}}
     has_masks::Bool
     masks_dir::Maybe{String}
 
     test_image_filenames::Vector{String}
     test_cameras::Vector{Camera}
-    test_images::I
 
     camera_extent::Float32
 end
@@ -115,19 +126,17 @@ function ColmapDataset(;
     @info "Scaled dataset resolution to multiple of 16: ($(Int(new_resolution[1])) x $(Int(new_resolution[2]))) (width x height)."
     with_thumbnails && @info "Creating thumbnails for the dataset, `width = $THUMBNAIL_WIDTH`."
 
-    # Load cameras and images & depths priors if they exist.
+    # Resolve the cameras & the per-view file paths. Nothing is decoded here:
+    # the maps are read per step (see `load_view`), and the images only when
+    # thumbnails are asked for.
     camera_centers = SVector{3, Float32}[]
     cameras = Camera[]
-    depth_priors_count = 0
-    depth_maps = Maybe{Matrix{Float32}}[]
-    depth_qsteps = Float32[]
-    sky_masks_count = 0
-    sky_masks = Maybe{Matrix{Float32}}[]
-    masks = Maybe{Matrix{Float32}}[]
+    depth_paths = Maybe{String}[]
+    sky_paths = Maybe{String}[]
+    mask_paths = Maybe{String}[]
     empty_masks = 0
 
     image_filenames = String[]
-    images_list = Array{UInt8, 3}[]
     thumbnails_list = Array{UInt8, 3}[]
     for (id, img) in images
         image_path = joinpath(images_dir, img.name)
@@ -136,13 +145,12 @@ function ColmapDataset(;
             continue
         end
 
-        # Read before the image is decoded: a mask that keeps nothing leaves an
-        # all-black target, so the view is dropped rather than trained on.
-        mask = has_masks_dir ?
-            load_view_mask(masks_dir, img.name,
-                Int(new_resolution[1]), Int(new_resolution[2])) :
-            nothing
-        if mask ≢ nothing && mask_is_empty(mask)
+        # A mask that keeps nothing leaves an all-black target, so the view is
+        # dropped rather than trained on. Checked at the mask's own resolution:
+        # a mask that is empty there is empty at any scale, and resizing it to
+        # the training resolution just to sum it is what this is avoiding.
+        mask_path = has_masks_dir ? sidecar_path(masks_dir, img.name) : nothing
+        if mask_path ≢ nothing && mask_is_empty(load_mask_raw(mask_path))
             empty_masks += 1
             continue
         end
@@ -155,50 +163,25 @@ function ColmapDataset(;
         push!(cameras, cam)
         push!(image_filenames, img.name)
 
-        # Round resolution to a multiple of 16, just like with cameras.
-        image = load(image_path)
-        image = imresize(image, reverse((Int.(new_resolution)...,)))
-
-        raw = floor.(UInt8, Float32.(channelview(image)) .* 255f0)
-        raw = permutedims(raw, (1, 3, 2))
-        push!(images_list, raw)
-
+        # The only reason to touch an image at load time: the thumbnail is
+        # taken from the original, `thumbnail` does its own downscale.
         with_thumbnails &&
-            push!(thumbnails_list, thumbnail(image, THUMBNAIL_WIDTH))
+            push!(thumbnails_list, thumbnail(load(image_path), THUMBNAIL_WIDTH))
 
-        if has_depth_dir
-            depth_path = joinpath(depths_dir, "$(splitext(img.name)[1]).png")
-            depth, qstep = load_depth_prior(depth_path, Int(new_resolution[1]), Int(new_resolution[2]))
-            push!(depth_maps, depth)
-            push!(depth_qsteps, qstep)
-            depth_priors_count += 1
-        else
-            push!(depth_maps, nothing)
-            push!(depth_qsteps, 0f0)
-        end
+        # A partially covered dataset is tolerated for every map: a view
+        # without one simply gets no supervision from it.
+        push!(depth_paths,
+            has_depth_dir ? sidecar_path(depths_dir, img.name) : nothing)
+        push!(sky_paths,
+            has_sky_dir ? sidecar_path(sky_dir, img.name) : nothing)
 
-        # Unlike depth priors, a partially masked dataset is tolerated: views
-        # without a mask simply get no sky supervision.
-        sky_path = has_sky_dir ?
-            joinpath(sky_dir, "$(splitext(img.name)[1]).png") : ""
-        if has_sky_dir && isfile(sky_path)
-            push!(sky_masks, load_mask(
-                sky_path, Int(new_resolution[1]), Int(new_resolution[2])))
-            sky_masks_count += 1
-        else
-            push!(sky_masks, nothing)
-        end
-
-        # Same tolerance as the sky masks: an unmasked view is used whole.
-        push!(masks, mask)
+        push!(mask_paths, mask_path)
     end
     # Loud: a broken mask pipeline blacks out everything, and the symptom would
     # otherwise be a dataset that quietly shrank.
-    empty_masks > 0 &&
-        @warn "Dropped $empty_masks image(s): their mask keeps no pixels."
+    empty_masks > 0 && @warn "Dropped $empty_masks image(s): their mask keeps no pixels."
 
-    @info "Loaded `$(length(images_list))` images."
-    images = cat(images_list...; dims=4)
+    @info "Found `$(length(image_filenames))` images."
 
     # Compute cameras extent which is used for scaling learning rate and densification.
     scene_center = sum(camera_centers) ./ length(camera_centers)
@@ -216,17 +199,16 @@ function ColmapDataset(;
     # the room in it hands the subject's points the wrong neighbours.
     points_3d = Float32.(points.points_3d)
     points_colors = Float32.(points.points_colors) .* (1f0 / 255f0)
-    if carve_with_masks && any(!isnothing, masks)
-        keep = carve_points(points_3d, cameras, masks; tolerance=carve_tolerance)
+    if carve_with_masks && any(!isnothing, mask_paths)
+        keep = carve_points(
+            points_3d, cameras, mask_paths; tolerance=carve_tolerance)
         n_keep = count(keep)
         if n_keep < MIN_CARVED_POINTS
             @warn "Coverage masks would carve the init cloud down to " *
                 "`$n_keep` point(s) — keeping it whole. Check that the masks " *
-                "match their images & that the poses are the ones they were " *
-                "drawn on."
+                "match their images & that the poses are the ones they were drawn on."
         else
-            @info "Coverage masks carved the init cloud: " *
-                "`$(size(points_3d, 2))` → `$n_keep` points."
+            @info "Coverage masks carved the init cloud: `$(size(points_3d, 2))` → `$n_keep` points."
             points_3d = points_3d[:, keep]
             points_colors = points_colors[:, keep]
         end
@@ -245,48 +227,57 @@ function ColmapDataset(;
     end
 
     train_cameras = cameras[train_ids]
-    train_images = images[:, :, :, train_ids]
     train_thumbnails = with_thumbnails ?
         thumbnails_list[train_ids] : Array{UInt8, 3}[]
     train_image_filenames = image_filenames[train_ids]
-    train_depths = depth_maps[train_ids]
-    train_depth_qsteps = depth_qsteps[train_ids]
-    train_sky_masks = sky_masks[train_ids]
-    train_masks = masks[train_ids]
+    train_depth_paths = depth_paths[train_ids]
+    train_sky_paths = sky_paths[train_ids]
+    train_mask_paths = mask_paths[train_ids]
 
     test_cameras = cameras[test_ids]
-    test_images = images[:, :, :, test_ids]
     test_image_filenames = image_filenames[test_ids]
-    test_masks = masks[test_ids]
+    test_mask_paths = mask_paths[test_ids]
 
-    depth_priors_count > 0 &&
-        @info "Found depth priors for $depth_priors_count / $(length(train_depths)) train images."
+    n_train_depths = count(!isnothing, train_depth_paths)
+    n_train_depths > 0 &&
+        @info "Found depth priors for $n_train_depths / $(length(train_depth_paths)) train images."
 
-    n_train_sky = count(!isnothing, train_sky_masks)
-    sky_masks_count > 0 &&
-        @info "Found sky masks for $n_train_sky / $(length(train_sky_masks)) train images."
+    n_train_sky = count(!isnothing, train_sky_paths)
+    n_train_sky > 0 &&
+        @info "Found sky masks for $n_train_sky / $(length(train_sky_paths)) train images."
 
-    n_masks = count(!isnothing, masks)
+    n_masks = count(!isnothing, mask_paths)
     n_masks > 0 &&
-        @info "Found masks for $n_masks / $(length(masks)) images."
+        @info "Found masks for $n_masks / $(length(mask_paths)) images."
 
     ColmapDataset(
         points_3d,
         points_colors,
         scales,
-        train_image_filenames, train_cameras, train_images, train_thumbnails,
-        train_depths, train_depth_qsteps, depth_priors_count > 0,
+        images_dir, new_resolution,
+        train_image_filenames, train_cameras, train_thumbnails,
+        train_depth_paths, n_train_depths > 0,
         has_depth_dir ? depths_dir : nothing,
-        train_sky_masks, n_train_sky > 0, has_sky_dir ? sky_dir : nothing,
-        train_masks, test_masks, n_masks > 0, has_masks_dir ? masks_dir : nothing,
-        test_image_filenames, test_cameras, test_images,
+        train_sky_paths, n_train_sky > 0, has_sky_dir ? sky_dir : nothing,
+        train_mask_paths, test_mask_paths, n_masks > 0,
+        has_masks_dir ? masks_dir : nothing,
+        test_image_filenames, test_cameras,
         camera_extent)
+end
+
+"""
+The `sidecar_dir` file that belongs to `image_name` (the maps are all `.png`,
+whatever the images are), or `nothing` when that view has none.
+"""
+function sidecar_path(sidecar_dir::String, image_name::String)
+    path = joinpath(sidecar_dir, "$(splitext(image_name)[1]).png")
+    return isfile(path) ? path : nothing
 end
 
 """
 Downscale a loaded (`height × width`) image to at most `max_width` pixels
 wide, keeping its aspect ratio, and return it in the same
-`(channels, width, height)` `UInt8` layout as `train_images`.
+`(channels, width, height)` `UInt8` layout as [`load_image`](@ref).
 """
 function thumbnail(image::AbstractMatrix, max_width::Int)
     height, width = size(image)
@@ -315,11 +306,137 @@ end
 
 Base.length(d::ColmapDataset) = length(d.train_cameras)
 
-function get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol)
-    image = if set == :train
-        dataset.train_images[:, :, :, idx]
-    else
-        dataset.test_images[:, :, :, idx]
+"""
+Everything view `idx` is supervised against, read from disk at the step that
+uses it — see [`ColmapDataset`](@ref) for why none of it is kept.
+
+`image` is `(channels, width, height)` `UInt8`; the maps are `(width, height)`
+`Float32` at the same resolution, `nothing` where the view has no such file.
+"""
+struct ViewData
+    image::Array{UInt8, 3}
+    mask::Maybe{Matrix{Float32}}
+    sky_mask::Maybe{Matrix{Float32}}
+    depth::Maybe{Matrix{Float32}}
+    # Quantization step of `depth`'s encoding; `0f0` when there is no prior.
+    depth_qstep::Float32
+end
+
+view_image_path(dataset::ColmapDataset, idx::Int, set::Symbol) = joinpath(
+    dataset.images_dir, set == :train ?
+        dataset.train_image_filenames[idx] : dataset.test_image_filenames[idx])
+
+"""
+Decode a train/test image into the `(channels, width, height)` `UInt8` layout
+the loss is computed from, resized to the dataset's `×16`-rounded resolution
+(the same rounding the cameras got).
+"""
+function load_image(dataset::ColmapDataset, idx::Int, set::Symbol)
+    image = load(view_image_path(dataset, idx, set))
+    image = imresize(image, reverse((Int.(dataset.resolution)...,)))
+    raw = floor.(UInt8, Float32.(channelview(image)) .* 255f0)
+    return permutedims(raw, (1, 3, 2))
+end
+
+"""
+Load view `idx` of `set` in full. The four files are read on separate tasks:
+they are independent, and at full resolution the image alone is ~500 ms of
+decode & resize (see [`ViewLoader`](@ref)).
+
+Only train views have depth priors & sky masks; coverage masks apply to both
+splits, so training & scoring see the same image (`masking.jl`).
+"""
+function load_view(dataset::ColmapDataset, idx::Int, set::Symbol)
+    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+
+    mask_paths = set == :train ? dataset.train_mask_paths : dataset.test_mask_paths
+    mask_path = mask_paths[idx]
+    sky_path = set == :train ? dataset.train_sky_paths[idx] : nothing
+    depth_path = set == :train ? dataset.train_depth_paths[idx] : nothing
+
+    image_task = Threads.@spawn load_image(dataset, idx, set)
+    mask_task = Threads.@spawn(
+        mask_path ≡ nothing ? nothing : load_mask(mask_path, width, height))
+    sky_task = Threads.@spawn(
+        sky_path ≡ nothing ? nothing : load_mask(sky_path, width, height))
+    depth_task = Threads.@spawn(
+        depth_path ≡ nothing ? nothing : load_depth_prior(depth_path, width, height))
+
+    depth_prior = fetch(depth_task)::Maybe{Tuple{Matrix{Float32}, Float32}}
+    return ViewData(
+        fetch(image_task)::Array{UInt8, 3},
+        fetch(mask_task)::Maybe{Matrix{Float32}},
+        fetch(sky_task)::Maybe{Matrix{Float32}},
+        depth_prior ≡ nothing ? nothing : depth_prior[1],
+        depth_prior ≡ nothing ? 0f0 : depth_prior[2])
+end
+
+"""
+A loaded image as the `Float32` device array the loss wants.
+
+The `UInt8` goes to the device as-is and is scaled there: converting on the
+host first would allocate & transfer four bytes per channel where one will do,
+which at full resolution is ~150 MB of copy per step.
+"""
+device_image(kab, image::Array{UInt8, 3}) = adapt(kab, image) .* (1f0 / 255f0)
+
+get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol) =
+    device_image(kab, load_image(dataset, idx, set))
+
+"""
+How many steps ahead [`ViewLoader`](@ref) reads.
+
+One in flight only overlaps a read with a step, which leaves the train loop
+running at the slower of the two; several in flight let the reads outrun the
+steps. The ceiling is memory: each queued view is the size the dataset used to
+hold *per view* (~140 MB at full resolution with masks & depth priors), so this
+stays small enough to be a rounding error against what it replaced.
+"""
+const VIEW_LOOKAHEAD = 3
+
+"""
+Reads the views the train loop is about to want, on background tasks, so the
+disk work overlaps the GPU work instead of adding to it — see
+[`ColmapDataset`](@ref) for why they are read per step at all.
+
+Wants `Threads.nthreads() > 1` (`julia -t auto`); on a single thread the reads
+merely happen later, not sooner.
+"""
+mutable struct ViewLoader
+    dataset::ColmapDataset
+    lookahead::Int
+    # Train view index → the task reading it.
+    pending::Dict{Int, Task}
+end
+
+ViewLoader(dataset::ColmapDataset; lookahead::Int = VIEW_LOOKAHEAD) =
+    ViewLoader(dataset, lookahead, Dict{Int, Task}())
+
+"""
+Train view `idx`, waiting on its queued read when there is one & reading it
+here otherwise (the first steps of a run, or a view [`prefetch!`](@ref) had
+dropped). `:test` views are always read here: they are not on the train path.
+"""
+function take_view!(loader::ViewLoader, idx::Int, set::Symbol)
+    set == :train || return load_view(loader.dataset, idx, set)
+    task = pop!(loader.pending, idx, nothing)
+    task ≡ nothing && return load_view(loader.dataset, idx, :train)
+    return fetch(task)::ViewData
+end
+
+"""
+Queue the reads for `upcoming` — the next few views the train loop will ask
+for — and drop what is queued but no longer among them, which is what keeps
+the epoch's reshuffle from being read ahead of.
+
+Idempotent: a view already in flight is left alone, so calling this every step
+only ever starts the one read that just came into range.
+"""
+function prefetch!(loader::ViewLoader, upcoming)
+    filter!(kv -> kv.first in upcoming, loader.pending)
+    for idx in upcoming
+        haskey(loader.pending, idx) && continue
+        loader.pending[idx] = Threads.@spawn load_view(loader.dataset, idx, :train)
     end
-    return adapt(kab, Float32.(image) .* (1f0 / 255f0))
+    return
 end

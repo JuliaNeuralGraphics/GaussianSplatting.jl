@@ -261,10 +261,15 @@ Where `floor` softens the inversion so near-camera outliers cannot dominate.
 With `mode = :ssi` the dataset-wide parameterization is resolved by majority vote over per-camera correlations,
 while `:ssi_disparity` and `:ssi_depth` force it.
 Cameras whose selected fit is unusable or has an inconsistent slope sign are dropped from depth supervision.
+
+`load_prior(i)` returns camera `i`'s prior or `nothing`: the priors are read
+from disk one at a time (`ColmapDataset` does not hold them), and this whole
+pass is skipped when the anchor cache is warm — see
+[`load_or_fit_depth_anchors`](@ref).
 """
 function fit_depth_anchors(
     points::Matrix{Float32}, cameras::Vector{Camera},
-    priors::Vector{Maybe{Matrix{Float32}}};
+    load_prior;
     mode::Symbol = :ssi,
     min_anchor_samples::Int = 256,
     depth_floor_fraction::Float32 = 0.05f0,
@@ -279,7 +284,9 @@ function fit_depth_anchors(
 
     aabb_min, aabb_max = robust_aabb(points)
     for i in 1:n_cameras
-        prior = priors[i]
+        # One prior at a time: they are read from disk here (`load_prior`) and
+        # dropped again, never all held at once.
+        prior = load_prior(i)
         prior ≡ nothing && continue
 
         ts, zs = collect_anchor_samples(points, cameras[i], prior; aabb_min, aabb_max)
@@ -360,7 +367,7 @@ Fit per-camera depth anchors, or load them from the cache next to
 function load_or_fit_depth_anchors(
     depths_dir::String,
     points::Matrix{Float32}, cameras::Vector{Camera},
-    priors::Vector{Maybe{Matrix{Float32}}};
+    load_prior;
     mode::Symbol = :ssi,
 )
     fingerprint = depth_anchors_fingerprint(points, cameras, mode)
@@ -385,7 +392,7 @@ function load_or_fit_depth_anchors(
         end
     end
 
-    anchors = fit_depth_anchors(points, cameras, priors; mode)
+    anchors = fit_depth_anchors(points, cameras, load_prior; mode)
 
     by_name = Dict{String, Any}()
     for (cam, a) in zip(cameras, anchors)

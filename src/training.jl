@@ -195,6 +195,8 @@ mutable struct Trainer{
     rast::R
     gaussians::G
     dataset::D
+    # Reads the views the train loop is about to want, ahead of it (`dataset.jl`).
+    loader::ViewLoader
     optimizers::O
 
     cache::C
@@ -270,7 +272,7 @@ function Trainer(
     masks = setup_masking(dataset, opt_params)
 
     Trainer(
-        rast, gs, dataset, optimizers, cache,
+        rast, gs, dataset, ViewLoader(dataset), optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
         depth_anchors, bilateral_grid, sky, sky_loss, normals, masks, LossLog())
 end
@@ -316,7 +318,7 @@ function setup_depth_supervision(
         @warn "Depth supervision requires a `:rgbd` rasterizer, disabling."
         return disabled
     end
-    if !any(!isnothing, dataset.train_depths)
+    if !dataset.has_depth_priors
         @warn "Depth supervision enabled, but no depth priors were found, disabling."
         return disabled
     end
@@ -326,9 +328,15 @@ function setup_depth_supervision(
         return disabled
     end
     @assert dataset.depths_dir ≢ nothing
+
+    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+    load_prior(i) = begin
+        path = dataset.train_depth_paths[i]
+        path ≡ nothing ? nothing : load_depth_prior(path, width, height)[1]
+    end
     return load_or_fit_depth_anchors(
         dataset.depths_dir,
-        points, dataset.train_cameras, dataset.train_depths;
+        points, dataset.train_cameras, load_prior;
         mode=opt_params.depth_loss_mode)
 end
 
@@ -336,14 +344,25 @@ end
 Mean color of the top eighth of the train images: a rough sky color to start
 the dome from, so it does not have to climb out of mid-grey while the scene is
 also forming.
+
+One streaming pass over the images, since the dataset no longer holds them —
+the only place that still reads all of them at once, and only when the dome is
+enabled.
 """
 function sky_init_color(dataset::ColmapDataset)
-    images = dataset.train_images
-    isempty(images) && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
+    n_views = length(dataset)
+    n_views == 0 && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
 
-    band = @view images[:, :, 1:max(1, size(images, 3) ÷ 8), :]
-    totals = Array(vec(sum(Float32, band; dims=(2, 3, 4))))
-    return SVector{3, Float32}(totals ./ (255f0 * (length(band) ÷ size(band, 1)))...)
+    width, height = Int(dataset.resolution[1]), Int(dataset.resolution[2])
+    band_height = max(1, height ÷ 8)
+
+    totals = zeros(Float64, 3, n_views)
+    Threads.@threads for idx in 1:n_views
+        image = load_image(dataset, idx, :train)
+        totals[:, idx] .= vec(sum(Float64, @view(image[:, :, 1:band_height]); dims=(2, 3)))
+    end
+    mean_color = vec(sum(totals; dims=2)) ./ (255.0 * width * band_height * n_views)
+    return SVector{3, Float32}(Float32.(mean_color)...)
 end
 
 function setup_sky_dome(
@@ -405,18 +424,14 @@ function setup_masking(dataset::ColmapDataset, opt_params::OptimizationParams)
 end
 
 """
-The coverage mask of train/test view `idx` on the device, or `nothing` when
-masking is off or that view has none (see `masking.jl`).
+A loaded view's coverage mask on the device, or `nothing` when masking is off
+or that view has none (see `masking.jl`).
 
 Transferred per view, like the sky masks: keeping every mask resident would
 cost a second copy of the dataset in device memory.
 """
-function view_mask(trainer::Trainer, idx::Integer, set::Symbol)
-    trainer.masks || return nothing
-    masks = set == :train ?
-        trainer.dataset.train_masks : trainer.dataset.test_masks
-    mask = masks[idx]
-    mask ≡ nothing && return nothing
+function view_mask(trainer::Trainer, mask::Maybe{Matrix{Float32}})
+    (trainer.masks && mask ≢ nothing) || return nothing
     return adapt(get_backend(trainer.gaussians), mask)
 end
 
@@ -496,12 +511,16 @@ function load_state!(trainer::Trainer, filename::String)
 end
 
 # Convert image from UInt8 to Float32 & permute from (c, w, h) to (w, h, c, 1).
-function get_image(trainer::Trainer, idx::Integer, set::Symbol)
-    kab = get_backend(trainer.gaussians)
-    target_image = get_image(trainer.dataset, kab, idx, set)
-    target_image = permutedims(target_image, (2, 3, 1))
-    return reshape(target_image, size(target_image)..., 1)
+function device_target(trainer::Trainer, image::Array{UInt8, 3})
+    image = device_image(get_backend(trainer.gaussians), image)
+    image = permutedims(image, (2, 3, 1))
+    return reshape(image, size(image)..., 1)
 end
+
+# Read view `idx` from disk & convert it, for callers outside the train loop
+# (which goes through `take_view!` to overlap the read with the previous step).
+get_image(trainer::Trainer, idx::Integer, set::Symbol) =
+    device_target(trainer, load_image(trainer.dataset, Int(idx), set))
 
 """
 Average SSIM / MSE / PSNR over the test views, each metric computed per view &
@@ -527,8 +546,9 @@ function validate(trainer::Trainer; quantize::Bool = false)
         return (; eval_ssim, eval_mse, eval_psnr)
 
     for (idx, camera) in enumerate(dataset.test_cameras)
-        target_image = get_image(trainer, idx, :test)
-        mask = view_mask(trainer, idx, :test)
+        view = load_view(dataset, idx, :test)
+        target_image = device_target(trainer, view.image)
+        mask = view_mask(trainer, view.mask)
         # `apply_mask`, not `composite_mask`: the pass below renders over the
         # rasterizer's default black, whatever the training background was.
         mask ≡ nothing || (target_image = apply_mask(target_image, mask))
@@ -620,12 +640,21 @@ function step!(trainer::Trainer)
         gs.sh_degree += 1
     end
 
-    if (trainer.step - 1) % length(trainer.dataset) == 0
+    n_views = length(trainer.dataset)
+    if (trainer.step - 1) % n_views == 0
         shuffle!(trainer.ids)
     end
-    idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
+    position = (trainer.step - 1) % n_views + 1
+    idx = trainer.ids[position]
+    view = take_view!(trainer.loader, idx, :train)
+    # Queue the views the next few steps will want, before any GPU work is
+    # issued, so their reads overlap this step. Only up to the end of the
+    # epoch: `shuffle!` above will reorder everything past it.
+    prefetch!(trainer.loader, trainer.ids[
+        position + 1:min(position + trainer.loader.lookahead, n_views)])
+
     camera = trainer.dataset.train_cameras[idx]
-    target_image = get_image(trainer, idx, :train)
+    target_image = device_target(trainer, view.image)
     sky = trainer.sky
     # The dome *is* the background when it is on, so the scene pass renders
     # over zeros & compositing supplies what is behind it.
@@ -644,7 +673,7 @@ function step!(trainer::Trainer)
     GPUArrays.@cached trainer.cache begin
         # Coverage mask for this view: the target is blacked out beyond it, so
         # the photometric loss supervises that region empty (see `masking.jl`).
-        mask = view_mask(trainer, idx, :train)
+        mask = view_mask(trainer, view.mask)
         hard_mask = mask ≡ nothing ? nothing : mask_hard(mask)
         # Weight of the alpha term that empties the rest of the frame; the
         # black target alone would accept an opaque black gaussian instead.
@@ -662,9 +691,9 @@ function step!(trainer::Trainer)
         depth_data = if anchor ≡ nothing
             nothing
         else
-            prior = adapt(kab, trainer.dataset.train_depths[idx])
+            prior = adapt(kab, view.depth)
             target, half_band, valid, far_extrap = depth_target(
-                anchor, prior, trainer.dataset.train_depth_qsteps[idx])
+                anchor, prior, view.depth_qstep)
             # If masks are present in dataset, use depth supervision only inside masks.
             hard_mask ≡ nothing || (valid = valid .& hard_mask)
             # Depth dominates early geometry formation,
@@ -688,7 +717,7 @@ function step!(trainer::Trainer)
         sky_weight = if !trainer.sky_loss || trainer.step < params.sky_loss_from_iter
             nothing
         else
-            sky_mask = trainer.dataset.train_sky_masks[idx]
+            sky_mask = view.sky_mask
             if sky_mask ≡ nothing
                 nothing
             else
