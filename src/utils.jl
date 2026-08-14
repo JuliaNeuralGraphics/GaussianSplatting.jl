@@ -96,7 +96,7 @@ Base.@kwdef struct OptimizationParams
     normal_consistency_weight::Float32 = 0.05f0
     normal_flatten_weight::Float32 = 0.005f0
     # Both terms start once the geometry is roughly in place.
-    normal_from_iter::Int = 20_000
+    normal_from_iter::Int = 10_000
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)
