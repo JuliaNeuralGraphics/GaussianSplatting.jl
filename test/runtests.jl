@@ -833,31 +833,35 @@ end
 
     @test size(small) == (8, small_w, small_h)
 
-    # Loose on purpose. `principal` is stored as a *fraction* of the resolution
-    # & multiplied back in `perspective_projection`, so the pixel principal
-    # point only round-trips exactly when the resolution divides it evenly
-    # (`32/64*64` does, `32/61*61` lands an ulp low). That shifts the projected
-    # means by ~4f-6 px, which is enough to flip a tile-boundary comparison in
-    # `get_rect` & bin a gaussian into one more or fewer marginal tile — worth
-    # about `exp(-4.5)` of contribution at 3σ. A dropped or garbage tile is an
-    # O(1) error, which this still catches; ulp-level rebinning is not what
-    # this test is about.
-    @test small ≈ big[:, 1:small_w, 1:small_h] atol=2f-2
-    # Specifically over the partial tiles, where a mis-covered frame shows up.
-    @test small[:, (end - 15):end, :] ≈ big[:, (small_w - 15):small_w, 1:small_h] atol=2f-2
-    @test small[:, :, (end - 15):end] ≈ big[:, 1:small_w, (small_h - 15):small_h] atol=2f-2
-
-    # Sharp invariants: these break on garbage, not on rebinning.
+    # Deliberately *not* asserting the two renders agree numerically. Nothing
+    # promises that: `principal` is stored as a fraction of the resolution &
+    # multiplied back in `perspective_projection`, so the pixel principal point
+    # only round-trips exactly when the resolution divides it evenly
+    # (`32/64*64` does, `32/61*61` lands an ulp low). The resulting ~4f-6 px
+    # shift in the projected means flips tile-boundary comparisons in
+    # `get_rect`, rebinning marginal gaussians. The invariants below hold at any
+    # resolution & are what partial-tile correctness actually rests on.
     α = small[5, :, :]
+    α_big = big[5, :, :]
     @test all(isfinite, small)
     @test all(0f0 .≤ α .≤ 1f0)
-    # The partial edge is rendered at all — a skipped tile leaves it zero.
-    @test any(α[(end - 15):end, :] .> 0.5f0)
-    @test any(α[:, (end - 15):end] .> 0.5f0)
-    # Every covered pixel still satisfies the plane's `normal == -alpha`.
+
+    # This scene covers the whole frame at both sizes, so the *last* column &
+    # row — the ones living in a tile that is only 13 of 16 pixels wide — must
+    # be rendered. A skipped partial tile leaves them at zero.
+    @test any(α_big[end, :] .> 0.5f0) && any(α_big[:, end] .> 0.5f0)
+    @test any(α[end, :] .> 0.5f0)
+    @test any(α[:, end] .> 0.5f0)
+
+    # Every covered pixel satisfies the plane's analytic `normal == -alpha`,
+    # including the ones in partial tiles: garbage there fails this, a rebinned
+    # gaussian does not.
     @test all(isapprox.(small[8, :, :][α .> 0.5f0], -α[α .> 0.5f0]; atol=1f-3))
     @test maximum(abs, small[6, :, :]) < 1f-4
     @test maximum(abs, small[7, :, :]) < 1f-4
+    # Coverage is a smooth plane, so it cannot jump at the last tile boundary
+    # (x = 48, the start of the partial column) — a half-rendered tile would.
+    @test maximum(abs, α[49, :] .- α[48, :]) < 0.1f0
 
     # ...and the backward kernel's own `inside` gating.
     weights = adapt(kab, randn(Float32, 3, small_w, small_h))

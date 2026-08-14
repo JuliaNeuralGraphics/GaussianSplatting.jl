@@ -28,15 +28,24 @@ behind a mask to describe.
 """
 
 """
-Load a mask as a `(width, height)` Float32 weight map in `[0, 1]`, resampled to
-the training resolution. Mirrors `load_depth_prior`'s layout conventions.
+Load a mask as a `(width, height)` Float32 weight map in `[0, 1]`, at the
+training resolution **or smaller**. Mirrors `load_depth_prior`'s conventions.
+
+Smaller means the file is a fraction of the image's size, the usual case, and
+the expansion is left to [`device_map`](@ref) — done on the device it costs
+neither the host allocation nor the bus traffic a full-resolution copy would.
+Only a mask stored at or above the training resolution is resampled here, where
+`imresize` antialiases the downscale.
 
 Kept soft rather than thresholded: a resampled mask has genuinely fractional
 border pixels. Consumers that cannot act on a fraction of a pixel threshold it
 themselves (see [`mask_hard`](@ref)). Also loads the sky masks of `sky/`.
 """
-load_mask(path::String, width::Int, height::Int) =
-    clamp!(fit_resolution(load_mask_raw(path), (width, height)), 0f0, 1f0)
+function load_mask(path::String, width::Int, height::Int)
+    mask = load_mask_raw(path)
+    all(size(mask) .≤ (width, height)) && return mask
+    return clamp!(fit_resolution(mask, (width, height)), 0f0, 1f0)
+end
 
 """
 A mask at the resolution it is stored at. Its file is typically far smaller

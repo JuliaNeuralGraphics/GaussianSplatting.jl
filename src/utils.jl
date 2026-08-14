@@ -150,3 +150,66 @@ quantize8(x) = floor.(clamp.(x, 0f0, 1f0) .* 255f0 .+ 0.5f0) .* (1f0 / 255f0)
 
 within_gradient(x) = false
 CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
+
+"""
+Bilinear upsample of a `(width, height)` map on the device.
+
+Matches `ImageTransformations.imresize`'s convention exactly: outer corners of
+the two grids are mapped onto each other, so the source coordinate of output
+pixel `i` is `(i - 0.5) * (n_in / n_out) + 0.5`, clamped to the source (which is
+what `imresize` does for an upscale, having no extrapolation to fall back on).
+
+Only upscales. A downscale needs `imresize`'s antialiasing, and its output is
+small enough that the host does it cheaply — see [`device_map`](@ref).
+"""
+@kernel cpu=false inbounds=true function _upsample_bilinear!(
+    dst::AbstractMatrix{Float32}, @Const(src),
+    scale::SVector{2, Float32}, src_size::SVector{2, Int32},
+)
+    i, j = @index(Global, NTuple)
+
+    x = clamp(scale[1] * (Float32(i) - 0.5f0) + 0.5f0, 1f0, Float32(src_size[1]))
+    y = clamp(scale[2] * (Float32(j) - 0.5f0) + 0.5f0, 1f0, Float32(src_size[2]))
+
+    x₀ = unsafe_trunc(Int32, x) # `x ≥ 1`, so truncation is a floor.
+    y₀ = unsafe_trunc(Int32, y)
+    x₁ = min(x₀ + 1i32, src_size[1])
+    y₁ = min(y₀ + 1i32, src_size[2])
+    fx = x - Float32(x₀)
+    fy = y - Float32(y₀)
+
+    top = src[x₀, y₀] + (src[x₁, y₀] - src[x₀, y₀]) * fx
+    bottom = src[x₀, y₁] + (src[x₁, y₁] - src[x₀, y₁]) * fx
+    dst[i, j] = top + (bottom - top) * fy
+end
+
+function upsample_bilinear(src::AbstractMatrix{Float32}, width::Int, height::Int)
+    kab = get_backend(src)
+    dst = KA.allocate(kab, Float32, (width, height))
+    _upsample_bilinear!(kab)(
+        dst, src,
+        SVector{2, Float32}(size(src, 1) / width, size(src, 2) / height),
+        SVector{2, Int32}(size(src, 1), size(src, 2));
+        ndrange=(width, height))
+    return dst
+end
+
+"""
+A per-view map (coverage mask, sky mask, depth prior) on the device at the
+training resolution.
+
+These files are typically a fraction of the image's size, and expanding them on
+the host is what the loader used to spend most of its allocation on: a
+full-resolution `Float32` copy per map per view — ~49 MiB each at full
+resolution — pushed across the bus every step. Sending the file's own pixels
+instead and expanding them here moves ~98 MB/step off the bus & out of the GC's
+way (`load_mask` & `load_depth_prior` leave the map small for exactly this).
+
+A map already at the training resolution is uploaded as-is: that is the
+downscale case, which the host resampled because `imresize` antialiases it and
+the result is small anyway.
+"""
+device_map(kab, map::AbstractMatrix{Float32}, width::Int, height::Int) =
+    size(map) == (width, height) ?
+        adapt(kab, map) :
+        upsample_bilinear(adapt(kab, map), width, height)
