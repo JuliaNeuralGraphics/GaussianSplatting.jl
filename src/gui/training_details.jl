@@ -14,7 +14,8 @@ const OPT_PARAM_SECTIONS = (
         :λ_dssim, :random_background)),
     (title="Learning rates", flag=nothing, fields=(
         :lr_points_start, :lr_points_end, :lr_points_steps,
-        :lr_feature, :lr_opacities, :lr_scales, :lr_rotations)),
+        :lr_feature, :lr_opacities, :lr_scales, :lr_rotations,
+        :use_sparse_adam)),
     (title="Depth supervision", flag=:use_depth_loss, fields=(
         :depth_loss_weight, :depth_loss_mode, :depth_loss_steps,
         :depth_loss_final_scale, :depth_loss_gradient_weight)),

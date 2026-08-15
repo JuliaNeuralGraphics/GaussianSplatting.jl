@@ -76,6 +76,7 @@ include("mcmc.jl")
 include("rasterization/rasterizer.jl")
 include("sky_dome.jl")
 include("params_io.jl")
+include("sparse_adam.jl")
 include("training.jl")
 include("gui/gui.jl")
 

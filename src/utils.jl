@@ -11,6 +11,15 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
+    # Sparse Adam (see `sparse_adam.jl`): skips the moment-buffer decay and
+    # parameter write for gaussians not visible in the current view's
+    # rasterization (per `rast.gstate.radii`), instead of updating all `N`
+    # gaussians densely every step. Trades brief momentum staleness for
+    # skipped gaussians for a large speedup on scenes where each view only
+    # touches a small fraction of `N`; a known, validated approximation from
+    # the "Taming 3DGS" / gsplat `SparseGaussianAdam` line of work.
+    use_sparse_adam::Bool = false
+
     # Composite each train render over a random background instead of the black one.
     # Over black, `c·α + bkgd·T` cannot see `T` at all:
     # a half-transparent gaussian with a brighter color renders exactly
