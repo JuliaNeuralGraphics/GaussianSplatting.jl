@@ -12,6 +12,29 @@ const CIM_HEADER =
     CImGui.ImGuiTreeNodeFlags_CollapsingHeader |
     CImGui.ImGuiTreeNodeFlags_DefaultOpen
 
+# Densification strategies selectable in the UI.
+const STRATEGIES = (:default, :mcmc)
+
+# Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
+const MAX_SH_DEGREE = 3
+
+const SH_DEGREE_TOOLTIP =
+    "How much colors are allowed to change with the viewing angle.\n" *
+    "Higher looks better on shiny & reflective surfaces, but uses more " *
+    "memory and trains slower.\n" *
+    "0 makes everything look the same from every direction. 3 is the default."
+
+# How long the worker must be busy with the same operation before the
+# UI shows a spinner: long enough not to flicker on regular renders &
+# training steps, short enough to appear before the app feels stuck.
+const SPINNER_DELAY = 0.5
+# Past this point the wait is dominated by GPU kernel compilation
+# (or a densification pass): explain it instead of just spinning.
+const SPINNER_HINT_DELAY = 3.0
+
+# Visible rows of the `Camera view` list; the rest is scrolled to.
+const VIEW_LIST_ROWS = 8
+
 function red_button_begin()
     CImGui.PushStyleColor(CImGui.ImGuiCol_Button, CImGui.HSV(0f0, 0.6f0, 0.6f0))
     CImGui.PushStyleColor(CImGui.ImGuiCol_ButtonHovered, CImGui.HSV(0f0, 0.7f0, 0.7f0))
@@ -32,17 +55,6 @@ function disabled_end()
     CImGui.PopStyleVar()
     CImGui.igPopItemFlag()
 end
-
-# How long the worker must be busy with the same operation before the
-# UI shows a spinner: long enough not to flicker on regular renders &
-# training steps, short enough to appear before the app feels stuck.
-const SPINNER_DELAY = 0.5
-# Past this point the wait is dominated by GPU kernel compilation
-# (or a densification pass): explain it instead of just spinning.
-const SPINNER_HINT_DELAY = 3.0
-
-# Visible rows of the `Camera view` list; the rest is scrolled to.
-const VIEW_LIST_ROWS = 8
 
 """
 Rotating arc, animated off `CImGui.GetTime()` (wall clock), so it keeps
@@ -215,9 +227,8 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
 
     enable_docking!()
 
-    # Set up renderer. Tile-aligned like `scene_window!`, & for the same
-    # reason: it is about how often the rasterizer is rebuilt, not about what
-    # it can render.
+    # Set up renderer, round its resolution to a multiple of 16
+    # purely to avoid resizing for every resolution change & only do it in a step.
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
@@ -243,18 +254,6 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     GSGUI_REF[] = gsgui
     return gsgui
 end
-
-# Densification strategies selectable in the UI.
-const STRATEGIES = (:default, :mcmc)
-
-# Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
-const MAX_SH_DEGREE = 3
-
-const SH_DEGREE_TOOLTIP =
-    "How much colors are allowed to change with the viewing angle.\n" *
-    "Higher looks better on shiny & reflective surfaces, but uses more " *
-    "memory and trains slower.\n" *
-    "0 makes everything look the same from every direction. 3 is the default."
 
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
@@ -288,8 +287,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
-    # Set-up separate renderer camera & rasterizer. Tile-aligned for the same
-    # reason as in `app`: rebuild frequency, not a rasterizer requirement.
+    # Set up renderer, round its resolution to a multiple of 16
+    # purely to avoid resizing for every resolution change & only do it in a step.
     camera = deepcopy(camera)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
@@ -951,17 +950,15 @@ function loop!(gui::GSGUI)
 end
 
 """
-Scene view as a dockable window: it starts docked into the dockspace's
-central node and re-renders at the new resolution when other windows
-docking around it change its size.
+Render scene window.
 
-`extra_draws` is called after the splats are drawn, with the scene
-framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
+- Show latest worker-rendered frame to the GL render surface.
+- Handle window resizing dispatch.
+- `extra_draws` is called after the splats are drawn,
+    with the scene framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
+- Handle UI overlays.
 """
-function scene_window!(
-    extra_draws::Function, gui::GSGUI, dockspace_id;
-    allow_resize::Bool = true,
-)
+function scene_window!(extra_draws::Function, gui::GSGUI, dockspace_id; allow_resize::Bool = true)
     CImGui.SetNextWindowDockID(dockspace_id, CImGui.ImGuiCond_FirstUseEver)
     CImGui.PushStyleVar(CImGui.ImGuiStyleVar_WindowPadding, CImGui.ImVec2(0f0, 0f0))
     visible = CImGui.Begin("Scene")
@@ -970,11 +967,6 @@ function scene_window!(
     hovered = false
     if visible && allow_resize
         avail = CImGui.GetContentRegionAvail()
-        # Snapped to whole tiles. Not a rasterizer requirement — it renders
-        # partial tiles fine (see `tile_ndrange`) — but every changed size
-        # rebuilds its geometry & image state (`render_view!`), so quantizing
-        # keeps a resize drag from reallocating on every pixel. The cost is up
-        # to 15px of slack between the render & the `Scene` window.
         width = 16 * max(1, floor(Int, avail.x / 16))
         height = 16 * max(1, floor(Int, avail.y / 16))
         res = resolution(gui.camera)
@@ -996,15 +988,12 @@ function scene_window!(
             (Float32(res.width), Float32(res.height)),
             (0f0, 1f0), (1f0, 0f0))
         hovered = CImGui.IsWindowHovered()
-        # Drawn after the image, so it is on top of it. Submits no
-        # items, leaving the image as the current one for the pick below.
+
+        # Show overlay if things are taking too long in the background.
         worker_busy_overlay!(gui, CImGui.GetItemRectMin())
 
-        # Double-click in orbiting mode: set the orbiting target to the
-        # point under the cursor. The image is drawn 1:1, so the offset
-        # from its top-left corner is the pixel position. The pick runs
-        # on the worker (it reads the rendered depth); the result is
-        # applied in `loop!` one frame later.
+        # Double-click in orbiting mode:
+        # set the orbiting target to the point under the cursor.
         if gui.ui_state.controller_mode[] == 1 &&
             CImGui.IsItemHovered() && CImGui.IsMouseDoubleClicked(0)
 
@@ -1315,4 +1304,3 @@ function scene_tab!(gui::GSGUI)
     end
     return
 end
-

@@ -30,14 +30,13 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
    ] add Metal  # for Apple GPU
    ```
 
-2. Start Julia with at least 2 threads (training runs on a background thread to
-   keep the UI responsive):
+2. Start Julia with at least 2 threads
+    (training runs on a background thread to keep the UI responsive):
    ```bash
-   julia -t auto # or `julia -t 2,1`
+   julia -t auto
    ```
-   `-t auto` is worth preferring: images, masks & depth priors are read from
-   disk as the views come up rather than held in memory, and the spare threads
-   are what let those reads run ahead of the steps that need them.
+   `-t auto` is worth preferring: dataset images, masks & depth priors are read from disk with prefetching,
+   additional threads make sure they overlap with training steps.
 
 3. Run:
    ```julia

@@ -1,44 +1,35 @@
 """
-Coverage masks: an optional `masks/` directory next to the dataset images, one
-per view. White keeps a pixel, black drops it.
+Coverage masks: an optional `masks/` directory next to the dataset images, one per view.
+White keeps a pixel, black drops it.
 
 The mask is applied to the *target*, so training sees what it would see if the
-images had been masked on disk: the subject where the mask keeps it, the render
-pass' own background everywhere else. Outside the mask is therefore supervised,
-not dropped from the loss — a region that is merely unscored keeps whatever the
+images had been masked on disk:
+the subject where the mask keeps it, the render pass' own background everywhere else.
+
+Outside the mask is therefore supervised, not dropped from the loss —
+a region that is merely unscored keeps whatever the
 point cloud put there and fades to a haze after the first opacity reset.
-
-Which background that is decides what the photometric term can say. Over black
-it says almost nothing: black is what an empty ray and an opaque black gaussian
-both render, so the emptied region fills with black floaters that show up from
-every other view, and on the subject itself `α` and color are interchangeable
-(`c·α + bkgd·T` with `bkgd = 0` is blind to `T`), which leaves the walls
-half-transparent. `zero_alpha_loss` on the mask complement
-(`mask_opacity_weight`) is what breaks the first tie, and it is all there is.
-
-`random_background` (see `OptimizationParams`) breaks both at full photometric
-weight, and [`composite_mask`](@ref) is what makes it correct here: with the
-target composited over the *same* color the splats were composited over, a
-background that changes every step can only be matched by `α = 0` outside the
-mask and `α = 1` inside it.
 
 The terms that read geometry rather than color — depth priors, depth-normal
 consistency — are gated by the thresholded mask instead: there is no surface
 behind a mask to describe.
 """
 
+# Below this a carve is more likely a mask/pose mismatch than a small subject,
+# and `ColmapDataset` keeps the cloud whole rather than start from nothing.
+const MIN_CARVED_POINTS = 100
+
 """
 Load a mask as a `(width, height)` Float32 weight map in `[0, 1]`, at the
 training resolution **or smaller**. Mirrors `load_depth_prior`'s conventions.
 
-Smaller means the file is a fraction of the image's size, the usual case, and
-the expansion is left to [`device_map`](@ref) — done on the device it costs
+If mask is smaller, the expansion is left to [`device_map`](@ref) — done on the device it costs
 neither the host allocation nor the bus traffic a full-resolution copy would.
-Only a mask stored at or above the training resolution is resampled here, where
-`imresize` antialiases the downscale.
+Only a mask stored at or above the training resolution is resampled here,
+where `imresize` antialiases the downscale.
 
-Kept soft rather than thresholded: a resampled mask has genuinely fractional
-border pixels. Consumers that cannot act on a fraction of a pixel threshold it
+Kept soft rather than thresholded: a resampled mask has fractional border pixels.
+Consumers that cannot act on a fraction of a pixel threshold it
 themselves (see [`mask_hard`](@ref)). Also loads the sky masks of `sky/`.
 """
 function load_mask(path::String, width::Int, height::Int)
@@ -48,13 +39,10 @@ function load_mask(path::String, width::Int, height::Int)
 end
 
 """
-A mask at the resolution it is stored at. Its file is typically far smaller
-than the images — resizing it up is what makes a resident mask expensive, so
-the uses that do not need training resolution (the emptiness check &
-[`carve_points`](@ref)) read it through this.
+A mask at the resolution it is stored at.
+Original mask resolution is used for emptiness check and [`carve_points`](@ref)).
 """
-load_mask_raw(path::String) =
-    clamp!(permutedims(Float32.(Gray.(load(path))), (2, 1)), 0f0, 1f0)
+load_mask_raw(path::String) = clamp!(permutedims(Float32.(Gray.(load(path))), (2, 1)), 0f0, 1f0)
 
 """
 Whether a mask keeps less than a single pixel's worth of weight. Such a view
@@ -70,9 +58,7 @@ mask_hard(mask::AbstractMatrix{Float32}) = mask .> 0.5f0
 image_mask(mask::AbstractMatrix{Float32}) = reshape(mask, size(mask)..., 1, 1)
 
 """
-A view's target with its mask applied: the image where the mask keeps it, black
-outside. What the metrics are computed against — evaluation always renders over
-black, so there is no other background to composite over.
+A view's target with its mask applied: the image where the mask keeps it, black outside.
 """
 apply_mask(image::AbstractArray{Float32, 4}, mask::AbstractMatrix{Float32}) =
     image .* image_mask(mask)
@@ -81,13 +67,6 @@ apply_mask(image::AbstractArray{Float32, 4}, mask::AbstractMatrix{Float32}) =
 A view's target composited over `background`, the color the render pass put
 behind the splats: the image where the mask keeps it, `background` outside.
 What the training loss is computed against.
-
-Over black this is exactly [`apply_mask`](@ref). Over the random background of
-`random_background` it is what makes the mask a claim about *occupancy* rather
-than about color, at the photometric term's own weight: outside the mask the
-target no longer depends on what the scene paints there, so only `α = 0`
-matches it, and inside the mask the target holds still while the background
-moves, so only `α = 1` does.
 """
 function composite_mask(
     image::AbstractArray{Float32, 4}, mask::AbstractMatrix{Float32},
@@ -100,24 +79,10 @@ function composite_mask(
     return image .* m .+ bg .* (1f0 .- m)
 end
 
-# Below this a carve is more likely a mask/pose mismatch than a small subject,
-# and `ColmapDataset` keeps the cloud whole rather than start from nothing.
-const MIN_CARVED_POINTS = 100
-
 """
-Which init points the coverage masks place on the subject: a point that
-projects outside the mask in more than `tolerance` of the views that see it is
+Remove points from initial point-cloud that are not covered by the masks stored at `mask_paths`.
+A point that projects outside the mask in more than `tolerance` of the views that see it is
 not part of what the masks keep.
-
-A one-time visual-hull carve of the COLMAP cloud. The loss can only empty the
-region the masks exclude one layer at a time — `zero_alpha_loss` reads the
-*accumulated* alpha, so whatever hides behind the first opaque surface gets no
-gradient at all — whereas a point that is never seeded never has to be removed.
-Densification then spends its budget on the subject instead of on the room
-around it.
-
-Points that no masked view sees are dropped too: the subject is, by
-construction, in front of the cameras.
 """
 function carve_points(
     points::AbstractMatrix{Float32}, cameras::Vector{Camera},
@@ -131,11 +96,6 @@ function carve_points(
     seen = zeros(Int, n_points)
     outside = zeros(Int, n_points)
 
-    # Views outer, points inner, so only one mask is ever resident — and at the
-    # resolution it is stored at, projections being cheaper to scale than the
-    # mask is to resize. Only masked views carve: an unmasked one is no evidence
-    # either way, the same tolerance for a partially masked dataset as
-    # everywhere else here.
     for (camera, path) in zip(cameras, mask_paths)
         path ≡ nothing && continue
         mask = load_mask_raw(path)
@@ -145,8 +105,8 @@ function carve_points(
         intrinsics = camera.intrinsics
         resolution = intrinsics.resolution
         focal, principal = intrinsics.focal, intrinsics.principal
-        # Pixels of the training resolution to pixels of the mask: the mask
-        # covers the same frame, at whatever size it is stored.
+        # Pixels of the training resolution to pixels of the mask:
+        # the mask covers the same frame, at whatever size it is stored.
         sx = Float32(mask_width) / Float32(resolution[1])
         sy = Float32(mask_height) / Float32(resolution[2])
 
@@ -177,8 +137,6 @@ function carve_points(
         end
     end
 
-    # `Vector{Bool}`, not a `BitVector`: neighbouring bits of the latter share a
-    # word, so the threaded writes below would race on it.
     keep = fill(false, n_points)
     Threads.@threads for i in 1:n_points
         keep[i] = seen[i] > 0 && outside[i] ≤ tolerance * seen[i]

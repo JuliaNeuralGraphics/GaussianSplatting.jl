@@ -59,13 +59,8 @@ training_rasterizer_mode(opt_params::OptimizationParams) =
 
 """
 The ndrange that covers `width × height` in whole tiles.
-
-`render!` & `∇render!` are `unsafe_indices=true`, so KernelAbstractions inserts
-no guard of its own & launching the frame verbatim would leave the last tile of
-a row or column short of a workgroup. They want the opposite: the frame rounded
-*up*, with the threads past the edge alive to help fetch into shared memory and
-to reach `@synchronize`, which is what their own `inside` test is for. The
-resolution the kernels clip against is passed separately.
+Round frame tiles *up*, `render!` & `∇render!` handle out-of-bounds access
+and those threads just help with prefetching the data.
 """
 tile_ndrange(width::Int, height::Int) = (
     cld(width, BLOCK[1]) * BLOCK[1],
