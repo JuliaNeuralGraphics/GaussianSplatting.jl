@@ -50,8 +50,8 @@ end
 
 function ColmapDataset(dataset_dir::String;
     scale::Int = 1, holdout::Int = 8, max_extent::Float32 = Inf32,
-    with_thumbnails::Bool = false, carve_with_masks::Bool = true,
-    carve_tolerance::Float32 = 0.1f0,
+    with_thumbnails::Bool = false, use_masks::Bool = true,
+    carve_with_masks::Bool = true, carve_tolerance::Float32 = 0.1f0,
 )
     cameras_file = joinpath(dataset_dir, "sparse", "0", "cameras.bin")
     images_file = joinpath(dataset_dir, "sparse", "0", "images.bin")
@@ -60,7 +60,7 @@ function ColmapDataset(dataset_dir::String;
     ColmapDataset(;
         cameras_file, images_file, points_file,
         scale, images_dir, holdout, max_extent, with_thumbnails,
-        carve_with_masks, carve_tolerance)
+        use_masks, carve_with_masks, carve_tolerance)
 end
 
 """
@@ -73,6 +73,8 @@ end
     learning rate & the densification size thresholds.
     The reference implementation does not clamp it (pass `Inf32` to match).
 - `with_thumbnails`: also downscale every train image to `THUMBNAIL_WIDTH` (`train_thumbnails`).
+- `use_masks`: read the coverage masks of `masks/` (see `masking.jl`).
+    `false` ignores the directory as if it were not there: no carve, no dropped views, no masked targets.
 - `carve_with_masks`: drop init points the coverage masks place off the subject (see [`carve_points`](@ref)).
     Inert without a `masks/` directory.
     `carve_tolerance` is the fraction of the views seeing a point that may disagree before it is kept anyway.
@@ -81,7 +83,8 @@ function ColmapDataset(;
     cameras_file::String, images_file::String, points_file::String,
     scale::Int = 1, images_dir::String, holdout::Int = 8,
     max_extent::Float32 = Inf32, with_thumbnails::Bool = false,
-    carve_with_masks::Bool = true, carve_tolerance::Float32 = 0.1f0,
+    use_masks::Bool = true, carve_with_masks::Bool = true,
+    carve_tolerance::Float32 = 0.1f0,
 )
     images_dir = scale > 1 ? "$(images_dir)_$(scale)" : images_dir
     depths_dir = joinpath(dirname(images_dir), "depths")
@@ -89,7 +92,9 @@ function ColmapDataset(;
     sky_dir = joinpath(dirname(images_dir), "sky")
     has_sky_dir = isdir(sky_dir)
     masks_dir = joinpath(dirname(images_dir), "masks")
-    has_masks_dir = isdir(masks_dir)
+    has_masks_dir = use_masks && isdir(masks_dir)
+    !use_masks && isdir(masks_dir) &&
+        @info "Coverage masks are disabled: ignoring `$masks_dir`."
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)

@@ -11,11 +11,11 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
-    # Composite each train render over a random background instead of the
-    # black one used at evaluation. Over black, `c·α + bkgd·T` cannot see `T`
-    # at all: a half-transparent gaussian with a brighter color renders exactly
-    # like an opaque one, so nothing in the photometric loss asks a surface to
-    # become opaque. A background that changes every step does.
+    # Composite each train render over a random background instead of the black one.
+    # Over black, `c·α + bkgd·T` cannot see `T` at all:
+    # a half-transparent gaussian with a brighter color renders exactly
+    # like an opaque one, so nothing in the photometric loss asks a surface to become opaque.
+    # A background that changes every step does.
     #
     # The reference implementation keeps it off & the published numbers are
     # without it, but with coverage masks it is the recommended setting: the
@@ -61,22 +61,15 @@ Base.@kwdef struct OptimizationParams
     sky_loss_from_iter::Int = 500
 
     # Coverage masks (see `masking.jl`): a `masks/` directory next to the
-    # dataset images, applied to the targets so the subject trains against the
-    # render background. Inert unless masks were found, hence on by default.
+    # dataset images, applied to the targets so the subject trains against the render background.
+    # Inert unless masks were found, hence on by default.
     # Pair with `random_background`, which is what makes them geometric.
-    use_masks::Bool = true
-    # Pull of the accumulated alpha toward zero outside the mask. Without it a
-    # black target is just as happily met by an opaque black gaussian, and the
-    # emptied region fills with floaters that only show from other views. Over
-    # a random background the photometric term says this too & says it louder;
-    # this is what carries it when the background is black.
     #
-    # Deliberately weak & late. The complement of a tight mask is most of the
-    # frame and its border *is* the subject's silhouette, so a gaussian on the
-    # rim always spills a little past it: at the sky loss' weight of `1` this
-    # term outweighs the photometric one several times over and erodes the
-    # subject into a blob. It only has to break the tie between empty and
-    # black-painted, and it fades on its own as alpha goes to zero.
+    # Gates the loss side. `ColmapDataset` takes a `use_masks` of its own for
+    # the load side (the carve & the dropped views); the GUI & `main` pass this
+    # one through to it, so the two agree.
+    use_masks::Bool = true
+    # Pull of the accumulated alpha toward zero outside the mask.
     mask_opacity_weight::Float32 = 0.1f0
     mask_opacity_from_iter::Int = 500
 

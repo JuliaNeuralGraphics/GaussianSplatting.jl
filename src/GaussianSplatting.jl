@@ -128,7 +128,7 @@ function main(kab, dataset_path::String;
     seed ≡ nothing || Random.seed!(seed)
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(dataset_path; scale)
+    dataset = ColmapDataset(dataset_path; scale, opt_params.use_masks)
     camera = dataset.test_cameras[1]
 
     gaussians = GaussianModel(kab,

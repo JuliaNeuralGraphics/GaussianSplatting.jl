@@ -280,27 +280,12 @@ end
 """
     zero_alpha_loss(alpha, weight)
 
-Pull the scene's accumulated alpha to zero where `weight` says nothing should
-be: sky rays (`sky/`, where the dome merely makes `α = 0` *possible* and this
-makes anything else *cost* something) and everything outside a coverage mask
-(`masks/`, see `masking.jl`).
+Pull the scene's accumulated alpha to zero where `weight` says nothing should be:
+sky rays (`sky/`) and everything outside a coverage mask (`masks/`, see `masking.jl`).
 
-A color loss cannot do this on its own — black is what an empty ray and an
-opaque black gaussian both render — so this is the term that distinguishes
-them.
-
-`alpha` must be the raw channel-5 render, not a clamped copy — Zygote's `clamp`
-adjoint is zero at the bound, so a saturated pixel (exactly the floater this
-targets) would silently lose the cotangent (the same trap is documented in
-`ssi_depth_loss`).
-
-`α²` rather than `-log(1 - α)`: bounded gradient at `α → 1` where training
-starts, and a vanishing one at `α → 0` so it stops pushing once the region is
-clear instead of fighting the photometric loss over the last few percent.
+`alpha` must be the raw channel-5 render, not clamped.
 """
-function zero_alpha_loss(
-    alpha::AbstractMatrix{Float32}, weight::AbstractMatrix{Float32},
-)
+function zero_alpha_loss(alpha::AbstractMatrix{Float32}, weight::AbstractMatrix{Float32})
     Σw = ignore_derivatives(max(sum(weight), 1f0))
     return sum(weight .* alpha .^ 2) / Σw
 end

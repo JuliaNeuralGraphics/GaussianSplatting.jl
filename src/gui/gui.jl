@@ -259,8 +259,9 @@ end
 function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
-    random_background::Bool = false, use_sky_dome::Bool = false,
-    sky_dome_shape::Symbol = :hemisphere, max_sh_degree::Int = 3, gl_kwargs...,
+    random_background::Bool = false, use_masks::Bool = true,
+    use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
+    max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
     NGL.init(3, 2)
@@ -274,12 +275,13 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     enable_docking!()
 
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
-    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
+    dataset = ColmapDataset(dataset_path;
+        scale, holdout=0, with_thumbnails=true, use_masks)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_sky_dome, sky_dome_shape)
+        use_masks, use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -337,7 +339,8 @@ function load_dataset(kab, dataset_path::String;
     max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
-    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
+    dataset = ColmapDataset(dataset_path;
+        scale, holdout=0, with_thumbnails=true, opt_params.use_masks)
     camera = dataset.train_cameras[1]
 
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
@@ -577,6 +580,7 @@ effective_opt_params(ui_state::UIState) = with_params(
     use_bilateral_grid = ui_state.dataset_bilateral_grid[],
     use_normal_loss = ui_state.dataset_normal_loss[],
     random_background = ui_state.dataset_random_background[],
+    use_masks = ui_state.dataset_masks[],
     use_sky_dome = ui_state.dataset_sky_dome[],
     sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1])
 
@@ -587,6 +591,7 @@ function sync_params_controls!(ui_state::UIState, params::OptimizationParams)
     ui_state.dataset_bilateral_grid[] = params.use_bilateral_grid
     ui_state.dataset_normal_loss[] = params.use_normal_loss
     ui_state.dataset_random_background[] = params.random_background
+    ui_state.dataset_masks[] = params.use_masks
     ui_state.dataset_sky_dome[] = params.use_sky_dome
     shape = findfirst(==(params.sky_dome_shape), SKY_DOME_SHAPES)
     ui_state.dataset_sky_dome_shape[] = Int32(something(shape, 1) - 1)
@@ -805,6 +810,16 @@ function open_dataset_modal!(gui::GSGUI)
             "the reference implementation keeps it off & its published " *
             "numbers are without it.\nIgnored when the sky dome is on, which " *
             "supplies the background itself.")
+    end
+
+    CImGui.Checkbox("Coverage masks", ui_state.dataset_masks)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Reconstruct only what the `masks/` images keep, driving the rest " *
+            "of the frame empty.\nSilently disabled when the dataset has no " *
+            "masks; unchecking ignores them even when it does, which is what " *
+            "masks that do not match their images or poses need.\nPair with " *
+            "`Random background`.")
     end
 
     params_file_row!(ui_state)
