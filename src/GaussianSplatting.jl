@@ -251,13 +251,6 @@ strategy-specific sampling). The first config is the reference one.
 Depth-supervised configs silently fall back to plain training when the dataset
 has no depth priors (the `depth` column in the report tells which was actually
 used).
-
-Known deviations from the reference implementation, both of which move the
-numbers a little:
-
-- LPIPS is not reported (needs a pretrained VGG/AlexNet).
-- Images are resampled up to a multiple of 16, a rasterizer requirement, so
-  both render & ground truth are up to ~1% larger than the reference's.
 """
 function benchmark(kab, dataset_path::String;
     scale::Maybe{Int} = nothing,
@@ -268,12 +261,13 @@ function benchmark(kab, dataset_path::String;
     progress::Bool = true,
     # TODO add geometry_regularization
     configs = [
-        (name="3dgs",                    strategy=:default, opt_params=reference_opt_params()),
+        # (name="3dgs",                    strategy=:default, opt_params=reference_opt_params()),
         # (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
         # (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
         # (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
         # (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
-        # (name="mcmc",                    strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=false)),
+        (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false)),
+        (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false, use_sparse_adam=true)),
         # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
     ],
 )

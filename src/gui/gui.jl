@@ -289,6 +289,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
     random_background::Bool = false, use_masks::Bool = true,
     use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
+    use_sky_loss::Bool = false,
     max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
@@ -309,7 +310,7 @@ function GSGUI(kab, dataset_path::String, scale::Int;
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_masks, use_sky_dome, sky_dome_shape)
+        use_masks, use_sky_dome, sky_dome_shape, use_sky_loss)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -611,6 +612,7 @@ effective_opt_params(ui_state::UIState) = with_params(
     use_masks = ui_state.dataset_masks[],
     use_sky_dome = ui_state.dataset_sky_dome[],
     sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1],
+    use_sky_loss = ui_state.dataset_sky_loss[],
     use_sparse_adam = ui_state.dataset_sparse_adam[])
 
 # The reverse: seed the controls from a just-loaded file, so what the modal
@@ -624,6 +626,7 @@ function sync_params_controls!(ui_state::UIState, params::OptimizationParams)
     ui_state.dataset_sky_dome[] = params.use_sky_dome
     shape = findfirst(==(params.sky_dome_shape), SKY_DOME_SHAPES)
     ui_state.dataset_sky_dome_shape[] = Int32(something(shape, 1) - 1)
+    ui_state.dataset_sky_loss[] = params.use_sky_loss
     ui_state.dataset_sparse_adam[] = params.use_sparse_adam
     return
 end
@@ -831,6 +834,15 @@ function open_dataset_modal!(gui::GSGUI)
             "background everywhere and tends to pull ground onto the dome.")
     end
     ui_state.dataset_sky_dome[] || disabled_end()
+
+    CImGui.Checkbox("Sky mask supervision", ui_state.dataset_sky_loss)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Pull the accumulated alpha to zero where the `sky/` masks mark " *
+            "the frame as sky, so a floater there costs something.\n" *
+            "Silently disabled when the dataset has no sky masks.\n" *
+            "Pair with `Sky dome`, which gives the sky somewhere to be drawn.")
+    end
 
     CImGui.Checkbox("Random background", ui_state.dataset_random_background)
     if CImGui.IsItemHovered()
