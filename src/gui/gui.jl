@@ -12,6 +12,29 @@ const CIM_HEADER =
     CImGui.ImGuiTreeNodeFlags_CollapsingHeader |
     CImGui.ImGuiTreeNodeFlags_DefaultOpen
 
+# Densification strategies selectable in the UI.
+const STRATEGIES = (:default, :mcmc)
+
+# Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
+const MAX_SH_DEGREE = 3
+
+const SH_DEGREE_TOOLTIP =
+    "How much colors are allowed to change with the viewing angle.\n" *
+    "Higher looks better on shiny & reflective surfaces, but uses more " *
+    "memory and trains slower.\n" *
+    "0 makes everything look the same from every direction. 3 is the default."
+
+# How long the worker must be busy with the same operation before the
+# UI shows a spinner: long enough not to flicker on regular renders &
+# training steps, short enough to appear before the app feels stuck.
+const SPINNER_DELAY = 0.5
+# Past this point the wait is dominated by GPU kernel compilation
+# (or a densification pass): explain it instead of just spinning.
+const SPINNER_HINT_DELAY = 3.0
+
+# Visible rows of the `Camera view` list; the rest is scrolled to.
+const VIEW_LIST_ROWS = 8
+
 function red_button_begin()
     CImGui.PushStyleColor(CImGui.ImGuiCol_Button, CImGui.HSV(0f0, 0.6f0, 0.6f0))
     CImGui.PushStyleColor(CImGui.ImGuiCol_ButtonHovered, CImGui.HSV(0f0, 0.7f0, 0.7f0))
@@ -32,17 +55,6 @@ function disabled_end()
     CImGui.PopStyleVar()
     CImGui.igPopItemFlag()
 end
-
-# How long the worker must be busy with the same operation before the
-# UI shows a spinner: long enough not to flicker on regular renders &
-# training steps, short enough to appear before the app feels stuck.
-const SPINNER_DELAY = 0.5
-# Past this point the wait is dominated by GPU kernel compilation
-# (or a densification pass): explain it instead of just spinning.
-const SPINNER_HINT_DELAY = 3.0
-
-# Visible rows of the `Camera view` list; the rest is scrolled to.
-const VIEW_LIST_ROWS = 8
 
 """
 Rotating arc, animated off `CImGui.GetTime()` (wall clock), so it keeps
@@ -215,7 +227,8 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
 
     enable_docking!()
 
-    # Set up renderer.
+    # Set up renderer, round its resolution to a multiple of 16
+    # purely to avoid resizing for every resolution change & only do it in a step.
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
         height=16 * cld(context.height, 16))...)
@@ -242,24 +255,13 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     return gsgui
 end
 
-# Densification strategies selectable in the UI.
-const STRATEGIES = (:default, :mcmc)
-
-# Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
-const MAX_SH_DEGREE = 3
-
-const SH_DEGREE_TOOLTIP =
-    "How much colors are allowed to change with the viewing angle.\n" *
-    "Higher looks better on shiny & reflective surfaces, but uses more " *
-    "memory and trains slower.\n" *
-    "0 makes everything look the same from every direction. 3 is the default."
-
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
     strategy::Symbol = :default, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
-    random_background::Bool = false, use_sky_dome::Bool = false,
-    sky_dome_shape::Symbol = :hemisphere, max_sh_degree::Int = 3, gl_kwargs...,
+    random_background::Bool = false, use_masks::Bool = true,
+    use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
+    max_sh_degree::Int = 3, gl_kwargs...,
 )
     check_worker_threads()
     NGL.init(3, 2)
@@ -273,12 +275,13 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     enable_docking!()
 
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
-    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
+    dataset = ColmapDataset(dataset_path;
+        scale, holdout=0, with_thumbnails=true, use_masks)
     camera = dataset.train_cameras[1]
 
     opt_params = OptimizationParams(;
         use_depth_loss, use_bilateral_grid, use_normal_loss, random_background,
-        use_sky_dome, sky_dome_shape)
+        use_masks, use_sky_dome, sky_dome_shape)
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
         isotropic=false, max_sh_degree)
     rasterizer = GaussianRasterizer(kab, camera;
@@ -286,7 +289,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     trainer = Trainer(rasterizer, gaussians, dataset, opt_params;
         strategy=create_strategy(strategy, gaussians))
 
-    # Set-up separate renderer camera & rasterizer.
+    # Set up renderer, round its resolution to a multiple of 16
+    # purely to avoid resizing for every resolution change & only do it in a step.
     camera = deepcopy(camera)
     set_resolution!(camera; (;
         width=16 * cld(context.width, 16),
@@ -335,7 +339,8 @@ function load_dataset(kab, dataset_path::String;
     max_sh_degree::Int = 3,
 )
     # Thumbnails: the `Draw Cameras` overlay maps them onto the frustums.
-    dataset = ColmapDataset(dataset_path; scale, holdout=0, with_thumbnails=true)
+    dataset = ColmapDataset(dataset_path;
+        scale, holdout=0, with_thumbnails=true, opt_params.use_masks)
     camera = dataset.train_cameras[1]
 
     gaussians = GaussianModel(kab, dataset.points, dataset.colors, dataset.scales;
@@ -575,6 +580,7 @@ effective_opt_params(ui_state::UIState) = with_params(
     use_bilateral_grid = ui_state.dataset_bilateral_grid[],
     use_normal_loss = ui_state.dataset_normal_loss[],
     random_background = ui_state.dataset_random_background[],
+    use_masks = ui_state.dataset_masks[],
     use_sky_dome = ui_state.dataset_sky_dome[],
     sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1])
 
@@ -585,6 +591,7 @@ function sync_params_controls!(ui_state::UIState, params::OptimizationParams)
     ui_state.dataset_bilateral_grid[] = params.use_bilateral_grid
     ui_state.dataset_normal_loss[] = params.use_normal_loss
     ui_state.dataset_random_background[] = params.random_background
+    ui_state.dataset_masks[] = params.use_masks
     ui_state.dataset_sky_dome[] = params.use_sky_dome
     shape = findfirst(==(params.sky_dome_shape), SKY_DOME_SHAPES)
     ui_state.dataset_sky_dome_shape[] = Int32(something(shape, 1) - 1)
@@ -805,6 +812,16 @@ function open_dataset_modal!(gui::GSGUI)
             "supplies the background itself.")
     end
 
+    CImGui.Checkbox("Coverage masks", ui_state.dataset_masks)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Reconstruct only what the `masks/` images keep, driving the rest " *
+            "of the frame empty.\nSilently disabled when the dataset has no " *
+            "masks; unchecking ignores them even when it does, which is what " *
+            "masks that do not match their images or poses need.\nPair with " *
+            "`Random background`.")
+    end
+
     params_file_row!(ui_state)
 
     # Always occupy the error line to keep the window height constant.
@@ -948,17 +965,15 @@ function loop!(gui::GSGUI)
 end
 
 """
-Scene view as a dockable window: it starts docked into the dockspace's
-central node and re-renders at the new resolution when other windows
-docking around it change its size.
+Render scene window.
 
-`extra_draws` is called after the splats are drawn, with the scene
-framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
+- Show latest worker-rendered frame to the GL render surface.
+- Handle window resizing dispatch.
+- `extra_draws` is called after the splats are drawn,
+    with the scene framebuffer still bound, to overlay other OpenGL objects (frustums, etc.).
+- Handle UI overlays.
 """
-function scene_window!(
-    extra_draws::Function, gui::GSGUI, dockspace_id;
-    allow_resize::Bool = true,
-)
+function scene_window!(extra_draws::Function, gui::GSGUI, dockspace_id; allow_resize::Bool = true)
     CImGui.SetNextWindowDockID(dockspace_id, CImGui.ImGuiCond_FirstUseEver)
     CImGui.PushStyleVar(CImGui.ImGuiStyleVar_WindowPadding, CImGui.ImVec2(0f0, 0f0))
     visible = CImGui.Begin("Scene")
@@ -988,15 +1003,12 @@ function scene_window!(
             (Float32(res.width), Float32(res.height)),
             (0f0, 1f0), (1f0, 0f0))
         hovered = CImGui.IsWindowHovered()
-        # Drawn after the image, so it is on top of it. Submits no
-        # items, leaving the image as the current one for the pick below.
+
+        # Show overlay if things are taking too long in the background.
         worker_busy_overlay!(gui, CImGui.GetItemRectMin())
 
-        # Double-click in orbiting mode: set the orbiting target to the
-        # point under the cursor. The image is drawn 1:1, so the offset
-        # from its top-left corner is the pixel position. The pick runs
-        # on the worker (it reads the rendered depth); the result is
-        # applied in `loop!` one frame later.
+        # Double-click in orbiting mode:
+        # set the orbiting target to the point under the cursor.
         if gui.ui_state.controller_mode[] == 1 &&
             CImGui.IsItemHovered() && CImGui.IsMouseDoubleClicked(0)
 
@@ -1241,6 +1253,18 @@ function scene_tab!(gui::GSGUI)
         gui.render_state.need_render = true
     end
 
+    # Only the color view composites over the background.
+    color_mode = gui.ui_state.selected_mode[] == 0
+    color_mode || disabled_begin()
+    CImGui.PushItemWidth(-100)
+    if CImGui.ColorEdit3("Background", gui.ui_state.background_color)
+        gui.render_state.need_render = true
+    end
+    CImGui.SetItemTooltip(
+        "Color the splats are composited over. " *
+        "Affects only the viewer, not training.")
+    color_mode || disabled_end()
+
     if !viewer_only(gui)
         CImGui.Separator()
         CImGui.BeginTable("##checkbox-table", 2)
@@ -1295,4 +1319,3 @@ function scene_tab!(gui::GSGUI)
     end
     return
 end
-

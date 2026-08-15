@@ -63,6 +63,7 @@ include("checkpoint.jl")
 include("fused_ssim.jl")
 include("camera.jl")
 include("camera_opt.jl")
+include("masking.jl")
 include("dataset.jl")
 include("depth_supervision.jl")
 
@@ -127,7 +128,7 @@ function main(kab, dataset_path::String;
     seed ≡ nothing || Random.seed!(seed)
     @info "Using `$kab` GPU backend."
 
-    dataset = ColmapDataset(dataset_path; scale)
+    dataset = ColmapDataset(dataset_path; scale, opt_params.use_masks)
     camera = dataset.test_cameras[1]
 
     gaussians = GaussianModel(kab,

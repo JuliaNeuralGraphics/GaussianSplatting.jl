@@ -11,10 +11,17 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
-    # Composite each train render over a random background instead of the
-    # black one used at evaluation. Helps opacities escape the background
-    # color, but the reference implementation keeps it off & the published
-    # numbers are without it.
+    # Composite each train render over a random background instead of the black one.
+    # Over black, `c·α + bkgd·T` cannot see `T` at all:
+    # a half-transparent gaussian with a brighter color renders exactly
+    # like an opaque one, so nothing in the photometric loss asks a surface to become opaque.
+    # A background that changes every step does.
+    #
+    # The reference implementation keeps it off & the published numbers are
+    # without it, but with coverage masks it is the recommended setting: the
+    # target is composited over the same color (see `masking.jl`), which turns
+    # the mask into a claim about occupancy that the photometric term can state
+    # at full weight rather than one `mask_opacity_weight` has to carry alone.
     random_background::Bool = false
 
     # Depth supervision with monocular priors (see `depth_supervision.jl`).
@@ -53,6 +60,19 @@ Base.@kwdef struct OptimizationParams
     sky_loss_weight::Float32 = 1f0
     sky_loss_from_iter::Int = 500
 
+    # Coverage masks (see `masking.jl`): a `masks/` directory next to the
+    # dataset images, applied to the targets so the subject trains against the render background.
+    # Inert unless masks were found, hence on by default.
+    # Pair with `random_background`, which is what makes them geometric.
+    #
+    # Gates the loss side. `ColmapDataset` takes a `use_masks` of its own for
+    # the load side (the carve & the dropped views); the GUI & `main` pass this
+    # one through to it, so the two agree.
+    use_masks::Bool = true
+    # Pull of the accumulated alpha toward zero outside the mask.
+    mask_opacity_weight::Float32 = 0.1f0
+    mask_opacity_from_iter::Int = 500
+
     # Bilateral grid appearance modeling (see `bilateral_grid.jl`):
     # per-train-image low-res affine color grids applied to the render before
     # the photometric loss, absorbing exposure / white-balance drift.
@@ -69,7 +89,7 @@ Base.@kwdef struct OptimizationParams
     normal_consistency_weight::Float32 = 0.05f0
     normal_flatten_weight::Float32 = 0.005f0
     # Both terms start once the geometry is roughly in place.
-    normal_from_iter::Int = 20_000
+    normal_from_iter::Int = 10_000
 end
 
 function lr_exp_scheduler(lr_start::Float32, lr_end::Float32, steps::Int)
@@ -106,7 +126,11 @@ memory_usage(opt::NU.Adam) =
 
 mse(x, y) = mean((x .- y).^2)
 
-psnr(x, y) = 20f0 * log10(1f0 / sqrt(mse(x, y)))
+# Split from `psnr` for the callers that already have the MSE — a masked one,
+# say (see `masking.jl`) — and must not recompute it unmasked.
+psnr_from_mse(v::Real) = 20f0 * log10(1f0 / sqrt(v))
+
+psnr(x, y) = psnr_from_mse(mse(x, y))
 
 """
 Round a render to the 8-bit sRGB grid the ground truth lives on.
@@ -119,3 +143,66 @@ quantize8(x) = floor.(clamp.(x, 0f0, 1f0) .* 255f0 .+ 0.5f0) .* (1f0 / 255f0)
 
 within_gradient(x) = false
 CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
+
+"""
+Bilinear upsample of a `(width, height)` map on the device.
+
+Matches `ImageTransformations.imresize`'s convention exactly: outer corners of
+the two grids are mapped onto each other, so the source coordinate of output
+pixel `i` is `(i - 0.5) * (n_in / n_out) + 0.5`, clamped to the source (which is
+what `imresize` does for an upscale, having no extrapolation to fall back on).
+
+Only upscales. A downscale needs `imresize`'s antialiasing, and its output is
+small enough that the host does it cheaply — see [`device_map`](@ref).
+"""
+@kernel cpu=false inbounds=true function _upsample_bilinear!(
+    dst::AbstractMatrix{Float32}, @Const(src),
+    scale::SVector{2, Float32}, src_size::SVector{2, Int32},
+)
+    i, j = @index(Global, NTuple)
+
+    x = clamp(scale[1] * (Float32(i) - 0.5f0) + 0.5f0, 1f0, Float32(src_size[1]))
+    y = clamp(scale[2] * (Float32(j) - 0.5f0) + 0.5f0, 1f0, Float32(src_size[2]))
+
+    x₀ = unsafe_trunc(Int32, x) # `x ≥ 1`, so truncation is a floor.
+    y₀ = unsafe_trunc(Int32, y)
+    x₁ = min(x₀ + 1i32, src_size[1])
+    y₁ = min(y₀ + 1i32, src_size[2])
+    fx = x - Float32(x₀)
+    fy = y - Float32(y₀)
+
+    top = src[x₀, y₀] + (src[x₁, y₀] - src[x₀, y₀]) * fx
+    bottom = src[x₀, y₁] + (src[x₁, y₁] - src[x₀, y₁]) * fx
+    dst[i, j] = top + (bottom - top) * fy
+end
+
+function upsample_bilinear(src::AbstractMatrix{Float32}, width::Int, height::Int)
+    kab = get_backend(src)
+    dst = KA.allocate(kab, Float32, (width, height))
+    _upsample_bilinear!(kab)(
+        dst, src,
+        SVector{2, Float32}(size(src, 1) / width, size(src, 2) / height),
+        SVector{2, Int32}(size(src, 1), size(src, 2));
+        ndrange=(width, height))
+    return dst
+end
+
+"""
+A per-view map (coverage mask, sky mask, depth prior) on the device at the
+training resolution.
+
+These files are typically a fraction of the image's size, and expanding them on
+the host is what the loader used to spend most of its allocation on: a
+full-resolution `Float32` copy per map per view — ~49 MiB each at full
+resolution — pushed across the bus every step. Sending the file's own pixels
+instead and expanding them here moves ~98 MB/step off the bus & out of the GC's
+way (`load_mask` & `load_depth_prior` leave the map small for exactly this).
+
+A map already at the training resolution is uploaded as-is: that is the
+downscale case, which the host resampled because `imresize` antialiases it and
+the result is small anyway.
+"""
+device_map(kab, map::AbstractMatrix{Float32}, width::Int, height::Int) =
+    size(map) == (width, height) ?
+        adapt(kab, map) :
+        upsample_bilinear(adapt(kab, map), width, height)

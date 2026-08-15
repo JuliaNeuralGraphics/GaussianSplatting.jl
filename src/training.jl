@@ -23,12 +23,13 @@ Base.@kwdef mutable struct LossBreakdown
     tv::Float32 = 0f0
     depth::Float32 = 0f0
     sky::Float32 = 0f0
+    mask::Float32 = 0f0
     flatten::Float32 = 0f0
     normal::Float32 = 0f0
 end
 
 # Every field, in the order terms are reported.
-const LOSS_TERMS = (:l1, :ssim, :reg, :tv, :depth, :sky, :flatten, :normal)
+const LOSS_TERMS = (:l1, :ssim, :reg, :tv, :depth, :sky, :mask, :flatten, :normal)
 const LOSS_FIELDS = (:total, LOSS_TERMS...)
 
 # How often the GUI's train loop reports the breakdown to the console.
@@ -194,6 +195,8 @@ mutable struct Trainer{
     rast::R
     gaussians::G
     dataset::D
+    # Reads the views the train loop is about to want, ahead of it (`dataset.jl`).
+    loader::ViewLoader
     optimizers::O
 
     cache::C
@@ -216,6 +219,8 @@ mutable struct Trainer{
     sky_loss::Bool
     # Whether geometry regularization is active (see `geometry_regularization.jl`).
     normals::Bool
+    # Whether coverage masking is active (see `masking.jl`).
+    masks::Bool
 
     # Per-term loss contributions & their moving average (see `LossLog`).
     losses::LossLog
@@ -264,11 +269,12 @@ function Trainer(
     sky = setup_sky_dome(rast, dataset, opt_params)
     sky_loss = setup_sky_supervision(sky, dataset, opt_params)
     normals = setup_normal_supervision(rast, opt_params)
+    masks = setup_masking(dataset, opt_params)
 
     Trainer(
-        rast, gs, dataset, optimizers, cache,
+        rast, gs, dataset, ViewLoader(dataset), optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
-        depth_anchors, bilateral_grid, sky, sky_loss, normals, LossLog())
+        depth_anchors, bilateral_grid, sky, sky_loss, normals, masks, LossLog())
 end
 
 # `gaussians` is excluded, as in `unsafe_free!`: the model is shared with
@@ -292,9 +298,7 @@ function KA.unsafe_free!(trainer::Trainer)
     return
 end
 
-function setup_normal_supervision(
-    rast::GaussianRasterizer, opt_params::OptimizationParams,
-)
+function setup_normal_supervision(rast::GaussianRasterizer, opt_params::OptimizationParams)
     opt_params.use_normal_loss || return false
     if rast.mode != :rgbdn
         @warn "Geometry regularization requires a `:rgbdn` rasterizer, disabling."
@@ -304,15 +308,13 @@ function setup_normal_supervision(
     return true
 end
 
-function setup_depth_supervision(
-    rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams,
-)
+function setup_depth_supervision(rast::GaussianRasterizer, dataset::ColmapDataset, opt_params::OptimizationParams)
     disabled = Maybe{DepthAnchor}[]
     if rast.mode != :rgbd && rast.mode != :rgbdn
         @warn "Depth supervision requires a `:rgbd` rasterizer, disabling."
         return disabled
     end
-    if !any(!isnothing, dataset.train_depths)
+    if !dataset.has_depth_priors
         @warn "Depth supervision enabled, but no depth priors were found, disabling."
         return disabled
     end
@@ -322,9 +324,18 @@ function setup_depth_supervision(
         return disabled
     end
     @assert dataset.depths_dir ≢ nothing
+
+    # `collect_anchor_samples` indexes the prior at the camera's resolution, so
+    # this one path wants it expanded on the host — it runs once & is cached.
+    width, height = view_resolution(dataset)
+    load_prior(i) = begin
+        path = dataset.train_depth_paths[i]
+        path ≡ nothing && return nothing
+        return fit_resolution(load_depth_prior(path, width, height)[1], (width, height))
+    end
     return load_or_fit_depth_anchors(
         dataset.depths_dir,
-        points, dataset.train_cameras, dataset.train_depths;
+        points, dataset.train_cameras, load_prior;
         mode=opt_params.depth_loss_mode)
 end
 
@@ -332,14 +343,25 @@ end
 Mean color of the top eighth of the train images: a rough sky color to start
 the dome from, so it does not have to climb out of mid-grey while the scene is
 also forming.
+
+One streaming pass over the images, since the dataset no longer holds them —
+the only place that still reads all of them at once, and only when the dome is
+enabled.
 """
 function sky_init_color(dataset::ColmapDataset)
-    images = dataset.train_images
-    isempty(images) && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
+    n_views = length(dataset)
+    n_views == 0 && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
 
-    band = @view images[:, :, 1:max(1, size(images, 3) ÷ 8), :]
-    totals = Array(vec(sum(Float32, band; dims=(2, 3, 4))))
-    return SVector{3, Float32}(totals ./ (255f0 * (length(band) ÷ size(band, 1)))...)
+    width, height = view_resolution(dataset)
+    band_height = max(1, height ÷ 8)
+
+    totals = zeros(Float64, 3, n_views)
+    Threads.@threads for idx in 1:n_views
+        image = load_image(dataset, idx, :train)
+        totals[:, idx] .= vec(sum(Float64, @view(image[:, :, 1:band_height]); dims=(2, 3)))
+    end
+    mean_color = vec(sum(totals; dims=2)) ./ (255.0 * width * band_height * n_views)
+    return SVector{3, Float32}(Float32.(mean_color)...)
 end
 
 function setup_sky_dome(
@@ -363,8 +385,7 @@ function setup_sky_dome(
         "$(round(requested; digits=2)) by the rasterizer far plane ",
         "($(rast.far_plane)); the dome will show some parallax.")
 
-    center = sum(c -> c.camera_center, dataset.train_cameras) /
-        length(dataset.train_cameras)
+    center = sum(c -> c.camera_center, dataset.train_cameras) / length(dataset.train_cameras)
     # Orients the horizon cut for a `:hemisphere`; unused for a `:sphere`.
     up = estimate_up_vec(dataset.train_cameras)
 
@@ -378,19 +399,36 @@ function setup_sky_dome(
     return sky
 end
 
-function setup_sky_supervision(
-    sky::Maybe{SkyDome}, dataset::ColmapDataset, opt_params::OptimizationParams,
-)
+function setup_sky_supervision(sky::Maybe{SkyDome}, dataset::ColmapDataset, opt_params::OptimizationParams)
     opt_params.use_sky_loss || return false
     dataset.has_sky_masks || return false
     if sky ≡ nothing
-        # Driving alpha to zero without a far-field model just hands the sky to
-        # the background color & puts the sky loss at war with the photometric one.
         @warn "Sky masks found, but the sky dome is off: sky supervision disabled."
         return false
     end
     @info "Use sky masks to supervise the alpha map."
     return true
+end
+
+function setup_masking(dataset::ColmapDataset, opt_params::OptimizationParams)
+    opt_params.use_masks || return false
+    dataset.has_masks || return false
+    @info "Use coverage masks: targets are blacked out beyond them."
+    return true
+end
+
+"""
+A loaded view's coverage mask on the device at the training resolution, or
+`nothing` when masking is off or that view has none (see `masking.jl`).
+
+Expanded per view by [`device_map`](@ref), like the sky masks & depth priors:
+keeping every mask resident would cost a second copy of the dataset in device
+memory, and expanding it on the host would cost the transfer of one.
+"""
+function view_mask(trainer::Trainer, mask::Maybe{Matrix{Float32}})
+    (trainer.masks && mask ≢ nothing) || return nothing
+    width, height = view_resolution(trainer.dataset)
+    return device_map(get_backend(trainer.gaussians), mask, width, height)
 end
 
 # An `Adam` holds one moment pair per parameter array, so they are numbered.
@@ -469,12 +507,16 @@ function load_state!(trainer::Trainer, filename::String)
 end
 
 # Convert image from UInt8 to Float32 & permute from (c, w, h) to (w, h, c, 1).
-function get_image(trainer::Trainer, idx::Integer, set::Symbol)
-    kab = get_backend(trainer.gaussians)
-    target_image = get_image(trainer.dataset, kab, idx, set)
-    target_image = permutedims(target_image, (2, 3, 1))
-    return reshape(target_image, size(target_image)..., 1)
+function device_target(trainer::Trainer, image::Array{UInt8, 3})
+    image = device_image(get_backend(trainer.gaussians), image)
+    image = permutedims(image, (2, 3, 1))
+    return reshape(image, size(image)..., 1)
 end
+
+# Read view `idx` from disk & convert it, for callers outside the train loop
+# (which goes through `take_view!` to overlap the read with the previous step).
+get_image(trainer::Trainer, idx::Integer, set::Symbol) =
+    device_target(trainer, load_image(trainer.dataset, Int(idx), set))
 
 """
 Average SSIM / MSE / PSNR over the test views, each metric computed per view &
@@ -483,6 +525,10 @@ then averaged (the reference implementation's reduction).
 `quantize` rounds the render to 8-bit before scoring, which is what published
 numbers measure - see [`quantize8`](@ref). It costs a bit of accuracy on the
 metric, so it is off for the in-training readout & on for benchmarks.
+
+Masked views are scored against their masked target (see `masking.jl`), so the
+easy black region counts toward the numbers & they are not comparable to
+published ones.
 """
 function validate(trainer::Trainer; quantize::Bool = false)
     gs = trainer.gaussians
@@ -496,7 +542,12 @@ function validate(trainer::Trainer; quantize::Bool = false)
         return (; eval_ssim, eval_mse, eval_psnr)
 
     for (idx, camera) in enumerate(dataset.test_cameras)
-        target_image = get_image(trainer, idx, :test)
+        view = load_view(dataset, idx, :test)
+        target_image = device_target(trainer, view.image)
+        mask = view_mask(trainer, view.mask)
+        # `apply_mask`, not `composite_mask`: the pass below renders over the
+        # rasterizer's default black, whatever the training background was.
+        mask ≡ nothing || (target_image = apply_mask(target_image, mask))
 
         image_features = rast(
             gs.points, gs.opacities, gs.scales,
@@ -521,9 +572,10 @@ function validate(trainer::Trainer; quantize::Bool = false)
         image_eval = reshape(image_tmp, size(image_tmp)..., 1)
         quantize && (image_eval = quantize8(image_eval))
 
+        view_mse = mse(image_eval, target_image)
         eval_ssim += mean(fused_ssim(image_eval; ref=target_image))
-        eval_mse += mse(image_eval, target_image)
-        eval_psnr += psnr(image_eval, target_image)
+        eval_mse += view_mse
+        eval_psnr += psnr_from_mse(view_mse)
     end
     eval_ssim /= length(dataset.test_cameras)
     eval_mse /= length(dataset.test_cameras)
@@ -584,12 +636,19 @@ function step!(trainer::Trainer)
         gs.sh_degree += 1
     end
 
-    if (trainer.step - 1) % length(trainer.dataset) == 0
-        shuffle!(trainer.ids)
-    end
-    idx = trainer.ids[(trainer.step - 1) % length(trainer.dataset) + 1]
+    n_views = length(trainer.dataset)
+    (trainer.step - 1) % n_views == 0 && shuffle!(trainer.ids)
+
+    position = (trainer.step - 1) % n_views + 1
+    idx = trainer.ids[position]
+    view = take_view!(trainer.loader, idx, :train)
+    # Queue the views the next few steps will want, before any GPU work is issued,
+    # so their reads overlap this step.
+    prefetch_start = position + 1
+    prefetch_end = min(position + trainer.loader.lookahead, n_views)
+    prefetch!(trainer.loader, trainer.ids[prefetch_start:prefetch_end])
+
     camera = trainer.dataset.train_cameras[idx]
-    target_image = get_image(trainer, idx, :train)
     sky = trainer.sky
     # The dome *is* the background when it is on, so the scene pass renders
     # over zeros & compositing supplies what is behind it.
@@ -606,43 +665,61 @@ function step!(trainer::Trainer)
 
     kab = get_backend(rast)
     GPUArrays.@cached trainer.cache begin
+        # Coverage mask: the target is blacked out beyond it.
+        mask = view_mask(trainer, view.mask)
+        hard_mask = mask ≡ nothing ? nothing : mask_hard(mask)
+        # Weight of the alpha term that empties the rest of the frame.
+        # Black target alone would accept an opaque black gaussian instead.
+        empty_weight =
+            (mask ≡ nothing || trainer.step < params.mask_opacity_from_iter) ?
+            nothing : 1f0 .- mask
+
+        # Composite target image over the same background the pass renders through.
+        # Required for `random_background` to work.
+        target_image = device_target(trainer, view.image)
+        mask ≡ nothing || (target_image = composite_mask(target_image, mask, background))
+
         # Depth supervision target for this view.
         depth_data = if anchor ≡ nothing
             nothing
         else
-            prior = adapt(kab, trainer.dataset.train_depths[idx])
-            target, half_band, valid, far_extrap = depth_target(
-                anchor, prior, trainer.dataset.train_depth_qsteps[idx])
-            # Depth dominates early geometry formation,
-            # photometric loss wins fine detail late.
+            prior = device_map(kab, view.depth, view_resolution(trainer.dataset)...)
+            target, half_band, valid, far_extrap = depth_target(anchor, prior, view.depth_qstep)
+            # If masks are present in dataset, use depth supervision only inside masks.
+            hard_mask ≡ nothing || (valid = valid .& hard_mask)
+            # Depth dominates early geometry formation, photometric loss wins fine detail late.
             decay = params.depth_loss_final_scale^clamp(
                 Float32(trainer.step / params.depth_loss_steps), 0f0, 1f0)
             weight = params.depth_loss_weight * decay
             (; target, half_band, valid, far_extrap, weight)
         end
 
-        # Geometry regularization starts once the geometry is roughly in place:
-        # depth-implied normals are meaningless while the scene is still forming.
+        # Geometry regularization starts once the geometry is roughly in place.
         normal_data = if !trainer.normals || trainer.step < params.normal_from_iter
             nothing
         else
-            (; rays=pixel_rays(kab, camera))
+            (; rays=pixel_rays(kab, camera), valid=hard_mask)
         end
 
-        # Sky mask supervision, once the geometry has started to form: driving
-        # alpha to zero against a still-random scene would only carve holes.
+        # Sky mask supervision, once the geometry is roughly in place.
         sky_weight = if !trainer.sky_loss || trainer.step < params.sky_loss_from_iter
             nothing
         else
-            mask = trainer.dataset.train_sky_masks[idx]
-            mask ≡ nothing ? nothing : adapt(kab, mask)
+            sky_mask = view.sky_mask
+            if sky_mask ≡ nothing
+                nothing
+            else
+                w = device_map(kab, sky_mask, view_resolution(trainer.dataset)...)
+                # Take into account `mask` if present.
+                mask ≡ nothing ? w : w .* mask
+            end
         end
 
         loss, ∇ = Zygote.withgradient(
-            θ..., bgrid ≡ nothing ? nothing : bgrid.grids,
+            θ...,
+            bgrid ≡ nothing ? nothing : bgrid.grids,
             sky ≡ nothing ? nothing : sky.gaussians.features_dc,
-        ) do means_3d, features_dc, features_rest, opacities, scales, rotations,
-                bgrids, sky_features
+        ) do means_3d, features_dc, features_rest, opacities, scales, rotations, bgrids, sky_features
             image_features = rast(
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
                 camera, sh_degree=gs.sh_degree, background)
@@ -654,27 +731,22 @@ function step!(trainer::Trainer)
             # pullback once the depth term adds a second use, crashing
             # gradient accumulation with a shape mismatch.
             image = image_features[1:3, :, :]
-
-            # Sliced once & shared by the depth, normal & sky terms, for the same
-            # reason: re-slicing a channel for a second consumer trips the
-            # gradient mis-routing described above.
-            # All of them imply a `:rgbd`/`:rgbdn` rasterizer, so the rows exist whenever they run.
+            # NOTE: Same as above.
             depth_img, alpha_img = if (
-                depth_data ≡ nothing && normal_data ≡ nothing && sky_features ≡ nothing
+                depth_data ≡ nothing &&
+                normal_data ≡ nothing &&
+                sky_features ≡ nothing &&
+                empty_weight ≡ nothing
             )
                 nothing, nothing
             else
                 image_features[4, :, :], image_features[5, :, :]
             end
 
-            # Composite the far-field dome behind the scene. Ahead of the
-            # appearance correction, which models the camera's response and so
-            # applies to the sky as much as to the scene.
+            # Composite Sky Dome behind the scene.
             if sky_features ≢ nothing
-                image = composite_sky(
-                    image, alpha_img, render_sky(sky, camera, sky_features))
+                image = composite_sky(image, alpha_img, render_sky(sky, camera, sky_features))
             end
-
             # Per-view appearance correction before the photometric loss.
             if bgrids ≢ nothing
                 image = bilateral_slice(image, bgrids[:, :, :, :, idx])
@@ -684,9 +756,7 @@ function step!(trainer::Trainer)
             image_tmp = permutedims(image, (2, 3, 1))
             image_eval = reshape(image_tmp, size(image_tmp)..., 1)
 
-            # Every term is bound to a local *after* weighting, so the same
-            # value both enters `total` and is recorded below: the breakdown
-            # cannot drift out of sync with the loss it describes.
+            # Compute losses.
             l1 = mean(abs.(image_eval .- target_image))
             s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
 
@@ -696,6 +766,7 @@ function step!(trainer::Trainer)
             tv_term = 0f0
             depth_term = 0f0
             sky_term = 0f0
+            mask_term = 0f0
             flatten_term = 0f0
             normal_term = 0f0
 
@@ -719,9 +790,12 @@ function step!(trainer::Trainer)
             end
 
             if sky_weight ≢ nothing
-                sky_term = params.sky_loss_weight *
-                    sky_opacity_loss(alpha_img, sky_weight)
+                sky_term = params.sky_loss_weight * zero_alpha_loss(alpha_img, sky_weight)
                 total += sky_term
+            end
+            if empty_weight ≢ nothing
+                mask_term = params.mask_opacity_weight * zero_alpha_loss(alpha_img, empty_weight)
+                total += mask_term
             end
 
             if normal_data ≢ nothing
@@ -729,12 +803,12 @@ function step!(trainer::Trainer)
                 normal_term =
                     params.normal_consistency_weight *
                     depth_normal_consistency_loss(
-                        depth_img, alpha_img, image_features[6:8, :, :]; normal_data.rays)
+                        depth_img, alpha_img, image_features[6:8, :, :];
+                        normal_data.rays, normal_data.valid)
                 total += flatten_term + normal_term
             end
 
-            # Recording only; `ignore_derivatives` keeps the struct mutation out
-            # of the tape entirely, so Zygote never sees it.
+            # Save loss terms for logging.
             ignore_derivatives() do
                 b = trainer.losses.current
                 b.total = total
@@ -744,6 +818,7 @@ function step!(trainer::Trainer)
                 b.tv = tv_term
                 b.depth = depth_term
                 b.sky = sky_term
+                b.mask = mask_term
                 b.flatten = flatten_term
                 b.normal = normal_term
                 nothing

@@ -278,45 +278,16 @@ function merge_sky(gs::GaussianModel, sky_gs::GaussianModel)
 end
 
 """
-Load a sky mask as a `(width, height)` Float32 weight map in `[0, 1]`, resized
-to the training resolution. Mirrors `load_depth_prior`'s layout conventions.
+    zero_alpha_loss(alpha, weight)
 
-Kept soft rather than thresholded: the mask is resized, so its border pixels
-are genuinely fractional & should pull proportionally. Consumers that need a
-hard decision threshold it themselves (see `sky_hard`).
+Pull the scene's accumulated alpha to zero where `weight` says nothing should be:
+sky rays (`sky/`) and everything outside a coverage mask (`masks/`, see `masking.jl`).
+
+`alpha` must be the raw channel-5 render, not clamped.
 """
-function load_sky_mask(path::String, width::Int, height::Int)
-    raw = load(path)
-    mask = Float32.(Gray.(raw))
-    mask = imresize(mask, (height, width))
-    return clamp!(permutedims(mask, (2, 1)), 0f0, 1f0)
-end
-
-# Threshold for uses that cannot act on a fraction of a pixel, i.e. dropping
-# a pixel from depth supervision.
-sky_hard(mask::AbstractMatrix{Float32}) = mask .> 0.5f0
-
-"""
-    sky_opacity_loss(alpha, sky_weight)
-
-Pull the scene's accumulated alpha to zero on sky rays: the mask-driven half of
-the floater fix. Where the dome merely makes `α = 0` in the sky *possible*,
-this makes anything else *cost* something.
-
-`alpha` must be the raw channel-5 render, not a clamped copy — Zygote's `clamp`
-adjoint is zero at the bound, so a saturated pixel (exactly the floater this
-targets) would silently lose the cotangent (the same trap is documented in
-`ssi_depth_loss`).
-
-`α²` rather than `-log(1 - α)`: bounded gradient at `α → 1` where training
-starts, and a vanishing one at `α → 0` so it stops pushing once the sky is
-clear instead of fighting the photometric loss over the last few percent.
-"""
-function sky_opacity_loss(
-    alpha::AbstractMatrix{Float32}, sky_weight::AbstractMatrix{Float32},
-)
-    Σw = ignore_derivatives(max(sum(sky_weight), 1f0))
-    return sum(sky_weight .* alpha .^ 2) / Σw
+function zero_alpha_loss(alpha::AbstractMatrix{Float32}, weight::AbstractMatrix{Float32})
+    Σw = ignore_derivatives(max(sum(weight), 1f0))
+    return sum(weight .* alpha .^ 2) / Σw
 end
 
 function write_state!(tensors, meta, prefix::String, sky::SkyDome)

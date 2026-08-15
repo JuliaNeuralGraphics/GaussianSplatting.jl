@@ -4,6 +4,7 @@ struct ViewSnapshot
     camera::Camera
     sh_degree::Int # -1 means use value from the model.
     mode::Int # 0 - color, 1 - depth.
+    background::SVector{3, Float32} # Color the splats are composited over.
 end
 
 # Host-side frame handed from the worker to the UI thread.
@@ -290,7 +291,8 @@ function publish_view!(gui)::UInt64
     snap = ViewSnapshot(
         deepcopy(gui.camera),
         Int(gui.ui_state.sh_degree[]),
-        Int(gui.ui_state.selected_mode[]))
+        Int(gui.ui_state.selected_mode[]),
+        SVector{3, Float32}(gui.ui_state.background_color))
     version = lock(w.lock) do
         w.snapshot = snap
         w.snapshot_version += 1
@@ -648,13 +650,15 @@ function render_view!(gui, w::RenderWorker, snap::ViewSnapshot, version::UInt64)
     gs = gui.gaussians
     if gs ≡ nothing || length(gs) == 0
         # Empty scene (no dataset loaded yet): display background color.
-        fill!(back.data, 0f0)
+        for c in 1:3
+            @view(back.data[c, :, :]) .= snap.background[c]
+        end
     else
         sh_degree = snap.sh_degree == -1 ? gs.sh_degree : snap.sh_degree
         rast(
             gs.points, gs.opacities, gs.scales,
             gs.rotations, gs.features_dc, gs.features_rest;
-            camera, sh_degree)
+            camera, sh_degree, background=snap.background)
         # Only touches the color rows, so the depth view & orbit picking below
         # still read pure scene geometry.
         sky ≡ nothing || composite_sky!(rast, sky, camera; sky_rast)

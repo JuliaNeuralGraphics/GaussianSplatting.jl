@@ -32,6 +32,10 @@ Base.@kwdef mutable struct UIState
     selected_mode::Ref{Int32} = Ref{Int32}(0)
     render_modes::Vector{String} = ["Color", "Depth"]
 
+    # Color the splats are composited over in the viewer (RGB in [0, 1]).
+    # A `Vector` because ImGui's color picker writes through the pointer.
+    background_color::Vector{Float32} = zeros(Float32, 3)
+
     # UI-side caches of worker-owned state (set on scene install).
     max_sh_degree::Int = 0
     is_mcmc::Bool = false
@@ -64,6 +68,9 @@ Base.@kwdef mutable struct UIState
     dataset_sky_dome_shape::Ref{Int32} = Ref{Int32}(0)
     # Composite train renders over a random background (see `OptimizationParams`).
     dataset_random_background::Ref{Bool} = Ref(false)
+    # Read the dataset's `masks/` directory (see `masking.jl`). Gates the
+    # dataset side of it too, not just the loss: `ColmapDataset(; use_masks)`.
+    dataset_masks::Ref{Bool} = Ref(true)
     # Hyperparameters the new trainer starts from: defaults, or everything a
     # loaded TOML file specifies (see `params_io.jl`). The controls above own
     # the fields they expose & are applied over this on `Open`.

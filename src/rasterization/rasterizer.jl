@@ -57,13 +57,21 @@ the depth-normal consistency loss requires a rendered normal channel.
 training_rasterizer_mode(opt_params::OptimizationParams) =
     opt_params.use_normal_loss ? :rgbdn : :rgbd
 
+"""
+The ndrange that covers `width × height` in whole tiles.
+Round frame tiles *up*, `render!` & `∇render!` handle out-of-bounds access
+and those threads just help with prefetching the data.
+"""
+tile_ndrange(width::Int, height::Int) = (
+    cld(width, BLOCK[1]) * BLOCK[1],
+    cld(height, BLOCK[2]) * BLOCK[2])
+
 function GaussianRasterizer(kab;
     width::Int, height::Int,
     mode::Symbol = :rgbd,
     near_plane::Float32 = 0.2f0,
     far_plane::Float32 = 1000f0,
 )
-    @assert width % 16 == 0 && height % 16 == 0
     modes = (:rgb, :rgbd, :rgbdn)
     mode in modes || error("Invalid render: $mode ∉ $modes")
 
@@ -278,8 +286,6 @@ function rasterize(
     end
 
     (; width, height) = resolution(camera)
-    @assert width % 16 == 0 && height % 16 == 0
-
     fill!(rast.image, 0f0)
 
     K = camera.intrinsics
@@ -390,7 +396,7 @@ function rasterize(
         render_depth ? _as_T(SVector{5, Float32}, rast.gstate.color_features) :
         rast.gstate.rgbs
 
-    render!(kab, (Int.(BLOCK)...,), (width, height))(
+    render!(kab, (Int.(BLOCK)...,), tile_ndrange(width, height))(
         # Outputs.
         rast.image, rast.istate.n_contrib, rast.istate.accum_α,
         covisibilities, uncertainties,
@@ -432,8 +438,6 @@ function ∇rasterize(
     n = size(means_3d, 2)
 
     (; width, height) = resolution(camera)
-    @assert width % 16 == 0 && height % 16 == 0
-
     vcolor_features = KA.zeros(kab, Float32, (channels, n))
     vconics = KA.zeros(kab, Float32, (3, n))
     vcov = KA.zeros(kab, Float32, (6, n))
@@ -457,7 +461,7 @@ function ∇rasterize(
         render_depth ? reshape(reinterpret(SVector{5, Float32}, vpixels), size(vpixels)[2:3]) :
         reshape(reinterpret(SVector{3, Float32}, vpixels), size(vpixels)[2:3])
 
-    ∇render!(kab, (Int.(BLOCK)...,), (width, height))(
+    ∇render!(kab, (Int.(BLOCK)...,), tile_ndrange(width, height))(
         # Outputs.
         vcolor_features,
         vopacities,

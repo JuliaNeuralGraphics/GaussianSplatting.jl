@@ -451,6 +451,39 @@ end
     @test grad(10f0 * sky_z, two_sided) > 0f0
 end
 
+@testset "Coverage-masked depth supervision" begin
+    ssi_depth_loss = GaussianSplatting.ssi_depth_loss
+    anchor = GaussianSplatting.DepthAnchor(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
+    dfloor = anchor.floor
+
+    # Every target lands inside the fit's support, so nothing is one-sided.
+    prior = Float32[0.5 0.7; 0.8 0.6]
+    target, half_band, valid, far_extrap = GaussianSplatting.depth_target(
+        anchor, prior, 1f0 / 255f0)
+    @test !any(far_extrap)
+
+    alpha = ones(Float32, 2, 2)
+    on_target = 1f0 ./ target .- dfloor
+    # `(width, height)`: the mask drops the second column of pixels.
+    mask = Float32[1f0 1f0; 0f0 0f0]
+    masked_valid = valid .& GaussianSplatting.mask_hard(mask)
+
+    loss(depth, v) = ssi_depth_loss(
+        depth, alpha; target, half_band, valid=v, far_extrap,
+        depth_floor=dfloor, λ_grad=1f0)
+
+    # Depth is gated by the mask: wrong where it drops, nothing to answer for.
+    outside = copy(on_target)
+    outside[2, :] .*= 5f0
+    @test loss(outside, masked_valid) ≈ 0f0 atol=1f-8
+    @test loss(outside, valid) > 0f0
+
+    # Wrong inside the mask is still supervised.
+    inside = copy(on_target)
+    inside[1, :] .*= 2f0
+    @test loss(inside, masked_valid) > 0f0
+end
+
 @testset "MCMC relocation (Eq. 9)" begin
     strategy = GaussianSplatting.MCMCStrategy()
     relocation_params = GaussianSplatting.relocation_params
@@ -677,6 +710,17 @@ end
     @test GaussianSplatting.depth_normal_consistency_loss(
         D, adapt(kab, fill(0.4f0, width, height)), N; rays=(rx, ry)) == 0f0
 
+    # A coverage mask restricts the term the same way (see `masking.jl`):
+    # nothing kept, nothing to be consistent with.
+    F = adapt(kab, flat)
+    @test GaussianSplatting.depth_normal_consistency_loss(
+        D, A, F; rays=(rx, ry),
+        valid=adapt(kab, falses(width, height))) == 0f0
+    # A mask covering everything is the same as no mask at all.
+    @test GaussianSplatting.depth_normal_consistency_loss(
+        D, A, F; rays=(rx, ry), valid=adapt(kab, trues(width, height))) ≈
+        GaussianSplatting.depth_normal_consistency_loss(D, A, F; rays=(rx, ry))
+
     # Gradients flow to depth, alpha & the rendered normals.
     _, ∇ = Zygote.withgradient(D, A, adapt(kab, flat)) do d, a, nn
         GaussianSplatting.depth_normal_consistency_loss(d, a, nn; rays=(rx, ry))
@@ -737,6 +781,98 @@ end
         sum(features[6:8, :, :] .* weights)
     end
     @test size(∇rot) == size(gaussians.rotations)
+    @test all(isfinite, Array(∇rot))
+    @test maximum(abs, Array(∇rot)) > 0f0
+end
+
+@testset "Partial tiles (resolution not a multiple of the tile size)" begin
+    NU = GaussianSplatting.NU
+
+    # The same scene rendered through the same *pixel grid* twice: once at a
+    # tile-aligned resolution, once at one that leaves the last tile of every
+    # row & column short. Nothing about the camera changes but how much of the
+    # grid is kept, so the smaller render has to equal the larger one over the
+    # region they share — which is the claim `render!`'s `inside` gating makes.
+    big_w, big_h = 64, 48
+    small_w, small_h = 61, 45
+
+    focal = SVector{2, Float32}(100f0, 100f0)
+    # `principal` is a fraction of the resolution, so holding the *pixel*
+    # principal point fixed across the two takes different fractions.
+    principal_px = SVector{2, Float32}(0.5f0 * big_w, 0.5f0 * big_h)
+    function grid_camera(width, height)
+        intrinsics = NU.CameraIntrinsics(
+            nothing, focal,
+            principal_px ./ SVector{2, Float32}(width, height),
+            SVector{2, UInt32}(width, height))
+        return GaussianSplatting.Camera(
+            SMatrix{3, 3, Float32, 9}(I), zeros(SVector{3, Float32});
+            intrinsics, img_name="")
+    end
+
+    xs = range(-0.6f0, 0.6f0; length=8)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n_points = size(points, 2)
+    colors = adapt(kab, rand(Float32, 3, n_points))
+    scales = adapt(kab, repeat(Float32[log(0.2f0), log(0.2f0), log(0.01f0)], 1, n_points))
+
+    gaussians = GaussianSplatting.GaussianModel(kab,
+        points, colors, scales; max_sh_degree=0, isotropic=false)
+    gaussians.opacities .= 5f0
+
+    render(camera) = Array(GaussianSplatting.GaussianRasterizer(
+        kab, camera; mode=:rgbdn)(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+            camera, sh_degree=0))
+
+    small_camera = grid_camera(small_w, small_h)
+    big = render(grid_camera(big_w, big_h))
+    small = render(small_camera)
+
+    @test size(small) == (8, small_w, small_h)
+
+    # Deliberately *not* asserting the two renders agree numerically. Nothing
+    # promises that: `principal` is stored as a fraction of the resolution &
+    # multiplied back in `perspective_projection`, so the pixel principal point
+    # only round-trips exactly when the resolution divides it evenly
+    # (`32/64*64` does, `32/61*61` lands an ulp low). The resulting ~4f-6 px
+    # shift in the projected means flips tile-boundary comparisons in
+    # `get_rect`, rebinning marginal gaussians. The invariants below hold at any
+    # resolution & are what partial-tile correctness actually rests on.
+    α = small[5, :, :]
+    α_big = big[5, :, :]
+    @test all(isfinite, small)
+    @test all(0f0 .≤ α .≤ 1f0)
+
+    # This scene covers the whole frame at both sizes, so the *last* column &
+    # row — the ones living in a tile that is only 13 of 16 pixels wide — must
+    # be rendered. A skipped partial tile leaves them at zero.
+    @test any(α_big[end, :] .> 0.5f0) && any(α_big[:, end] .> 0.5f0)
+    @test any(α[end, :] .> 0.5f0)
+    @test any(α[:, end] .> 0.5f0)
+
+    # Every covered pixel satisfies the plane's analytic `normal == -alpha`,
+    # including the ones in partial tiles: garbage there fails this, a rebinned
+    # gaussian does not.
+    @test all(isapprox.(small[8, :, :][α .> 0.5f0], -α[α .> 0.5f0]; atol=1f-3))
+    @test maximum(abs, small[6, :, :]) < 1f-4
+    @test maximum(abs, small[7, :, :]) < 1f-4
+    # Coverage is a smooth plane, so it cannot jump at the last tile boundary
+    # (x = 48, the start of the partial column) — a half-rendered tile would.
+    @test maximum(abs, α[49, :] .- α[48, :]) < 0.1f0
+
+    # ...and the backward kernel's own `inside` gating.
+    weights = adapt(kab, randn(Float32, 3, small_w, small_h))
+    rast = GaussianSplatting.GaussianRasterizer(kab, small_camera; mode=:rgbdn)
+    _, (∇rot,) = Zygote.withgradient(gaussians.rotations) do rotations
+        features = rast(
+            gaussians.points, gaussians.opacities, gaussians.scales,
+            rotations, gaussians.features_dc, gaussians.features_rest;
+            camera=small_camera, sh_degree=0)
+        sum(features[6:8, :, :] .* weights)
+    end
     @test all(isfinite, Array(∇rot))
     @test maximum(abs, Array(∇rot)) > 0f0
 end
@@ -881,15 +1017,15 @@ end
     @test_throws ErrorException sky_dome_directions(64, :dome, up)
 end
 
-@testset "sky_opacity_loss" begin
-    sky_opacity_loss = GaussianSplatting.sky_opacity_loss
+@testset "zero_alpha_loss" begin
+    zero_alpha_loss = GaussianSplatting.zero_alpha_loss
 
     alpha = adapt(kab, Float32[0.9 0.1; 0.5 1.0])
     mask = adapt(kab, Float32[1 0; 0 1])
     # Masked mean of α², normalized by the mask weight.
-    @test sky_opacity_loss(alpha, mask) ≈ (0.9f0^2 + 1f0^2) / 2f0
+    @test zero_alpha_loss(alpha, mask) ≈ (0.9f0^2 + 1f0^2) / 2f0
 
-    _, (∇,) = Zygote.withgradient(a -> sky_opacity_loss(a, mask), alpha)
+    _, (∇,) = Zygote.withgradient(a -> zero_alpha_loss(a, mask), alpha)
     g = Array(∇)
     @test all(iszero, g[[2, 3]])       # Unmasked pixels are untouched.
     @test g[1, 1] > 0f0 && g[2, 2] > 0f0 # Masked ones are pushed toward zero.
@@ -898,7 +1034,66 @@ end
     @test g[2, 2] ≈ 2f0 * 1f0 / 2f0
 
     # An empty mask must not divide by zero.
-    @test sky_opacity_loss(alpha, adapt(kab, zeros(Float32, 2, 2))) == 0f0
+    @test zero_alpha_loss(alpha, adapt(kab, zeros(Float32, 2, 2))) == 0f0
+end
+
+@testset "Coverage masks" begin
+    apply_mask = GaussianSplatting.apply_mask
+
+    width, height = 32, 24
+    # The left half is kept, with one soft border column: a resized mask has
+    # fractional pixels & they are supposed to weigh fractionally.
+    m = zeros(Float32, width, height)
+    m[1:16, :] .= 1f0
+    m[17, :] .= 0.5f0
+    dropped = 18:width
+
+    mask = adapt(kab, m)
+    @test Array(GaussianSplatting.mask_hard(mask)) == (m .> 0.5f0)
+
+    # The target is the image where the mask keeps it & black outside.
+    image = adapt(kab, rand(Float32, width, height, 3, 1))
+    target = apply_mask(image, mask)
+    @test size(target) == size(image)
+    @test all(iszero, Array(target)[dropped, :, :, :])
+    @test Array(target)[1:16, :, :, :] == Array(image)[1:16, :, :, :]
+    @test Array(target)[17, :, :, :] ≈ 0.5f0 .* Array(image)[17, :, :, :]
+
+    # Black outside is a target like any other: the region is supervised, so a
+    # render that puts something there is penalized & pushed to clear it.
+    photometric(img) =
+        0.8f0 * mean(abs.(img .- target)) +
+        0.2f0 * (1f0 - mean(GaussianSplatting.fused_ssim(img; ref=target)))
+
+    @test photometric(target) ≈ 0f0 atol=1f-5
+
+    dirty = Array(target)
+    dirty[dropped, :, :, :] .= 0.7f0
+    D = adapt(kab, dirty)
+    @test photometric(D) > 0f0
+    _, (∇,) = Zygote.withgradient(photometric, D)
+    g = Array(∇)
+    @test all(>(0f0), g[dropped, :, :, :]) # Downward, toward black.
+
+    # Color alone would accept an opaque *black* gaussian there, so alpha is
+    # supervised on the mask complement — the term that says empty, not dark.
+    empty_weight = 1f0 .- mask
+    alpha = adapt(kab, fill(0.8f0, width, height))
+    @test GaussianSplatting.zero_alpha_loss(alpha, empty_weight) ≈ 0.8f0^2
+    _, (∇α,) = Zygote.withgradient(a ->
+        GaussianSplatting.zero_alpha_loss(a, empty_weight), alpha)
+    gα = Array(∇α)
+    @test all(iszero, gα[1:16, :])       # The subject is left alone,
+    @test all(>(0f0), gα[dropped, :])    # the rest is pushed to zero.
+
+    # A mask keeping less than one pixel keeps nothing: such views are dropped
+    # at load rather than trained against an all-black target.
+    empty = zeros(Float32, width, height)
+    @test GaussianSplatting.mask_is_empty(empty)
+    empty[1, 1] = 0.4f0
+    @test GaussianSplatting.mask_is_empty(empty)
+    empty[2, 1] = 1f0
+    @test !GaussianSplatting.mask_is_empty(empty)
 end
 
 @testset "Checkpoint" begin
