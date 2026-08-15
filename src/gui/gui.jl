@@ -118,11 +118,39 @@ function enable_docking!()
     return
 end
 
+"""
+Controls (left) | Scene (center) | Training Details (right),
+in the proportions the app ships with (see `imgui.ini`).
+"""
+function build_default_layout!(dockspace_id)
+    id_training, id_left = Ref{CImGui.ImGuiID}(0), Ref{CImGui.ImGuiID}(0)
+    CImGui.DockBuilderSplitNode(dockspace_id, CImGui.ImGuiDir_Right, 0.25f0, id_training, id_left)
+
+    id_controls, id_scene = Ref{CImGui.ImGuiID}(0), Ref{CImGui.ImGuiID}(0)
+    CImGui.DockBuilderSplitNode(id_left[], CImGui.ImGuiDir_Left, 0.25f0, id_controls, id_scene)
+
+    CImGui.DockBuilderDockWindow("GaussianSplatting", id_controls[])
+    CImGui.DockBuilderDockWindow("Scene", id_scene[])
+    CImGui.DockBuilderDockWindow("Training Details", id_training[])
+    CImGui.DockBuilderFinish(dockspace_id)
+    return
+end
+
+# Whether `dockspace_id` already has a layout:
+# either restored from `imgui.ini`, or already built by `build_default_layout!` earlier.
+function has_layout(dockspace_id)
+    node = CImGui.DockBuilderGetNode(dockspace_id)
+    node == C_NULL && return false
+    return unsafe_load(node.ChildNodes)[1] != C_NULL
+end
+
 function dockspace!()
     # Passthru central node keeps the scene visible & interactive where no window is docked.
-    return CImGui.DockSpaceOverViewport(
+    dockspace_id = CImGui.DockSpaceOverViewport(
         0, CImGui.GetMainViewport(),
         CImGui.ImGuiDockNodeFlags_PassthruCentralNode)
+    has_layout(dockspace_id) || build_default_layout!(dockspace_id)
+    return dockspace_id
 end
 
 function look_at(position, target, up)
