@@ -11,6 +11,12 @@ Base.@kwdef struct OptimizationParams
     lr_scales::Float32 = 5f-3
     lr_rotations::Float32 = 1f-3
 
+    # Sparse Adam (see `sparse_adam.jl`):
+    # skips the moment-buffer decay and parameter write for gaussians
+    # not visible in the current view's rasterization (per `rast.gstate.radii`),
+    # instead of updating all `N` gaussians densely every step.
+    use_sparse_adam::Bool = false
+
     # Composite each train render over a random background instead of the black one.
     # Over black, `c·α + bkgd·T` cannot see `T` at all:
     # a half-transparent gaussian with a brighter color renders exactly
@@ -26,7 +32,7 @@ Base.@kwdef struct OptimizationParams
 
     # Depth supervision with monocular priors (see `depth_supervision.jl`).
     # Requires depth maps next to the dataset images, an init point cloud and a `:rgbd` rasterizer.
-    use_depth_loss::Bool = true
+    use_depth_loss::Bool = false
     depth_loss_weight::Float32 = 2f0
     depth_loss_mode::Symbol = :ssi # :ssi (auto), :ssi_disparity, :ssi_depth
     depth_loss_steps::Int = 30_000 # Weight decays to `depth_loss_final_scale` by this step.
@@ -56,7 +62,7 @@ Base.@kwdef struct OptimizationParams
     # Sky mask supervision (see `sky_dome.jl`): pulls the scene's accumulated
     # alpha to zero on sky rays, so a floater there costs something.
     # Inert unless sky masks were found next to the dataset images.
-    use_sky_loss::Bool = true
+    use_sky_loss::Bool = false
     sky_loss_weight::Float32 = 1f0
     sky_loss_from_iter::Int = 500
 
@@ -68,7 +74,7 @@ Base.@kwdef struct OptimizationParams
     # Gates the loss side. `ColmapDataset` takes a `use_masks` of its own for
     # the load side (the carve & the dropped views); the GUI & `main` pass this
     # one through to it, so the two agree.
-    use_masks::Bool = true
+    use_masks::Bool = false
     # Pull of the accumulated alpha toward zero outside the mask.
     mask_opacity_weight::Float32 = 0.1f0
     mask_opacity_from_iter::Int = 500

@@ -840,6 +840,7 @@ function step!(trainer::Trainer)
 
         # Apply gradients.
         θ_names = (:points, :features_dc, :features_rest, :opacities, :scales, :rotations)
+        radii = rast.gstate.radii
         for i in 1:length(θ)
             θᵢ = θ[i]
             isempty(θᵢ) && continue
@@ -850,7 +851,11 @@ function step!(trainer::Trainer)
                 # `sum` propagates non-finite values in a single cheap reduction.
                 isfinite(sum(∇ᵢ)) || error(nonfinite_gradient_report(trainer, θ, θ_names, ∇, camera, idx))
             end
-            NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
+            if trainer.opt_params.use_sparse_adam
+                sparse_step!(trainer.optimizers[i], θᵢ, ∇ᵢ, radii; dispose=false)
+            else
+                NU.step!(trainer.optimizers[i], θᵢ, ∇ᵢ; dispose=false)
+            end
         end
 
         # Trailing `withgradient` arguments, in the order they are passed.

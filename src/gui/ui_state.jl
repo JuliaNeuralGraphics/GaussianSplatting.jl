@@ -66,11 +66,16 @@ Base.@kwdef mutable struct UIState
     dataset_sky_dome::Ref{Bool} = Ref(false)
     # Index into `SKY_DOME_SHAPES`.
     dataset_sky_dome_shape::Ref{Int32} = Ref{Int32}(0)
+    # Supervise the accumulated alpha with the dataset's `sky/` masks
+    # (see `sky_dome.jl`). Inert unless the dataset has them.
+    dataset_sky_loss::Ref{Bool} = Ref(false)
     # Composite train renders over a random background (see `OptimizationParams`).
     dataset_random_background::Ref{Bool} = Ref(false)
     # Read the dataset's `masks/` directory (see `masking.jl`). Gates the
     # dataset side of it too, not just the loss: `ColmapDataset(; use_masks)`.
     dataset_masks::Ref{Bool} = Ref(true)
+    # Skip the Adam update for gaussians not visible this step (see `sparse_adam.jl`).
+    dataset_sparse_adam::Ref{Bool} = Ref(false)
     # Hyperparameters the new trainer starts from: defaults, or everything a
     # loaded TOML file specifies (see `params_io.jl`). The controls above own
     # the fields they expose & are applied over this on `Open`.
