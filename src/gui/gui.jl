@@ -610,7 +610,8 @@ effective_opt_params(ui_state::UIState) = with_params(
     random_background = ui_state.dataset_random_background[],
     use_masks = ui_state.dataset_masks[],
     use_sky_dome = ui_state.dataset_sky_dome[],
-    sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1])
+    sky_dome_shape = SKY_DOME_SHAPES[ui_state.dataset_sky_dome_shape[] + 1],
+    use_sparse_adam = ui_state.dataset_sparse_adam[])
 
 # The reverse: seed the controls from a just-loaded file, so what the modal
 # shows is what the file asked for rather than the previous selection.
@@ -623,6 +624,7 @@ function sync_params_controls!(ui_state::UIState, params::OptimizationParams)
     ui_state.dataset_sky_dome[] = params.use_sky_dome
     shape = findfirst(==(params.sky_dome_shape), SKY_DOME_SHAPES)
     ui_state.dataset_sky_dome_shape[] = Int32(something(shape, 1) - 1)
+    ui_state.dataset_sparse_adam[] = params.use_sparse_adam
     return
 end
 
@@ -848,6 +850,16 @@ function open_dataset_modal!(gui::GSGUI)
             "masks; unchecking ignores them even when it does, which is what " *
             "masks that do not match their images or poses need.\nPair with " *
             "`Random background`.")
+    end
+
+    CImGui.Checkbox("Sparse Adam", ui_state.dataset_sparse_adam)
+    if CImGui.IsItemHovered()
+        CImGui.SetTooltip(
+            "Skip the optimizer update for gaussians not visible in a given " *
+            "step's view, instead of updating all of them densely.\n" *
+            "Speeds up training on scenes where each view only touches a " *
+            "small fraction of the gaussians; a known approximation from " *
+            "the \"Taming 3DGS\" / gsplat `SparseGaussianAdam` line of work.")
     end
 
     params_file_row!(ui_state)

@@ -71,6 +71,8 @@ Base.@kwdef mutable struct UIState
     # Read the dataset's `masks/` directory (see `masking.jl`). Gates the
     # dataset side of it too, not just the loss: `ColmapDataset(; use_masks)`.
     dataset_masks::Ref{Bool} = Ref(true)
+    # Skip the Adam update for gaussians not visible this step (see `sparse_adam.jl`).
+    dataset_sparse_adam::Ref{Bool} = Ref(false)
     # Hyperparameters the new trainer starts from: defaults, or everything a
     # loaded TOML file specifies (see `params_io.jl`). The controls above own
     # the fields they expose & are applied over this on `Open`.

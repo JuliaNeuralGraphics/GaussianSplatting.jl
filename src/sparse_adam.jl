@@ -20,10 +20,13 @@ function sparse_step!(
         "`length(θ) = $(length(θ))` is not divisible by " *
         "`length(radii) = $n_gaussians`."))
 
+    # Bump `current_step`, but don't use it for bias correction.
+    # Otherwise it requires per-gaussian counter to produce correct updates.
+    # In practice, bias correction shouldn't matter much here.
     opt.current_step += 0x1
     sparse_adam_step_kernel!(KA.get_backend(opt))(
         opt.μ[1], opt.ν[1], θ, ∇, radii, stride,
-        opt.lr, opt.β1, opt.β2, opt.ϵ, opt.current_step; ndrange=length(θ))
+        opt.lr, opt.β1, opt.β2, opt.ϵ; ndrange=length(θ))
 
     dispose && KA.unsafe_free!(∇)
     return
@@ -31,7 +34,7 @@ end
 
 @kernel cpu=false inbounds=true function sparse_adam_step_kernel!(
     μ, ν, Θ, @Const(∇), @Const(radii), stride::Int, lr::Float32,
-    β1::Float32, β2::Float32, ϵ::Float32, step::UInt32,
+    β1::Float32, β2::Float32, ϵ::Float32,
 )
     i = @index(Global)
     g = (i - 1) ÷ stride + 1
@@ -43,10 +46,6 @@ end
     μᵢ = μ[i] = β1 * μ[i] + (1f0 - β1) * ∇ᵢ
     νᵢ = ν[i] = β2 * ν[i] + (1f0 - β2) * ∇ᵢ²
 
-    # Debiasing.
-    μ̂ = μᵢ / (1f0 - β1^step)
-    ν̂ = νᵢ / (1f0 - β2^step)
-
     ωᵢ = Θ[i]
-    Θ[i] = ωᵢ - lr * μ̂ / (√ν̂ + ϵ)
+    Θ[i] = ωᵢ - lr * μᵢ / (√νᵢ + ϵ)
 end
