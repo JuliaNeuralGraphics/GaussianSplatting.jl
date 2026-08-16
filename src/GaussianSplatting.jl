@@ -263,6 +263,9 @@ function benchmark(kab, dataset_path::String;
         # (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
         (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false)),
         (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false, use_sparse_adam=true)),
+        # ImprovedGS claims the same fidelity at a *lower* final count, so read
+        # this one against the gaussian totals, not the metrics alone.
+        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(; use_depth_loss=false)),
         # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
     ],
 )

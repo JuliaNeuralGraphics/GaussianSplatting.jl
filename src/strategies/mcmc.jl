@@ -89,6 +89,8 @@ function mcmc_binom_coefficients(n_max::Int)
     return binoms
 end
 
+strategy_name(::MCMCStrategy) = "mcmc"
+
 # All of the strategy's state (the binomial table) lives on the host.
 KA.unsafe_free!(::MCMCStrategy) = return
 memory_usage(::MCMCStrategy) = 0

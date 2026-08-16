@@ -115,13 +115,20 @@ function read_state!(m::GaussianModel, ckpt::Checkpoint, prefix::String)
     return
 end
 
-function reset_opacity!(gs::GaussianModel)
-    _reset_opacity!(get_backend(gs), 256)(gs.opacities; ndrange=length(gs.opacities))
+"""
+Cap every opacity at `value`, leaving the already-fainter ones alone.
+The periodic reset that lets 3DGS-style pruning cull Gaussians which never
+earn their opacity back.
+"""
+function reset_opacity!(gs::GaussianModel, value::Float32 = 0.1f0)
+    _reset_opacity!(get_backend(gs), 256)(gs.opacities, value; ndrange=length(gs.opacities))
 end
 
-@kernel cpu=false inbounds=true function _reset_opacity!(opacities::AbstractMatrix{Float32})
+@kernel cpu=false inbounds=true function _reset_opacity!(
+    opacities::AbstractMatrix{Float32}, value::Float32,
+)
     i = @index(Global)
-    new_opacity = min(0.1f0, NU.sigmoid(opacities[i]))
+    new_opacity = min(value, NU.sigmoid(opacities[i]))
     opacities[i] = inverse_sigmoid(new_opacity)
 end
 

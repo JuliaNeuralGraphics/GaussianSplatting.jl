@@ -13,7 +13,7 @@ const CIM_HEADER =
     CImGui.ImGuiTreeNodeFlags_DefaultOpen
 
 # Densification strategies selectable in the UI.
-const STRATEGIES = (:default, :mcmc)
+const STRATEGIES = (:default, :mcmc, :improved_gs)
 
 # Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
 const MAX_SH_DEGREE = 3
@@ -337,7 +337,8 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     control_settings.up_vec = estimate_up_vec(dataset.train_cameras)
     ui_state = UIState()
     ui_state.max_sh_degree = gaussians.max_sh_degree
-    ui_state.is_mcmc = trainer.strategy isa MCMCStrategy
+    ui_state.has_max_cap = hasfield(typeof(trainer.strategy), :max_cap)
+    ui_state.strategy_name = strategy_name(trainer.strategy)
 
     capture_mode = CaptureMode()
 
@@ -406,7 +407,8 @@ function apply_dataset!(gui::GSGUI, loaded)
 
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = loaded.gaussians.max_sh_degree
-    gui.ui_state.is_mcmc = loaded.trainer.strategy isa MCMCStrategy
+    gui.ui_state.has_max_cap = hasfield(typeof(loaded.trainer.strategy), :max_cap)
+    gui.ui_state.strategy_name = strategy_name(loaded.trainer.strategy)
     sync_worker_flags!(gui)
 
     submit!(gui.worker, (:install_scene, loaded))
@@ -466,7 +468,8 @@ function apply_model!(gui::GSGUI, loaded)
 
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = loaded.gaussians.max_sh_degree
-    gui.ui_state.is_mcmc = false
+    gui.ui_state.has_max_cap = false
+    gui.ui_state.strategy_name = ""
     sync_worker_flags!(gui)
 
     submit!(gui.worker, (:install_model, loaded.gaussians))
@@ -505,7 +508,8 @@ function close_scene!(gui::GSGUI)
     reset!(gui.capture_mode)
     reset_ui!(gui.ui_state)
     gui.ui_state.max_sh_degree = 0
-    gui.ui_state.is_mcmc = false
+    gui.ui_state.has_max_cap = false
+    gui.ui_state.strategy_name = ""
     sync_worker_flags!(gui)
 
     submit!(gui.worker, (:close_scene,))

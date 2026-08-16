@@ -38,7 +38,9 @@ Base.@kwdef mutable struct UIState
 
     # UI-side caches of worker-owned state (set on scene install).
     max_sh_degree::Int = 0
-    is_mcmc::Bool = false
+    # Whether the active strategy exposes a `max_cap` knob.
+    has_max_cap::Bool = false
+    strategy_name::String = ""
     # Last error reported by the render worker; empty when none.
     worker_error::String = ""
 

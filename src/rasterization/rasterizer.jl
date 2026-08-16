@@ -32,7 +32,19 @@ mutable struct GaussianRasterizer{
     far_plane::Float32
 
     mode::Symbol
+
+    # Whether `∇render!` also accumulates `gstate.∇means_2d_abs`.
+    # Costs two extra atomics per gaussian-pixel, so it is opt-in: only
+    # `ImprovedGSStrategy` consumes it (see `enable_abs_grad!`).
+    abs_grad::Bool
 end
+
+"""
+Make `∇rasterize` accumulate `gstate.∇means_2d_abs` (`Σₚ |∂L/∂μ|`) on every
+backward pass. Off by default; a `Trainer` turns it on for the strategies that
+densify from the absolute image-space gradient.
+"""
+enable_abs_grad!(rast::GaussianRasterizer) = (rast.abs_grad = true; rast)
 
 function GaussianRasterizer(kab, camera::Camera; kwargs...)
     (; width, height) = resolution(camera)
@@ -92,7 +104,7 @@ function GaussianRasterizer(kab;
         istate, gstate, bstate,
         shs, scales_act, opacities_act,
         image, pinned_image, host_image,
-        grid, near_plane, far_plane, mode)
+        grid, near_plane, far_plane, mode, false)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
 end
@@ -218,6 +230,8 @@ function (rast::GaussianRasterizer)(
 
     covisibilities::Maybe{AbstractVector{Bool}} = nothing,
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
+    edge_scores::Maybe{AbstractVector{Float32}} = nothing,
+    edge_map::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     # If rendering outside AD, use non-allocating path.
     within_AD = within_gradient(means_3d)
@@ -257,7 +271,8 @@ function (rast::GaussianRasterizer)(
 
     return rasterize(
         means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
-        rast, camera, sh_degree, background, covisibilities, uncertainties)
+        rast, camera, sh_degree, background, covisibilities, uncertainties,
+        edge_scores, edge_map)
 end
 
 function rasterize(
@@ -272,6 +287,8 @@ function rasterize(
 
     covisibilities::Maybe{AbstractVector{Bool}} = nothing,
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
+    edge_scores::Maybe{AbstractVector{Float32}} = nothing,
+    edge_map::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     channels = n_color_features(rast.mode)
     render_depth = channels > 3
@@ -399,8 +416,9 @@ function rasterize(
     render!(kab, (Int.(BLOCK)...,), tile_ndrange(width, height))(
         # Outputs.
         rast.image, rast.istate.n_contrib, rast.istate.accum_α,
-        covisibilities, uncertainties,
+        covisibilities, uncertainties, edge_scores,
         # Inputs.
+        edge_map,
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
         opacities,
@@ -448,6 +466,13 @@ function ∇rasterize(
     vscales = KA.zeros(kab, Float32, (3, n))
     vrot = KA.zeros(kab, Float32, (4, n))
     fill!(reinterpret(Float32, rast.gstate.∇means_2d), 0f0)
+    vmeans_2d_abs = if rast.abs_grad
+        buf = reshape(reinterpret(Float32, rast.gstate.∇means_2d_abs), 2, :)
+        fill!(buf, 0f0)
+        buf
+    else
+        nothing
+    end
 
     K = camera.intrinsics
     (; width, height) = resolution(camera)
@@ -467,6 +492,7 @@ function ∇rasterize(
         vopacities,
         vconics,
         reshape(reinterpret(Float32, rast.gstate.∇means_2d), 2, :),
+        vmeans_2d_abs,
         # Inputs.
         vpixel_features,
         rast.istate.n_contrib,
@@ -561,10 +587,13 @@ function ChainRulesCore.rrule(::typeof(rasterize),
 
     covisibilities::Maybe{AbstractVector{Bool}} = nothing,
     uncertainties::Maybe{AbstractMatrix{Float32}} = nothing,
+    edge_scores::Maybe{AbstractVector{Float32}} = nothing,
+    edge_map::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     image = rasterize(
         means_3d, shs, opacities, scales, rotations, R_w2c, t_w2c;
-        rast, camera, sh_degree, background, covisibilities, uncertainties)
+        rast, camera, sh_degree, background, covisibilities, uncertainties,
+        edge_scores, edge_map)
 
     function _pullback(vpixels)
         ∇ = ∇rasterize(

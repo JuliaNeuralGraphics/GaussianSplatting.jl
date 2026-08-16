@@ -235,6 +235,9 @@ function Trainer(
     kab = get_backend(gs)
     cache = GPUArrays.AllocCache()
 
+    # Opt into the extra backward accumulation only for strategies that read it.
+    strategy isa ImprovedGSStrategy && enable_abs_grad!(rast)
+
     optimizers = (;
         points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * dataset.camera_extent, ϵ),
         features_dc=NU.Adam(kab, gs.features_dc; lr=opt_params.lr_feature, ϵ),
@@ -715,6 +718,11 @@ function step!(trainer::Trainer)
             end
         end
 
+        # Per-view side channels the strategy wants filled during the render
+        # (`ImprovedGSStrategy` accumulates its edge-aware score there).
+        render_kwargs = render_stats!(trainer.strategy, target_image, idx; trainer.step)
+        render_kwargs ≡ nothing && (render_kwargs = (;))
+
         loss, ∇ = Zygote.withgradient(
             θ...,
             bgrid ≡ nothing ? nothing : bgrid.grids,
@@ -722,7 +730,7 @@ function step!(trainer::Trainer)
         ) do means_3d, features_dc, features_rest, opacities, scales, rotations, bgrids, sky_features
             image_features = rast(
                 means_3d, opacities, scales, rotations, features_dc, features_rest;
-                camera, sh_degree=gs.sh_degree, background)
+                camera, sh_degree=gs.sh_degree, background, render_kwargs...)
 
             # NOTE:
             # Unconditional slice (a no-op for `:rgb`), a branch whose

@@ -6,7 +6,11 @@
 
     covisibilities::C,
     uncertainties::U,
+    # Per-gaussian edge-aware score, `Σₚ ωₚ·αₚ·Tₚ` (see `ImprovedGSStrategy`).
+    # Accumulated only when both `edge_scores` & `edge_map` are given.
+    edge_scores::S,
     # Input.
+    edge_map::E, # Per-pixel edge weight `ω`, `(width, height)`.
     gaussian_values_sorted::AbstractVector{UInt32},
     means_2d::AbstractVector{SVector{2, Float32}},
     opacities::AbstractMatrix{Float32},
@@ -22,6 +26,8 @@
     block_size, channels,
     C <: Maybe{AbstractVector{Bool}},
     U <: Maybe{AbstractMatrix{Float32}},
+    S <: Maybe{AbstractVector{Float32}},
+    E <: Maybe{AbstractMatrix{Float32}},
 }
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
@@ -63,6 +69,10 @@
 
     color = zeros(MVector{channels, Float32})
     uncertainty = 0f0 # Computed if `uncertainties ≢ nothing`.
+    # This pixel's edge weight, hoisted out of the blend loop.
+    ω = (S !== Nothing && E !== Nothing && inside) ?
+        edge_map[pix[1] + 1i32, pix[2] + 1i32] : 0f0
+
     for round in 0i32:(rounds - 1i32)
         # Collectively fetch data from global to shared memory.
         progress = range[1] + block_size * round + ridx # 1-based.
@@ -111,6 +121,10 @@
             # mark visible only until cummulative opacity is > 0.5.
             C !== Nothing && T > 0.5f0 && (covisibilities[gaussian_id] = true)
 
+            if S !== Nothing && E !== Nothing
+                @atomic edge_scores[gaussian_id] += ω * α * T
+            end
+
             # Keep track of last range entry to update this pixel.
             T = T_tmp
             last_contributor = contributor
@@ -135,6 +149,8 @@ end
     vopacities::AbstractMatrix{Float32},
     vconics::AbstractMatrix{Float32},
     vmeans_2d::AbstractMatrix{Float32},
+    # Component-wise `Σₚ |∂L/∂μ|`, accumulated only when given.
+    vmeans_2d_abs::A,
     # Inputs.
     vpixels::AbstractMatrix{SVector{channels, Float32}},
     n_contrib::AbstractMatrix{UInt32},
@@ -150,7 +166,7 @@ end
     resolution::SVector{2, Int32},
     bg_color::SVector{channels, Float32},
     grid::SVector{2, Int32}, block::SVector{2, Int32}, ::Val{block_size},
-) where {block_size, channels}
+) where {block_size, channels, A <: Maybe{AbstractMatrix{Float32}}}
     gidx = @index(Group, NTuple) # ≡ group_index
     lidx = @index(Local, NTuple) # ≡ thread_index
     ridx = @index(Local)         # ≡ thread_rank
@@ -274,6 +290,11 @@ end
 
             @atomic vmeans_2d[1, gaussian_id] += vxy[1]
             @atomic vmeans_2d[2, gaussian_id] += vxy[2]
+
+            if A !== Nothing
+                @atomic vmeans_2d_abs[1, gaussian_id] += abs(vxy[1])
+                @atomic vmeans_2d_abs[2, gaussian_id] += abs(vxy[2])
+            end
 
             @atomic vconics[1, gaussian_id] += vconic[1]
             @atomic vconics[2, gaussian_id] += vconic[2]
