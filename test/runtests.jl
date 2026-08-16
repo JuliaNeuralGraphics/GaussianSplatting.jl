@@ -1205,6 +1205,13 @@ end
 
     # An all-NaN gradient (no view rendered anything) selects nothing.
     @test GSP.select_split_indices(strategy, adapt(kab, fill(NaN32, 6)), edge, 3) == Int[]
+
+    # No edge score at all (no dataset to render): same uniform fallback.
+    empty!(seen)
+    for _ in 1:200
+        union!(seen, GSP.select_split_indices(strategy, ∇abs, nothing, 1))
+    end
+    @test seen == Set([2, 4, 5])
 end
 
 @testset "ImprovedGS long-axis split" begin
@@ -1396,6 +1403,48 @@ end
     col = eh[width ÷ 2, :]
     @test argmax(col) in 16:17
     @test all(iszero, eh[6:(width - 5), 6:12])
+
+    # A supervision weight scopes the map before it is normalized: the edge is
+    # kept only where the loss looks, & the median still lands on the survivors.
+    keep = zeros(Float32, width, height)
+    keep[:, 1:(height ÷ 2)] .= 1f0
+    GSP.edge_map!(strategy, adapt(kab, step_img), 4; weight=adapt(kab, keep))
+    ew = Array(strategy.edge_map)
+    @test all(iszero, ew[:, (height ÷ 2 + 1):end])
+    @test maximum(ew[:, 1:(height ÷ 2)]) > 0f0
+    @test partialsort(filter(>(0f0), vec(ew)), cld(count(>(0f0), ew), 2)) ≈ 1f0 rtol=1f-4
+end
+
+@testset "ImprovedGS supervision weight" begin
+    GSP = GaussianSplatting
+    width, height = 8, 6
+
+    @test GSP.supervision_weight(kab, nothing, nothing, width, height) ≡ nothing
+
+    # Coverage mask alone: passed through, expanded to the train resolution.
+    mask = fill(0.5f0, width, height)
+    mask[1, 1] = 0f0
+    w = Array(GSP.supervision_weight(kab, mask, nothing, width, height))
+    @test w ≈ mask
+
+    # Sky mask alone: inverted, so sky pixels carry no weight.
+    sky = zeros(Float32, width, height)
+    sky[:, 1] .= 1f0
+    w = Array(GSP.supervision_weight(kab, nothing, sky, width, height))
+    @test all(iszero, w[:, 1])
+    @test all(isone, w[:, 2:end])
+
+    # Both: a pixel counts only where it is covered *and* not sky.
+    w = Array(GSP.supervision_weight(kab, mask, sky, width, height))
+    @test all(iszero, w[:, 1])
+    @test w[1, 2] == 0f0
+    @test w[2, 2] ≈ 0.5f0
+
+    # A mask stored below the train resolution is expanded, not rejected.
+    small = fill(0.25f0, width ÷ 2, height ÷ 2)
+    w = GSP.supervision_weight(kab, small, nothing, width, height)
+    @test size(w) == (width, height)
+    @test all(≈(0.25f0), Array(w))
 end
 
 @testset "ImprovedGS render side channels" begin
@@ -1526,11 +1575,12 @@ end
     end
     GSP.update_stats!(strategy, rast.gstate.radii,
         rast.gstate.∇means_2d_abs, camera.intrinsics.resolution)
-    strategy.accum_edge .= 1f0
 
     expected = GSP.growth_budget(strategy, 100)
     @test n < expected ≤ 2 * n
 
+    # No `dataset`, so there is nothing to score edges against & the split draw
+    # is uniform over the gradient candidates.
     GSP.post_train_step!(strategy, gs, optimizers, rast, camera, cache;
         step=100, extent=1f0)
 
@@ -1569,14 +1619,31 @@ end
     GSP.densify_and_prune!(strategy, gs, optimizers; step=0)
     @test length(gs) == 0
 
-    # Past `stop_refine` the strategy is inert & stops asking `render!` for
-    # edge scores, so the extra atomics disappear for the rest of training.
+    # Past `stop_refine` the strategy is inert.
     before = length(gs)
     GSP.post_train_step!(strategy, gs, optimizers, rast, camera, cache;
         step=300, extent=1f0)
     @test length(gs) == before
-    @test GSP.render_stats!(strategy, adapt(kab, rand(Float32, width, height, 3, 1)), 1;
-        step=300) ≡ nothing
+end
+
+@testset "ImprovedGS edge-score view sampling" begin
+    GSP = GaussianSplatting
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, 4), rand(Float32, 3, 4), rand(Float32, 3, 4);
+        max_sh_degree=0)
+    strategy = GSP.ImprovedGSStrategy(gs;
+        edge_sample_cams=3, edge_full_scan_iters=[500])
+
+    # A sweep covers every view before repeating any: 4 draws of 3 out of 7
+    # views is 12 ids, i.e. one full pass plus 5 of the next.
+    drawn = reduce(vcat, (GSP.sample_score_views!(strategy, 7, 100) for _ in 1:4))
+    @test length(drawn) == 12
+    @test sort(drawn[1:7]) == 1:7
+    @test length(unique(drawn[8:12])) == 5
+
+    @test GSP.sample_score_views!(strategy, 7, 500) == 1:7   # Full scan.
+    @test GSP.sample_score_views!(strategy, 2, 100) == 1:2   # Fewer views than asked for.
+    @test GSP.sample_score_views!(strategy, 0, 100) == Int[]
 end
 
 @testset "Checkpoint" begin

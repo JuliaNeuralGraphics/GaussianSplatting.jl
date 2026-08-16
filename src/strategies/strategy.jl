@@ -19,19 +19,13 @@ create_strategy(kind::Symbol, gs; kwargs...) =
 
 """
 Post train step every strategy must implement.
+
+Besides `step` & `extent`, receives the `dataset` and a `view_target(idx)`
+callable: a strategy may need views other than the one just trained on
+(`ImprovedGSStrategy` re-renders a sample of them to score Gaussians).
+Strategies that need neither take `kwargs...` instead.
 """
 function post_train_step! end
-
-"""
-    render_stats!(strategy, target_image, view_id; step) -> NamedTuple | Nothing
-
-Per-view side channels the strategy wants the *forward* rasterization pass to fill.
-Called by `Trainer.step!` right before the render, with the composited device target for this view;
-whatever it returns is splatted into the `rast(...)` call as keyword arguments.
-
-Strategies that need nothing from the render return `nothing` (the default).
-"""
-render_stats!(::AbstractStrategy, target_image, view_id::Int; step::Int) = nothing
 
 """
 Fields of `strategy` holding per-gaussian statistics:

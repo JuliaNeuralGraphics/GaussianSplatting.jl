@@ -58,7 +58,7 @@ end
 function post_train_step!(
     strategy::DefaultStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;
-    step::Int, extent::Float32,
+    step::Int, extent::Float32, kwargs...,
 )
     step ≤ strategy.densify_until_iter || return
 
@@ -126,13 +126,8 @@ function densify_and_prune!(
     densify_split!(strategy, gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
     KA.unsafe_free!(∇means_2d)
 
-    # Prune points that are too transparent & — once opacity has been reset at
-    # least once — those with a high scale in world space.
-    #
-    # The reference also prunes on the largest screen-space radius a Gaussian has
-    # reached, but that test is unreachable there: `densification_postfix` zeroes
-    # the accumulator & `densify_and_prune` reads it immediately afterwards, so it
-    # is always all-zero. Dropped rather than kept as dead code.
+    # Prune points that are too transparent and (once opacity has been reset at least once)
+    # those with a high scale in world space.
     valid_mask = reshape(NU.sigmoid.(gs.opacities) .> strategy.min_opacity, :)
     if prune_big
         γ = 0.1f0 * pruning_extent

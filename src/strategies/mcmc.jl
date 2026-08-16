@@ -110,7 +110,7 @@ regularization_loss(strategy::MCMCStrategy, opacities, scales) =
 function post_train_step!(
     strategy::MCMCStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;
-    step::Int, extent::Float32,
+    step::Int, extent::Float32, kwargs...,
 )
     refining =
         strategy.start_refine < step < strategy.stop_refine &&

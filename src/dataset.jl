@@ -339,6 +339,14 @@ end
 
 device_image(kab, image::Array{UInt8, 3}) = adapt(kab, image) .* (1f0 / 255f0)
 
+# From the `(c, w, h)` `UInt8` decode layout to the `(w, h, c, 1)` `Float32` one
+# the loss & the edge map are computed in.
+function device_target(kab, image::Array{UInt8, 3})
+    image = device_image(kab, image)
+    image = permutedims(image, (2, 3, 1))
+    return reshape(image, size(image)..., 1)
+end
+
 get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol) =
     device_image(kab, load_image(dataset, idx, set))
 

@@ -1,46 +1,46 @@
 """
-ImprovedGS — "Improving Densification in 3D Gaussian Splatting for High-Fidelity
-Rendering" (Deng et al., arXiv:2508.12313).
+ImprovedGS — "Improving Densification in 3D Gaussian Splatting for High-Fidelity Rendering"
+(Deng et al., arXiv:2508.12313).
 
 Four changes to the 3DGS adaptive density control, aiming for higher fidelity at
 a *lower* final Gaussian count:
 
-  - **Edge-Aware Score (EAS)**: which Gaussians to split is decided from how much
-    image *detail* they cover, `Sᵢⱼ = Σₚ ωₚ·αᵢₚ·Tᵢₚ` for view `j`, where `ω` is the
-    Canny edge magnitude of the ground-truth image. Accumulated by `render!`
-    directly (see [`render_stats!`](@ref)) — the alpha-compositing weight is
-    already computed there, so this rides along the forward pass for free.
+- **Edge-Aware Score (EAS)**: which Gaussians to split is decided from how much
+  image *detail* they cover, `Sᵢⱼ = Σₚ ωₚ·αᵢₚ·Tᵢₚ` for view `j`, where `ω` is the
+  Canny edge magnitude of the ground-truth image.
+  Computed at each refine by re-rendering a sample of train views forward-only
+  (see [`edge_scores`](@ref)); `render!` accumulates `S` as it blends, since the
+  alpha-compositing weight is already in hand there.
 
-  - **Absolute gradient criterion (AbsGS)**: candidates are Gaussians whose mean
-    *absolute* image-space positional gradient `Σₚ |∂L/∂μ|` exceeds a threshold.
-    The signed sum `DefaultStrategy` uses cancels itself out for a Gaussian
-    straddling an edge, which is exactly the case that needs splitting. Requires
-    `enable_abs_grad!` on the rasterizer.
+- **Absolute gradient criterion (AbsGS)**: candidates are Gaussians whose mean
+  *absolute* image-space positional gradient `Σₚ |∂L/∂μ|` exceeds a threshold.
+  The signed sum `DefaultStrategy` uses cancels itself out for a Gaussian
+  straddling an edge, which is exactly the case that needs splitting.
+  Requires `enable_abs_grad!` on the rasterizer.
 
-  - **Long-Axis Split (LAS)** replaces 3DGS's clone-and-split: a parent becomes
-    two Gaussians offset along its longest principal axis, shrunk so the children
-    stay inside the parent's ellipsoid. No random jitter, so densification does
-    not perturb geometry that is already correct.
+- **Long-Axis Split (LAS)** replaces 3DGS's clone-and-split: a parent becomes
+  two Gaussians offset along its longest principal axis, shrunk so the children
+  stay inside the parent's ellipsoid.
+  No random jitter, so densification does not perturb geometry that is already correct.
 
-  - **Growth Control (GC)**: the total count follows an explicit `√` schedule
-    from `start_refine` to `stop_refine`, rather than being whatever the gradient
-    threshold happens to produce. `max_cap` is a target, not just a ceiling.
+- **Growth Control (GC)**: the total count follows an explicit `√` schedule
+  from `start_refine` to `stop_refine`, rather than being whatever the gradient
+  threshold happens to produce. `max_cap` is a target, not just a ceiling.
 
-  - **Recovery-Aware Pruning (RAP)**: some iterations after an opacity reset, the
-    Gaussians that recovered least are the overfitted ones — prune the bottom
-    `recovery_prune_fraction` by opacity at `recovery_prune_iters`.
+- **Recovery-Aware Pruning (RAP)**: some iterations after an opacity reset,
+  the Gaussians that recovered least are the overfitted ones — prune the bottom
+  `recovery_prune_fraction` by opacity at `recovery_prune_iters`.
 
-Unlike `DefaultStrategy`, opacity is the only prune criterion: there is no
-screen-size or world-scale prune.
-Growth Control bounds the population directly, which is what those terms were
-compensating for. Both reference implementations agree on this.
+Unlike `DefaultStrategy`, opacity is the only prune criterion:
+there is no screen-size or world-scale prune.
+Growth Control bounds the population directly, which is what those terms were compensating for.
 
 ## Divergences from the official implementation
 
 Ported against LichtFeld-Studio's `improved_gs_plus.cpp`. The authors' own code
 (github.com/XiaoBin2001/Improved-GS) differs in the places below; they are
-listed so the gap is explicit rather than accidental. The split geometry is the
-substantive one.
+listed so the gap is explicit rather than accidental.
+The split geometry is the substantive one.
 
 | | Official (= paper) | Here (= LichtFeld) |
 |---|---|---|
@@ -50,12 +50,11 @@ substantive one.
 | opacity factor | `×0.6` | `×0.6` |
 | grad threshold | `3f-4` | `2f-4` |
 | budget ramp ends at | `stop_refine - 500` | `stop_refine` |
-| RAP iterations | derived: `reset_iter + 300`, first 2 resets | fixed `[3300, 6300]` |
+| edge operator | `FIND_EDGES` 3×3 on uint8 luminance, min-max normalized | Canny + NMS, median-normalized |
+| EAS view pool | popped from a fixed list; every image resident on the GPU | reshuffled each sweep; images re-read from disk (see [`edge_scores`](@ref)) |
+| refine interval | `100` | `500` |
 | late training | past `stop_refine - 100`: threshold `÷1.5` & score falls back to the gradient | not implemented |
 | one-off prune at iter 300 | `only_prune(0.02)` | not implemented |
-
-Because `recovery_prune_iters` is a fixed list rather than derived, it must be
-updated by hand if `opacity_reset_interval` changes.
 
 Two places where this implementation deliberately does *not* follow the
 official code, both documented at the function concerned:
@@ -66,6 +65,13 @@ the official `multinomial(replacement=false)`.
 
 The paper's fifth component, Multi-step Update, is not implemented: it is a
 training-loop gradient-accumulation change rather than a densification one.
+
+## Supervision this repo has & the reference does not
+
+Coverage masks & sky masks scope the edge score to the region the loss actually
+supervises (see [`supervision_weight`](@ref)). Depth priors and the geometry
+regularizers need no handling: they are loss terms, so they reach densification
+through the AbsGS gradient like every other term.
 """
 mutable struct ImprovedGSStrategy{
     G <: AbstractVector{Float32},
@@ -74,7 +80,6 @@ mutable struct ImprovedGSStrategy{
 } <: AbstractStrategy
     # Per-Gaussian densification stats, accumulated over one refine window.
     accum_∇means_2d_abs::G
-    accum_edge::G # Written by `render!` itself, not by `update_stats!`.
     denom::G
 
     # Canny scratch, sized to the current view resolution & reallocated when
@@ -86,6 +91,10 @@ mutable struct ImprovedGSStrategy{
     # The ground truth never changes, so this is computed once per view instead
     # of re-sorting the edge map on every step.
     edge_medians::Dict{Int, Float32}
+    # Views not yet drawn by the current sweep of the edge-score pass, in the
+    # order they will be taken. Refilled (reshuffled) when it runs out, so a
+    # sweep covers every view before any is scored twice.
+    view_pool::Vector{Int}
 
     max_cap::Int
     densify_grad_threshold::Float32
@@ -112,6 +121,10 @@ mutable struct ImprovedGSStrategy{
     # Edge magnitudes below this are the floating-point noise floor of
     # convolving a flat region, not edges. See `_canny_nms!`.
     edge_min::Float32
+
+    # Views scored per refine, & the refines that score *every* view instead.
+    edge_sample_cams::Int
+    edge_full_scan_iters::Vector{Int}
 end
 
 function ImprovedGSStrategy(gs::GaussianModel;
@@ -119,7 +132,7 @@ function ImprovedGSStrategy(gs::GaussianModel;
     densify_grad_threshold::Float32 = 2f-4,
     start_refine::Int = 500,
     stop_refine::Int = 15_000,
-    refine_every::Int = 100,
+    refine_every::Int = 500,
     split_offset::Float32 = 0.5f0,
     split_scale_long::Float32 = 0.5f0,
     split_scale_short::Float32 = 0.85f0,
@@ -128,15 +141,22 @@ function ImprovedGSStrategy(gs::GaussianModel;
     opacity_reset_value::Float32 = 0.05f0,
     # 300 iterations after each of the first two opacity resets. Kept inside the
     # early densification phase so the final count is not disturbed.
-    recovery_prune_iters::Vector{Int} = [3_300, 6_300],
+    recovery_prune_iters::Vector{Int} = [k * opacity_reset_interval + 300 for k in 1:2],
     recovery_prune_fraction::Float32 = 0.2f0,
     min_opacity::Float32 = 0.005f0,
     edge_min::Float32 = 1f-4,
+    edge_sample_cams::Int = 10,
+    # 400 iterations after each of the first two opacity resets, rounded up to a
+    # refine step so it actually lands on one. `Int[]` disables it: a full scan
+    # reads & renders the entire train set, which is minutes on a lazily loaded
+    # dataset (the reference keeps every image resident on the GPU).
+    edge_full_scan_iters::Vector{Int} = [
+        cld(k * opacity_reset_interval + 400, refine_every) * refine_every
+        for k in 1:2],
 )
     kab = get_backend(gs)
     n = length(gs)
     ImprovedGSStrategy(
-        KA.zeros(kab, Float32, n),
         KA.zeros(kab, Float32, n),
         KA.zeros(kab, Float32, n),
 
@@ -144,6 +164,7 @@ function ImprovedGSStrategy(gs::GaussianModel;
         KA.zeros(kab, Float32, (0, 0)),
         KA.zeros(kab, SVector{2, Float32}, (0, 0)),
         Dict{Int, Float32}(),
+        Int[],
 
         max_cap,
         densify_grad_threshold,
@@ -159,13 +180,14 @@ function ImprovedGSStrategy(gs::GaussianModel;
         recovery_prune_iters,
         recovery_prune_fraction,
         min_opacity,
-        edge_min)
+        edge_min,
+        edge_sample_cams,
+        edge_full_scan_iters)
 end
 
 strategy_name(::ImprovedGSStrategy) = "improved_gs"
 
-stat_array_names(::ImprovedGSStrategy) =
-    (:accum_∇means_2d_abs, :accum_edge, :denom)
+stat_array_names(::ImprovedGSStrategy) = (:accum_∇means_2d_abs, :denom)
 
 memory_usage(strategy::ImprovedGSStrategy) =
     sum(n -> memory_usage(getfield(strategy, n)), stat_array_names(strategy); init=0) +
@@ -187,6 +209,7 @@ function post_train_step!(
     strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;
     step::Int, extent::Float32,
+    dataset::Maybe{ColmapDataset} = nothing, view_target = nothing,
 )
     step ≤ strategy.stop_refine || return
 
@@ -203,7 +226,7 @@ function post_train_step!(
         step % strategy.refine_every == 0
     if do_densify
         GPUArrays.unsafe_free!(cache)
-        densify_and_prune!(strategy, gs, optimizers; step)
+        densify_and_prune!(strategy, gs, optimizers, rast, dataset; step, view_target)
     end
 
     if step % strategy.opacity_reset_interval == 0
@@ -234,12 +257,9 @@ end
     resolution::SVector{2, UInt32},
 )
     i = @index(Global)
-    # `radii` only gates visibility here: unlike `DefaultStrategy` this strategy
-    # keeps no running max, since nothing prunes on screen size.
     radii[i] > 0 || return
 
-    # Same NDC → pixel rescaling `DefaultStrategy` applies, so the gradient
-    # threshold stays on the familiar scale.
+    # NDC -> pixel rescaling.
     ∇mean_2d = ∇means_2d_abs[i] .* resolution .* 0.5f0
     accum_∇means_2d_abs[i] += norm(∇mean_2d)
     denom[i] += 1f0
@@ -248,9 +268,9 @@ end
 """
 Target Gaussian count at `step`: `N_max·√((I - I_start) / (I_end - I_start))`.
 
-A `√` rather than a straight ramp, so most of the budget is spent early (where
-splitting still has time to be optimized) and the peak count is only reached at
-the very end of the densification phase.
+A `√` rather than a straight ramp, so most of the budget is spent early
+(where splitting still has time to be optimized)
+and the peak count is only reached at the very end of the densification phase.
 """
 function growth_budget(strategy::ImprovedGSStrategy, step::Int)
     span = strategy.stop_refine - strategy.start_refine
@@ -260,51 +280,46 @@ function growth_budget(strategy::ImprovedGSStrategy, step::Int)
 end
 
 function densify_and_prune!(
-    strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers; step::Int,
+    strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers,
+    rast = nothing, dataset = nothing; step::Int, view_target = nothing,
 )
     n_new = growth_budget(strategy, step) - length(gs)
     if n_new > 0
         # Read the window's statistics before anything mutates them.
-        # `denom == 0` for Gaussians no view rendered this window: the divisions
-        # give NaN, which `select_split_indices` filters out.
+        # `denom == 0` for Gaussians no view rendered this window:
+        # the divisions give NaN, which `select_split_indices` filters out.
         ∇means_2d_abs = strategy.accum_∇means_2d_abs ./ strategy.denom
-        edge = strategy.accum_edge ./ strategy.denom
+        edge = edge_scores(strategy, gs, rast, dataset; step, view_target)
 
         idxs = select_split_indices(strategy, ∇means_2d_abs, edge, n_new)
         KA.unsafe_free!(∇means_2d_abs)
-        KA.unsafe_free!(edge)
+        edge ≡ nothing || KA.unsafe_free!(edge)
 
         isempty(idxs) || long_axis_split!(strategy, gs, optimizers, idxs)
     end
 
-    # Opacity is the *only* prune criterion, matching the reference: neither the
-    # official implementation nor LichtFeld carries 3DGS's screen-size or
-    # world-scale prune, and this strategy tracks no per-gaussian radii to
-    # support one. Growth Control already bounds the population, which is what
-    # those terms were compensating for.
+    # Opacity is the *only* prune criterion.
     valid_mask = reshape(NU.sigmoid.(gs.opacities) .> strategy.min_opacity, :)
     prune_points!(strategy, gs, optimizers, valid_mask)
     KA.unsafe_free!(valid_mask)
 
-    # Statistics are per-window: start the next one clean. (A no-op repeat of
-    # what `densification_postfix!` already did when a split happened.)
+    # Statistics are per-window: start the next one clean.
     reset_stats!(strategy, get_backend(gs), length(gs))
     return
 end
 
 """
-Pick `n_new` Gaussians to split: candidates are those whose mean absolute
-image-space gradient clears `densify_grad_threshold`, sampled without
-replacement with probability proportional to their mean edge-aware score.
+Pick `n_new` Gaussians to split:
+candidates are those whose mean absolute image-space gradient is bigger than
+`densify_grad_threshold`, sampled without replacement with probability
+proportional to their edge-aware score (uniformly when `edge ≡ nothing`).
 
 Sampling uses the Gumbel-top-k trick — adding `-log(-log u)` to each log-weight
-and taking the `k` largest keys draws exactly a weighted sample without
-replacement. Runs on the host, like `MCMCStrategy`'s `multinomial_sample`: it is
-a few MB of transfer once per refine, against a full render every step.
+and taking the `k` largest keys draws exactly a weighted sample without replacement.
+Runs on the host, like `MCMCStrategy`'s `multinomial_sample`:
+a few MB of transfer, once per refine.
 """
-function select_split_indices(
-    strategy::ImprovedGSStrategy, ∇means_2d_abs, edge, n_new::Int,
-)
+function select_split_indices(strategy::ImprovedGSStrategy, ∇means_2d_abs, edge, n_new::Int)
     n_new > 0 || return Int[]
 
     g = Array(∇means_2d_abs)
@@ -312,10 +327,14 @@ function select_split_indices(
     isempty(candidates) && return Int[]
     length(candidates) ≤ n_new && return candidates
 
-    e = Array(edge)
-    w = [(isfinite(e[i]) && e[i] > 0f0) ? Float64(e[i]) : 0.0 for i in candidates]
-    # No edge signal at all (e.g. a textureless scene): fall back to a uniform
-    # draw over the candidates rather than degenerating to the first `n_new`.
+    w = if edge ≡ nothing
+        ones(length(candidates))
+    else
+        e = Array(edge)
+        [(isfinite(e[i]) && e[i] > 0f0) ? Float64(e[i]) : 0.0 for i in candidates]
+    end
+    # No edge signal at all (e.g. a textureless scene):
+    # fall back to a uniform draw over the candidates rather than degenerating to the first `n_new`.
     all(iszero, w) && fill!(w, 1.0)
 
     keys = similar(w)
@@ -328,9 +347,9 @@ function select_split_indices(
 end
 
 """
-Split each Gaussian in `idxs` along its longest principal axis: the parent is
-moved `+δ` and rewritten in place, one child is appended at `-δ`, and both are
-shrunk & faded so the pair approximates the original.
+Split each Gaussian in `idxs` along its longest principal axis:
+the parent is moved `+δ` and rewritten in place, one child is appended at `-δ`,
+and both are shrunk & faded so the pair approximates the original.
 
 With raw log-scales `s`, longest axis `l` and rotation `R`:
 
@@ -341,9 +360,7 @@ With raw log-scales `s`, longest axis `l` and rotation `R`:
 
 Rotation and every SH coefficient are inherited unchanged.
 """
-function long_axis_split!(
-    strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers, idxs::Vector{Int},
-)
+function long_axis_split!(strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers, idxs::Vector{Int})
     kab = get_backend(gs)
     idxs_gpu = adapt(kab, idxs)
 
@@ -374,8 +391,7 @@ function long_axis_split!(
     # the children get zeroed moments from `_append_optimizer!` already.
     _zero_optimizer_rows!(optimizers.points, gs.points, idxs_gpu)
     _zero_optimizer_rows!(optimizers.features_dc, gs.features_dc, idxs_gpu)
-    isempty(gs.features_rest) ||
-        _zero_optimizer_rows!(optimizers.features_rest, gs.features_rest, idxs_gpu)
+    isempty(gs.features_rest) || _zero_optimizer_rows!(optimizers.features_rest, gs.features_rest, idxs_gpu)
     _zero_optimizer_rows!(optimizers.scales, gs.scales, idxs_gpu)
     _zero_optimizer_rows!(optimizers.rotations, gs.rotations, idxs_gpu)
     _zero_optimizer_rows!(optimizers.opacities, gs.opacities, idxs_gpu)
@@ -424,6 +440,7 @@ end
     magnitude = offset_factor * exp(scales[l, i])
     δ = SVector{3, Float32}(R[1, l], R[2, l], R[3, l]) .* magnitude
 
+    # TODO unroll
     for c in 1:3
         p = points[c, i]
         points[c, i] = p + δ[c]
@@ -437,7 +454,8 @@ end
     end
 
     o = inverse_sigmoid(clamp(
-        opacity_factor * NU.sigmoid(opacities[1, i]), 1f-6, 1f0 - 1f-6))
+        opacity_factor * NU.sigmoid(opacities[1, i]),
+        1f-6, 1f0 - 1f-6))
     opacities[1, i] = o
     child_opacities[1, j] = o
 end
@@ -453,9 +471,7 @@ Prunes an exact count (rather than thresholding on the quantile *value*) because
 right after a reset a large share of opacities are pinned to the same number,
 and a value threshold would take all of them at once.
 """
-function recovery_prune!(
-    strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers,
-)
+function recovery_prune!(strategy::ImprovedGSStrategy, gs::GaussianModel, optimizers)
     n = length(gs)
     n_prune = floor(Int, strategy.recovery_prune_fraction * n)
     (n_prune > 0 && n_prune < n) || return 0
@@ -474,8 +490,8 @@ end
 # Edge-aware score
 # ---------------------------------------------------------------------------
 
-# Canny's 5×5 Gaussian & 3×3 Sobel, transcribed from the reference
-# implementation. The Sobel pair is one kernel and its transpose.
+# Canny's 5×5 Gaussian & 3×3 Sobel, transcribed from the reference implementation.
+# The Sobel pair is one kernel and its transpose.
 const CANNY_GAUSSIAN_5x5 = SMatrix{5, 5, Float32}(
     2, 4, 5, 4, 2,
     4, 9, 12, 9, 4,
@@ -489,16 +505,109 @@ const CANNY_SOBEL_3x3 = SMatrix{3, 3, Float32}(
      1,  2,  1)
 
 """
-Compute this view's edge map & hand `render!` the buffers it should accumulate
-the edge-aware score into. Returns `nothing` once densification is over, which
-switches the extra atomics in `render!` off for the rest of training.
+Per-Gaussian edge-aware score, or `nothing` when there is nothing to score with
+(no dataset/rasterizer, or an empty view sample) — the caller then falls back to
+a uniform draw over the gradient candidates.
+
+`edge_sample_cams` train views are re-rendered forward-only with their edge map
+as per-pixel weights; each view's scores are normalized to `[0, 1]` before being
+averaged into the total, so a low-contrast view still gets an equal vote.
+Gaussians the view did not touch keep their running value.
+
+Views are drawn without replacement (see [`sample_score_views!`](@ref)); their
+images are re-read from disk on background tasks, so the reads overlap the renders.
 """
-function render_stats!(
-    strategy::ImprovedGSStrategy, target_image, view_id::Int; step::Int,
+function edge_scores(
+    strategy::ImprovedGSStrategy, gs::GaussianModel, rast, dataset;
+    step::Int, view_target = nothing,
 )
-    step ≤ strategy.stop_refine || return nothing
-    edge_map!(strategy, target_image, view_id)
-    return (; edge_map=strategy.edge_map, edge_scores=strategy.accum_edge)
+    (rast ≡ nothing || dataset ≡ nothing) && return nothing
+    ids = sample_score_views!(strategy, length(dataset.train_cameras), step)
+    isempty(ids) && return nothing
+
+    kab = get_backend(gs)
+    n = length(gs)
+    width, height = view_resolution(dataset)
+    scores = KA.zeros(kab, Float32, n)
+    view_scores = KA.zeros(kab, Float32, n)
+    view_weight = 1f0 / length(ids)
+    # Without a `view_target` nobody can say what the loss supervises here, so
+    # the whole image counts (`post_train_step!` called outside a `Trainer`).
+    load = view_target ≡ nothing ?
+        (id -> (load_image(dataset, id, :train), nothing, nothing)) :
+        view_target
+
+    # Reads run ahead of the renders, but only a few at a time: a full scan is
+    # the whole train set & they do not all fit in host memory at once.
+    pending = [Threads.@spawn(load(ids[i]))
+        for i in 1:min(VIEW_LOOKAHEAD, length(ids))]
+    for (k, id) in enumerate(ids)
+        image, mask, sky_mask = fetch(popfirst!(pending))::Tuple{
+            Array{UInt8, 3}, Maybe{Matrix{Float32}}, Maybe{Matrix{Float32}}}
+        ahead = k + VIEW_LOOKAHEAD
+        ahead ≤ length(ids) && push!(pending, Threads.@spawn(load(ids[ahead])))
+
+        edge_map!(strategy, device_target(kab, image), id;
+            weight=supervision_weight(kab, mask, sky_mask, width, height))
+
+        fill!(view_scores, 0f0)
+        rast(
+            gs.points, gs.opacities, gs.scales, gs.rotations,
+            gs.features_dc, gs.features_rest;
+            camera=dataset.train_cameras[id], sh_degree=gs.sh_degree,
+            edge_scores=view_scores, edge_map=strategy.edge_map)
+
+        lo, hi = minimum(view_scores), maximum(view_scores)
+        hi > lo || continue
+        _accumulate_edge_scores!(kab, 256)(
+            scores, view_scores, rast.gstate.radii,
+            lo, view_weight / (hi - lo); ndrange=n)
+    end
+    KA.unsafe_free!(view_scores)
+    return scores
+end
+
+"""
+Per-pixel weight of what the loss actually supervises in a view: inside its
+coverage mask, outside its sky mask. `nothing` when the view has neither.
+
+A split can only improve a region the loss looks at. Beyond the coverage mask
+the target is blacked out, and in the sky region the alpha loss is emptying the
+Gaussians rather than refining them — edges there must not attract splits.
+"""
+function supervision_weight(kab, mask, sky_mask, width::Int, height::Int)
+    w = mask ≡ nothing ? nothing : device_map(kab, mask, width, height)
+    sky_mask ≡ nothing && return w
+    sky = 1f0 .- device_map(kab, sky_mask, width, height)
+    return w ≡ nothing ? sky : w .* sky
+end
+
+@kernel cpu=false inbounds=true function _accumulate_edge_scores!(
+    scores::AbstractVector{Float32},
+    @Const(view_scores), @Const(radii),
+    lo::Float32, scale::Float32,
+)
+    i = @index(Global)
+    radii[i] > 0i32 || return
+    scores[i] += (view_scores[i] - lo) * scale
+end
+
+"""
+Take up to `edge_sample_cams` view ids from the pool, refilling it with a fresh
+shuffle when it runs dry, so a sweep covers every view before repeating any.
+`edge_full_scan_iters` steps take the whole train set instead.
+"""
+function sample_score_views!(strategy::ImprovedGSStrategy, n_views::Int, step::Int)
+    n_views > 0 || return Int[]
+    (step in strategy.edge_full_scan_iters || strategy.edge_sample_cams ≥ n_views) &&
+        return collect(1:n_views)
+
+    ids = Int[]
+    while length(ids) < strategy.edge_sample_cams
+        isempty(strategy.view_pool) && (strategy.view_pool = shuffle(1:n_views))
+        push!(ids, pop!(strategy.view_pool))
+    end
+    return ids
 end
 
 """
@@ -509,8 +618,14 @@ positive values so scores are comparable across views.
 There is no hysteresis/double-threshold stage and no binarization: the result is
 the continuous NMS-surviving gradient magnitude, which is what makes it usable
 as a per-pixel *weight* rather than a mask.
+
+`weight` scales the result before it is normalized, to keep the score inside
+what the loss supervises (see [`supervision_weight`](@ref)).
 """
-function edge_map!(strategy::ImprovedGSStrategy, target_image, view_id::Int)
+function edge_map!(
+    strategy::ImprovedGSStrategy, target_image, view_id::Int;
+    weight::Maybe{AbstractMatrix{Float32}} = nothing,
+)
     kab = get_backend(strategy.edge_map)
     width, height = size(target_image, 1), size(target_image, 2)
 
@@ -518,8 +633,7 @@ function edge_map!(strategy::ImprovedGSStrategy, target_image, view_id::Int)
         KA.unsafe_free!(strategy.edge_map)
         KA.unsafe_free!(strategy.edge_blur)
         KA.unsafe_free!(strategy.edge_grad)
-        # `@uncached`: this runs inside `step!`'s `GPUArrays.@cached` block, but
-        # these buffers outlive the step & must not be recycled from under us.
+        # `@uncached`: these outlive the refine & must not be recycled from under us.
         strategy.edge_map = GPUArrays.@uncached KA.zeros(kab, Float32, (width, height))
         strategy.edge_blur = GPUArrays.@uncached KA.zeros(kab, Float32, (width, height))
         strategy.edge_grad = GPUArrays.@uncached KA.zeros(kab, SVector{2, Float32}, (width, height))
@@ -529,8 +643,10 @@ function edge_map!(strategy::ImprovedGSStrategy, target_image, view_id::Int)
 
     _canny_blur!(kab)(strategy.edge_blur, target_image; ndrange=(width, height))
     _canny_sobel!(kab)(strategy.edge_grad, strategy.edge_blur; ndrange=(width, height))
-    _canny_nms!(kab)(strategy.edge_map, strategy.edge_grad, strategy.edge_min;
-        ndrange=(width, height))
+    _canny_nms!(kab)(strategy.edge_map, strategy.edge_grad, strategy.edge_min; ndrange=(width, height))
+    # Before the median, so it reflects the supervised region only.
+    # `weight` is fixed per view, so the cache stays valid either way.
+    weight ≡ nothing || (strategy.edge_map .*= weight)
 
     median = get!(strategy.edge_medians, view_id) do
         positive = filter(>(0f0), vec(Array(strategy.edge_map)))
@@ -566,6 +682,7 @@ end
     w, h = size(blur, 1), size(blur, 2)
 
     gx, gy = 0f0, 0f0
+    # TODO unroll
     for dy in -1:1, dx in -1:1
         xi = clamp(x + dx, 1, w)
         yi = clamp(y + dy, 1, h)
@@ -583,8 +700,7 @@ offset the gradient direction points at. Written branchlessly rather than as
 `round(Int32, x)`, which compiles in an `InexactError` path (and the GPU-side
 allocation that goes with it) that can never be taken here.
 """
-@inline _nms_step(u::Float32) =
-    ifelse(abs(u) < 0.5f0, 0i32, ifelse(u > 0f0, 1i32, -1i32))
+@inline _nms_step(u::Float32) = ifelse(abs(u) < 0.5f0, 0i32, ifelse(u > 0f0, 1i32, -1i32))
 
 @kernel cpu=false inbounds=true function _canny_nms!(
     edges::AbstractMatrix{Float32}, @Const(grad), floor_mag::Float32,
