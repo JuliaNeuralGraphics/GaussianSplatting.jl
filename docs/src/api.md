@@ -32,6 +32,44 @@ Additionally, if setting `scale > 1`, following directories should exist:
 - images_<scale>/
 ```
 
+## Loading a RealityCapture dataset
+
+Scenes aligned in RealityCapture / RealityScan are exported in a different
+shape, and have to be converted first:
+
+```
+- input/             the images, as exported
+- camera-params.csv  the camera parameters, as exported
+- points.ply         the point cloud, exported with XYZ & RGB
+```
+
+```bash
+julia --project scripts/rc-convert.jl -s <path-to-rc-export> --resize
+```
+
+This writes `images/` (plus `images_2`, `images_4`, `images_8` with `--resize`)
+and a `sparse/0/` COLMAP model in place, after which the directory loads with
+`ColmapDataset` like any other.
+
+The conversion is not just a re-encoding of the poses. RealityCapture solves
+*per-image* intrinsics and lens distortion, while training expects one shared
+pinhole over undistorted images, so every image is resampled into a common
+pinhole. Two consequences are worth knowing about:
+
+- The shared focal is raised until no image samples from outside its own frame,
+  which crops the field of view slightly - the `blank_pixels = 0` behaviour of
+  `colmap image_undistorter`.
+- Views whose focal deviates from the dataset median by more than
+  `--focal_tolerance` (2% by default) are dropped, since a zoomed-in frame
+  cannot be warped into the shared pinhole without leaving a black border that
+  would then be trained against.
+
+Images RealityCapture failed to register simply have no row in
+`camera-params.csv` and are ignored, as is anything else in `input/`.
+`--max_points` subsamples the initial point cloud, which is worth having
+because RC clouds tend to carry far-field background the cameras never
+approach.
+
 ## Initializing Gaussians from dataset
 
 Once you load the dataset, you can initialize Gaussian model from it by

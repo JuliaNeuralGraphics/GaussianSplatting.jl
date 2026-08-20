@@ -46,6 +46,19 @@ GaussianSplatting.jl comes with a GUI application to train & view the gaussians.
    julia> GaussianSplatting.app(kab)
    ```
 
+## Datasets
+
+Datasets are read in **binary COLMAP** format - a `sparse/0/` model next to an
+`images/` directory. `scripts/gs-convert.jl` produces one from raw images by
+running COLMAP, and `scripts/rc-convert.jl` produces one from a RealityCapture /
+RealityScan export:
+
+```bash
+julia --project scripts/rc-convert.jl -s <path-to-rc-export> --resize
+```
+
+See the [API](@ref) page for what each conversion does.
+
 ## Hyperparameters
 
 The `Open Dataset` dialog exposes a handful of the most useful options as
