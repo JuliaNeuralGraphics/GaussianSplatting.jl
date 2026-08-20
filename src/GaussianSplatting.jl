@@ -73,6 +73,7 @@ include("regularizations/regularizations.jl")
 include("params_io.jl")
 include("sparse_adam.jl")
 include("training.jl")
+include("precompile_workload.jl")
 include("gui/gui.jl")
 
 base_array_type(backend) = error("Not implemented for backend: `$backend`.")
