@@ -5,7 +5,14 @@ Like `NU.step!`, but skips the entire update (no momentum decay, no
 parameter write) for gaussians with `radii[g] == 0` — i.e. gaussians not
 visible/touched by the current view's rasterization pass. `θ`/`∇` must be
 one of the per-gaussian parameter tensors, whose last dimension is the
-gaussian index and matches `length(radii)`.
+gaussian index.
+
+`radii` may be *longer* than that: the rasterizer's `GeometryState` is
+grow-only, so after a strategy prunes gaussians it still carries the
+entries of the pre-prune count. Only its first `size(θ)[end]` entries are
+read. The stride is derived from `θ` rather than from `length(radii)`,
+since the latter silently yields a wrong stride whenever it happens to
+divide `length(θ)`.
 """
 function sparse_step!(
     opt::NU.Adam, θ::T, ∇::T, radii::AbstractVector{Int32}; dispose::Bool,
@@ -14,11 +21,11 @@ function sparse_step!(
         "Shape of parameters and gradients must be the same, " *
         "instead: `$(size(θ))` vs `$(size(∇))`."))
 
-    n_gaussians = length(radii)
+    n_gaussians = size(θ, ndims(θ))
+    n_gaussians ≤ length(radii) || throw(ArgumentError(
+        "`radii` is shorter than the gaussian dimension of `θ`: " *
+        "`length(radii) = $(length(radii))` vs `size(θ)[end] = $n_gaussians`."))
     stride = length(θ) ÷ n_gaussians
-    stride * n_gaussians == length(θ) || throw(ArgumentError(
-        "`length(θ) = $(length(θ))` is not divisible by " *
-        "`length(radii) = $n_gaussians`."))
 
     # Bump `current_step`, but don't use it for bias correction.
     # Otherwise it requires per-gaussian counter to produce correct updates.

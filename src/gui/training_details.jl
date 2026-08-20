@@ -214,7 +214,7 @@ function training_controls!(gui)
 
     autosave_controls!(gui)
 
-    if ui_state.is_mcmc
+    if ui_state.has_max_cap
         # Benign cross-thread write: `max_cap` is a word-sized Int
         # the worker only reads at densification time.
         strategy = gui.trainer.strategy
@@ -224,7 +224,7 @@ function training_controls!(gui)
             strategy.max_cap = max(w.n_gaussians[], Int(max_cap_ref[]))
         end
         CImGui.SetItemTooltip(
-            "The population MCMC densification grows to; " *
+            "The population densification grows to; " *
             "never below the count the scene already has.")
     end
 
@@ -314,7 +314,7 @@ function training_details!(gui)
     loss_plot!(gui.worker)
 
     CImGui.Separator()
-    CImGui.Text("Strategy: $(gui.ui_state.is_mcmc ? "mcmc" : "default")")
+    CImGui.Text("Strategy: $(gui.ui_state.strategy_name)")
     CImGui.Text("Max SH degree: $(gui.ui_state.max_sh_degree)")
     CImGui.Text("Rasterizer mode: $(training_rasterizer_mode(params))")
     CImGui.SetItemTooltip(
@@ -361,6 +361,6 @@ function training_details!(gui)
     param_table!("##strategy-params",
         ((name, getfield(strategy, name))
         for name in fieldnames(typeof(strategy))
-        if name ≢ :max_cap && !(getfield(strategy, name) isa AbstractArray)))
+        if name ≢ :max_cap && getfield(strategy, name) isa Union{Real, Bool}))
     return
 end

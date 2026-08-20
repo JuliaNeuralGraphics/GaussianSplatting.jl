@@ -13,6 +13,12 @@ struct GeometryState{
     depths::D
     means_2d::M
     ∇means_2d::M
+    # Per-pixel *absolute* image-space positional cotangent, `Σₚ |∂L/∂μ|`,
+    # accumulated component-wise by `∇render!` when `rast.abs_grad` is set.
+    # `∇means_2d` sums the same terms *with* their sign, so a Gaussian
+    # straddling an edge cancels itself out there but not here — which is
+    # what the AbsGS densification criterion needs (see `ImprovedGSStrategy`).
+    ∇means_2d_abs::M
     rgbs::R
     clamped::K
     tiles_touched::T
@@ -36,6 +42,7 @@ function GeometryState(kab, n::Int; n_features::Int = 0)
         KA.zeros(kab, Float32, n),
         KA.zeros(kab, SVector{2, Float32}, n),
         KA.zeros(kab, SVector{2, Float32}, n),
+        KA.zeros(kab, SVector{2, Float32}, n),
         KA.zeros(kab, SVector{3, Float32}, n),
         KA.zeros(kab, SVector{3, Bool}, n),
         KA.zeros(kab, Int32, n),
@@ -52,6 +59,7 @@ function KA.unsafe_free!(gstate::GeometryState)
     KA.unsafe_free!(gstate.depths)
     KA.unsafe_free!(gstate.means_2d)
     KA.unsafe_free!(gstate.∇means_2d)
+    KA.unsafe_free!(gstate.∇means_2d_abs)
     KA.unsafe_free!(gstate.rgbs)
     KA.unsafe_free!(gstate.clamped)
     KA.unsafe_free!(gstate.tiles_touched)

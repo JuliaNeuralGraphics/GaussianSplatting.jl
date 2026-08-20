@@ -89,6 +89,8 @@ function mcmc_binom_coefficients(n_max::Int)
     return binoms
 end
 
+strategy_name(::MCMCStrategy) = "mcmc"
+
 # All of the strategy's state (the binomial table) lives on the host.
 KA.unsafe_free!(::MCMCStrategy) = return
 memory_usage(::MCMCStrategy) = 0
@@ -108,7 +110,7 @@ regularization_loss(strategy::MCMCStrategy, opacities, scales) =
 function post_train_step!(
     strategy::MCMCStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;
-    step::Int, extent::Float32,
+    step::Int, extent::Float32, kwargs...,
 )
     refining =
         strategy.start_refine < step < strategy.stop_refine &&

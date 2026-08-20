@@ -235,6 +235,9 @@ function Trainer(
     kab = get_backend(gs)
     cache = GPUArrays.AllocCache()
 
+    # Opt into the extra backward accumulation only for strategies that read it.
+    strategy isa ImprovedGSStrategy && enable_abs_grad!(rast)
+
     optimizers = (;
         points=NU.Adam(kab, gs.points; lr=opt_params.lr_points_start * dataset.camera_extent, ϵ),
         features_dc=NU.Adam(kab, gs.features_dc; lr=opt_params.lr_feature, ϵ),
@@ -506,11 +509,28 @@ function load_state!(trainer::Trainer, filename::String)
     return
 end
 
-# Convert image from UInt8 to Float32 & permute from (c, w, h) to (w, h, c, 1).
-function device_target(trainer::Trainer, image::Array{UInt8, 3})
-    image = device_image(get_backend(trainer.gaussians), image)
-    image = permutedims(image, (2, 3, 1))
-    return reshape(image, size(image)..., 1)
+device_target(trainer::Trainer, image::Array{UInt8, 3}) =
+    device_target(get_backend(trainer.gaussians), image)
+
+"""
+The host-side pieces of view `idx`'s supervision, for a strategy that scores
+views other than the one just trained on (`post_train_step!`'s `view_target`).
+
+Returns only what the loss actually supervises this view with, so a strategy
+cannot act on a region training ignores. Does no device work: it runs on a
+background task, & expanding the maps is the caller's job (see [`device_map`](@ref)).
+"""
+function view_target(trainer::Trainer, idx::Int)
+    dataset = trainer.dataset
+    width, height = view_resolution(dataset)
+    mask_path = dataset.train_mask_paths[idx]
+    sky_path = dataset.train_sky_paths[idx]
+    return (
+        load_image(dataset, idx, :train),
+        (trainer.masks && mask_path ≢ nothing) ?
+            load_mask(mask_path, width, height) : nothing,
+        (trainer.sky_loss && sky_path ≢ nothing) ?
+            load_mask(sky_path, width, height) : nothing)
 end
 
 # Read view `idx` from disk & convert it, for callers outside the train loop
@@ -885,7 +905,8 @@ function step!(trainer::Trainer)
     if trainer.densify
         post_train_step!(
             trainer.strategy, gs, trainer.optimizers, rast, camera, trainer.cache;
-            trainer.step, extent=trainer.dataset.camera_extent)
+            trainer.step, extent=trainer.dataset.camera_extent, trainer.dataset,
+            view_target=Base.Fix1(view_target, trainer))
     end
     return loss
 end

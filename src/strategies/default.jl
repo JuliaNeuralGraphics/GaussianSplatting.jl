@@ -4,11 +4,9 @@ with high image-space positional gradient, prune transparent & oversized ones,
 periodically reset opacity.
 """
 mutable struct DefaultStrategy{
-    R <: AbstractVector{Int32},
     G <: AbstractVector{Float32},
 } <: AbstractStrategy
     # Per-Gaussian densification stats.
-    max_radii::R
     accum_∇means_2d::G
     denom::G
 
@@ -33,7 +31,6 @@ function DefaultStrategy(gs::GaussianModel;
     kab = get_backend(gs)
     n = length(gs)
     DefaultStrategy(
-        KA.zeros(kab, Int32, n),
         KA.zeros(kab, Float32, n),
         KA.zeros(kab, Float32, n),
         dense_percent,
@@ -45,22 +42,23 @@ function DefaultStrategy(gs::GaussianModel;
         min_opacity)
 end
 
+strategy_name(::DefaultStrategy) = "default"
+stat_array_names(::DefaultStrategy) = (:accum_∇means_2d, :denom)
+
 memory_usage(strategy::DefaultStrategy) =
-    memory_usage(strategy.max_radii) +
-    memory_usage(strategy.accum_∇means_2d) +
-    memory_usage(strategy.denom)
+    sum(n -> memory_usage(getfield(strategy, n)), stat_array_names(strategy); init=0)
 
 function KA.unsafe_free!(strategy::DefaultStrategy)
-    KA.unsafe_free!(strategy.max_radii)
-    KA.unsafe_free!(strategy.accum_∇means_2d)
-    KA.unsafe_free!(strategy.denom)
+    for name in stat_array_names(strategy)
+        KA.unsafe_free!(getfield(strategy, name))
+    end
     return
 end
 
 function post_train_step!(
     strategy::DefaultStrategy, gs::GaussianModel, optimizers,
     rast, camera::Camera, cache::GPUArrays.AllocCache;
-    step::Int, extent::Float32,
+    step::Int, extent::Float32, kwargs...,
 )
     step ≤ strategy.densify_until_iter || return
 
@@ -72,11 +70,9 @@ function post_train_step!(
         step % strategy.densification_interval == 0
     if do_densify
         GPUArrays.unsafe_free!(cache)
-
-        max_screen_size::Int32 =
-            step > strategy.opacity_reset_interval ? 20 : 0
-        densify_and_prune!(strategy, gs, optimizers;
-            extent, pruning_extent=extent, max_screen_size)
+        densify_and_prune!(strategy, gs, optimizers; extent,
+            pruning_extent=extent,
+            prune_big=step > strategy.opacity_reset_interval)
     end
 
     if step % strategy.opacity_reset_interval == 0
@@ -91,15 +87,14 @@ function update_stats!(
     ∇means_2d::AbstractVector{SVector{2, Float32}},
     resolution::SVector{2, UInt32},
 )
-    _update_stats!(get_backend(strategy.max_radii), 256)(
-        strategy.max_radii, strategy.accum_∇means_2d, strategy.denom,
-        radii, ∇means_2d, resolution; ndrange=length(strategy.max_radii))
+    _update_stats!(get_backend(strategy.denom), 256)(
+        strategy.accum_∇means_2d, strategy.denom,
+        radii, ∇means_2d, resolution; ndrange=length(strategy.denom))
     return
 end
 
 @kernel cpu=false inbounds=true function _update_stats!(
     # Outputs.
-    max_radii::AbstractVector{Int32},
     accum_∇means_2d::AbstractVector{Float32},
     denom::AbstractVector{Float32},
     # Inputs.
@@ -108,17 +103,16 @@ end
     resolution::SVector{2, UInt32},
 )
     i = @index(Global)
-    r = radii[i]
-    r > 0 || return
+    radii[i] > 0 || return
 
-    max_radii[i] = max(max_radii[i], r)
     ∇mean_2d = ∇means_2d[i] .* resolution .* 0.5f0
     accum_∇means_2d[i] += norm(∇mean_2d)
     denom[i] += 1f0
 end
 
-function densify_and_prune!(strategy::DefaultStrategy, gs::GaussianModel, optimizers;
-    extent::Float32, pruning_extent::Float32, max_screen_size::Int32,
+function densify_and_prune!(
+    strategy::DefaultStrategy, gs::GaussianModel, optimizers;
+    extent::Float32, pruning_extent::Float32, prune_big::Bool,
 )
     grad_threshold = strategy.densify_grad_threshold
     dense_percent = strategy.dense_percent
@@ -132,14 +126,12 @@ function densify_and_prune!(strategy::DefaultStrategy, gs::GaussianModel, optimi
     densify_split!(strategy, gs, optimizers; ∇means_2d, grad_threshold, extent, dense_percent)
     KA.unsafe_free!(∇means_2d)
 
-    # Prune points that are too transparent, occupy too much space in image space
-    # and have high scale in world space.
+    # Prune points that are too transparent and (once opacity has been reset at least once)
+    # those with a high scale in world space.
     valid_mask = reshape(NU.sigmoid.(gs.opacities) .> strategy.min_opacity, :)
-    if max_screen_size > 0
+    if prune_big
         γ = 0.1f0 * pruning_extent
-        valid_mask .&=
-            (strategy.max_radii .< max_screen_size) .&&
-            reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)
+        valid_mask .&= reshape(maximum(exp.(gs.scales); dims=1) .< γ, :)
     end
     prune_points!(strategy, gs, optimizers, valid_mask)
     return
@@ -157,8 +149,7 @@ function densify_clone!(strategy::DefaultStrategy, gs::GaussianModel, optimizers
 
     new_points = gs.points[:, mask]
     new_features_dc = gs.features_dc[:, :, mask]
-    new_features_rest = isempty(gs.features_rest) ?
-        gs.features_rest : gs.features_rest[:, :, mask]
+    new_features_rest = isempty(gs.features_rest) ? gs.features_rest : gs.features_rest[:, :, mask]
     new_scales = gs.scales[:, mask]
     new_rotations = gs.rotations[:, mask]
     new_opacities = gs.opacities[:, mask]
@@ -242,10 +233,6 @@ end
 @kernel cpu=false inbounds=true function _add_split_noise!(points, rots, stds)
     i = @index(Global)
     σ = stds[i]
-    # ξ = SVector{3, Float32}(
-    #     randn(Float32) * σ[1],
-    #     randn(Float32) * σ[2],
-    #     randn(Float32) * σ[3])
     ξ = σ .* SVector{3, Float32}(randn(Float32), randn(Float32), randn(Float32))
 
     q = rots[i]
@@ -254,10 +241,8 @@ end
     points[i] = p .+ R * ξ
 end
 
-function prune_points!(strategy::DefaultStrategy, gs::GaussianModel, optimizers, valid_mask)
+function prune_points!(strategy::AbstractStrategy, gs::GaussianModel, optimizers, valid_mask)
     _prune_optimizer!(optimizers.points, valid_mask, gs.points)
-    # TODO turn into macro:
-    # @unsafe_replace gs.points = gs.points[:, valid_mask]
     new_points = gs.points[:, valid_mask]
     KA.unsafe_free!(gs.points)
     gs.points = new_points
@@ -289,17 +274,7 @@ function prune_points!(strategy::DefaultStrategy, gs::GaussianModel, optimizers,
     KA.unsafe_free!(gs.opacities)
     gs.opacities = new_opacities
 
-    new_max_radii = strategy.max_radii[valid_mask]
-    KA.unsafe_free!(strategy.max_radii)
-    strategy.max_radii = new_max_radii
-
-    new_accum_∇means_2d = strategy.accum_∇means_2d[valid_mask]
-    KA.unsafe_free!(strategy.accum_∇means_2d)
-    strategy.accum_∇means_2d = new_accum_∇means_2d
-
-    new_denom = strategy.denom[valid_mask]
-    KA.unsafe_free!(strategy.denom)
-    strategy.denom = new_denom
+    prune_stats!(strategy, valid_mask)
 
     if gs.ids ≢ nothing
         new_ids = gs.ids[valid_mask]
@@ -309,24 +284,20 @@ function prune_points!(strategy::DefaultStrategy, gs::GaussianModel, optimizers,
     return
 end
 
+"""
+Append the new Gaussians, then drop the accumulated per-gaussian statistics:
+they describe the pre-densification set & there is no meaningful value to carry
+over to the newly inserted rows.
+"""
 function densification_postfix!(
-    strategy::DefaultStrategy, gs::GaussianModel, optimizers;
+    strategy::AbstractStrategy, gs::GaussianModel, optimizers;
     new_points, new_features_dc, new_features_rest,
     new_scales, new_rotations, new_opacities, new_ids,
 )
     append_gaussians!(gs, optimizers;
         new_points, new_features_dc, new_features_rest,
         new_scales, new_rotations, new_opacities, new_ids)
-
-    KA.unsafe_free!(strategy.max_radii)
-    KA.unsafe_free!(strategy.accum_∇means_2d)
-    KA.unsafe_free!(strategy.denom)
-
-    kab = get_backend(gs)
-    n = size(gs.points, 2)
-    strategy.max_radii = KA.zeros(kab, Int32, n)
-    strategy.accum_∇means_2d = KA.zeros(kab, Float32, n)
-    strategy.denom = KA.zeros(kab, Float32, n)
+    reset_stats!(strategy, get_backend(gs), size(gs.points, 2))
     return
 end
 

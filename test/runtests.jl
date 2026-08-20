@@ -516,6 +516,48 @@ end
     @test isfinite(coeff) && coeff > 0f0
 end
 
+@testset "sparse_step! with an over-long radii" begin
+    # The rasterizer's `GeometryState` is grow-only, so after a strategy prunes
+    # gaussians `length(radii)` still reflects the pre-prune count. `sparse_step!`
+    # must derive its stride from `θ` and read only the first `n` radii.
+    n, n_stale = 4, 6
+    radii = adapt(kab, Int32[1, 0, 1, 0, 1, 1]) # entries 5:6 are stale.
+    @assert length(radii) == n_stale
+
+    # `(3, n)` — with the old `length(radii)`-derived stride this silently used
+    # stride 2 instead of 3; `(1, n)` threw outright.
+    # First step from zeroed moments with a unit gradient. `sparse_step!` skips
+    # bias correction on purpose, so this is `-lr·μ̂/(√ν̂ + ϵ)` with the raw moments.
+    lr, β1, β2, ϵ = 1f-1, 0.9f0, 0.999f0, 1f-8
+    expected = -lr * (1f0 - β1) / (sqrt(1f0 - β2) + ϵ)
+
+    for shape in ((3, n), (1, n), (3, 1, n))
+        θ = adapt(kab, zeros(Float32, shape))
+        ∇ = adapt(kab, ones(Float32, shape))
+        opt = GaussianSplatting.NU.Adam(kab, θ; lr, β1, β2, ϵ)
+
+        GaussianSplatting.sparse_step!(opt, θ, ∇, radii; dispose=false)
+
+        # Gaussians 1 & 3 are visible, 2 & 4 are not.
+        updated = reshape(Array(θ), :, n)
+        @test all(updated[:, 1] .≈ expected)
+        @test all(updated[:, 2] .== 0f0)
+        @test all(updated[:, 3] .≈ expected)
+        @test all(updated[:, 4] .== 0f0)
+
+        # Adam moments follow the same gating.
+        μ = reshape(Array(opt.μ[1]), :, n)
+        @test all(μ[:, 1] .> 0f0) && all(μ[:, 3] .> 0f0)
+        @test all(μ[:, 2] .== 0f0) && all(μ[:, 4] .== 0f0)
+    end
+
+    # Too *few* radii is still an error: nothing sensible to gate on.
+    θ = adapt(kab, zeros(Float32, 3, n_stale + 1))
+    opt = GaussianSplatting.NU.Adam(kab, θ; lr)
+    @test_throws ArgumentError GaussianSplatting.sparse_step!(
+        opt, θ, copy(θ), radii; dispose=false)
+end
+
 @testset "Tile ranges" begin
     gaussian_keys = adapt(kab, UInt64[0 << 32, 0 << 32, 1 << 32, 2 << 32, 3 << 32])
     ranges = KA.allocate(kab, UInt32, 2, 4)
@@ -1094,6 +1136,514 @@ end
     @test GaussianSplatting.mask_is_empty(empty)
     empty[2, 1] = 1f0
     @test !GaussianSplatting.mask_is_empty(empty)
+end
+
+@testset "ImprovedGS growth budget" begin
+    GSP = GaussianSplatting
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, 10), rand(Float32, 3, 10), rand(Float32, 3, 10);
+        max_sh_degree=0)
+    strategy = GSP.ImprovedGSStrategy(gs;
+        max_cap=1_000_000, start_refine=500, stop_refine=15_000)
+
+    # `N_max·√((I - I_start)/(I_end - I_start))`: nothing at the start,
+    # the full budget at the end, clamped outside the window.
+    @test GSP.growth_budget(strategy, 500) == 0
+    @test GSP.growth_budget(strategy, 15_000) == strategy.max_cap
+    @test GSP.growth_budget(strategy, 100) == 0
+    @test GSP.growth_budget(strategy, 30_000) == strategy.max_cap
+    @test GSP.growth_budget(strategy, 8_000) ≈
+        strategy.max_cap * sqrt(7500 / 14_500) rtol=1f-4
+
+    # Monotone & concave: growth per refine never increases, which is the
+    # "spend the budget early" property the √ schedule exists for.
+    steps = 500:100:15_000
+    counts = [GSP.growth_budget(strategy, s) for s in steps]
+    @test issorted(counts)
+    deltas = diff(counts)
+    @test issorted(deltas; rev=true)
+    @test deltas[1] > deltas[end]
+end
+
+@testset "ImprovedGS split selection" begin
+    GSP = GaussianSplatting
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, 6), rand(Float32, 3, 6), rand(Float32, 3, 6);
+        max_sh_degree=0)
+    strategy = GSP.ImprovedGSStrategy(gs; densify_grad_threshold=1f-3)
+
+    # Gaussians 2, 4 & 5 clear the gradient threshold; 3 is NaN (never rendered).
+    ∇abs = adapt(kab, Float32[1f-4, 5f-3, NaN, 2f-3, 9f-3, 0f0])
+    edge = adapt(kab, Float32[1f0, 1f0, 1f0, 1f0, 1f0, 1f0])
+
+    # Fewer candidates than asked for: take them all, none of the rejects.
+    @test sort(GSP.select_split_indices(strategy, ∇abs, edge, 10)) == [2, 4, 5]
+    @test GSP.select_split_indices(strategy, ∇abs, edge, 0) == Int[]
+
+    # Exactly `n_new` distinct candidates, never a non-candidate.
+    for _ in 1:20
+        idxs = GSP.select_split_indices(strategy, ∇abs, edge, 2)
+        @test length(idxs) == 2
+        @test length(unique(idxs)) == 2
+        @test all(∈([2, 4, 5]), idxs)
+    end
+
+    # Sampling is weighted by the edge score: a candidate with a far higher
+    # score is picked far more often than its equally-eligible peers.
+    skewed = adapt(kab, Float32[1f0, 1f-4, 1f0, 1f-4, 1f4, 1f0])
+    hits = count(_ -> 5 in GSP.select_split_indices(strategy, ∇abs, skewed, 1), 1:200)
+    @test hits > 180
+
+    # No edge signal anywhere: fall back to a uniform draw over the candidates
+    # rather than degenerating to whichever comes first.
+    zero_edge = adapt(kab, zeros(Float32, 6))
+    seen = Set{Int}()
+    for _ in 1:200
+        union!(seen, GSP.select_split_indices(strategy, ∇abs, zero_edge, 1))
+    end
+    @test seen == Set([2, 4, 5])
+
+    # An all-NaN gradient (no view rendered anything) selects nothing.
+    @test GSP.select_split_indices(strategy, adapt(kab, fill(NaN32, 6)), edge, 3) == Int[]
+
+    # No edge score at all (no dataset to render): same uniform fallback.
+    empty!(seen)
+    for _ in 1:200
+        union!(seen, GSP.select_split_indices(strategy, ∇abs, nothing, 1))
+    end
+    @test seen == Set([2, 4, 5])
+end
+
+@testset "ImprovedGS long-axis split" begin
+    GSP = GaussianSplatting
+    NU = GSP.NU
+    n = 4
+
+    gs = GSP.GaussianModel(kab,
+        zeros(Float32, 3, n), rand(Float32, 3, n), zeros(Float32, 3, n);
+        max_sh_degree=0, isotropic=false)
+    # Distinct long axis per Gaussian: 1st, 2nd, 3rd, then 1st again.
+    raw_scales = Float32[
+        0.0  -1.0  -1.0   0.5;
+       -1.0   0.0  -1.0  -2.0;
+       -1.0  -1.0   0.0  -2.0]
+    copy!(gs.scales, adapt(kab, raw_scales))
+    gs.opacities .= 0f0                      # sigmoid(0) = 0.5
+    gs.rotations .= adapt(kab, Float32[      # identity quaternions
+        i == 1 ? 1f0 : 0f0 for i in 1:4, _ in 1:n])
+    points_before = Array(gs.points)
+
+    optimizers = (;
+        points=NU.Adam(kab, gs.points; lr=1f-3),
+        features_dc=NU.Adam(kab, gs.features_dc; lr=1f-3),
+        features_rest=NU.Adam(kab, gs.features_rest; lr=1f-3),
+        opacities=NU.Adam(kab, gs.opacities; lr=1f-3),
+        scales=NU.Adam(kab, gs.scales; lr=1f-3),
+        rotations=NU.Adam(kab, gs.rotations; lr=1f-3))
+    for opt in optimizers
+        isempty(opt.μ[1]) || (fill!(opt.μ[1], 1f0); fill!(opt.ν[1], 1f0))
+    end
+
+    strategy = GSP.ImprovedGSStrategy(gs)
+    idxs = [1, 3]
+    @test GSP.long_axis_split!(strategy, gs, optimizers, idxs) == length(idxs)
+
+    @test length(gs) == n + length(idxs)
+    for f in (gs.points, gs.scales, gs.rotations, gs.opacities)
+        @test size(f)[end] == n + length(idxs)
+    end
+    # Optimizer moments stay in lockstep with the parameters they track.
+    for (opt, θ) in zip(values(optimizers),
+        (gs.points, gs.features_dc, gs.features_rest,
+         gs.opacities, gs.scales, gs.rotations))
+        @test length(opt.μ[1]) == length(θ)
+        @test length(opt.ν[1]) == length(θ)
+    end
+
+    points = Array(gs.points)
+    scales = Array(gs.scales)
+    opacities = Array(gs.opacities)
+
+    for (j, i) in enumerate(idxs)
+        child = n + j
+        s0 = raw_scales[:, i]
+        l = argmax(s0)
+
+        # Long axis halved, short axes scaled by 0.85; both halves identical.
+        expected = s0 .+ log.([c == l ?
+            strategy.split_scale_long : strategy.split_scale_short for c in 1:3])
+        @test scales[:, i] ≈ expected rtol=1f-5
+        @test scales[:, child] ≈ expected rtol=1f-5
+
+        # Symmetric offset of `split_offset·exp(s[l])` along the long axis;
+        # the rotation is the identity, so the axis is `e_l`.
+        δ = strategy.split_offset * exp(s0[l])
+        Δ = points[:, i] .- points_before[:, i]
+        @test Δ ≈ [c == l ? δ : 0f0 for c in 1:3] atol=1f-5
+        @test points[:, child] ≈ points_before[:, i] .- Δ atol=1f-5
+
+        # Both halves lie inside the parent's 1σ ellipsoid along that axis.
+        @test δ < exp(s0[l])
+
+        # Opacity faded to 60% of the parent's, on both halves.
+        @test NU.sigmoid(opacities[1, i]) ≈ strategy.split_opacity_factor * 0.5f0 rtol=1f-4
+        @test opacities[1, child] ≈ opacities[1, i]
+    end
+
+    # Untouched Gaussians keep their parameters exactly.
+    for i in (2, 4)
+        @test scales[:, i] == raw_scales[:, i]
+        @test points[:, i] == points_before[:, i]
+    end
+
+    # Parents were rewritten & children are brand new, so neither carries
+    # meaningful Adam history: both must start from zeroed moments.
+    for (opt, θ) in zip(values(optimizers),
+        (gs.points, gs.features_dc, gs.features_rest,
+         gs.opacities, gs.scales, gs.rotations))
+        isempty(θ) && continue
+        μ = reshape(Array(opt.μ[1]), size(θ))
+        d = ntuple(_ -> Colon(), ndims(θ) - 1)
+        @test all(iszero, μ[d..., idxs])
+        @test all(iszero, μ[d..., (n + 1):end])
+        @test all(!iszero, μ[d..., 2])   # An untouched row keeps its history.
+    end
+end
+
+@testset "ImprovedGS recovery-aware pruning" begin
+    GSP = GaussianSplatting
+    NU = GSP.NU
+    n = 100
+
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, n), rand(Float32, 3, n), rand(Float32, 3, n);
+        max_sh_degree=0)
+    optimizers = (;
+        points=NU.Adam(kab, gs.points; lr=1f-3),
+        features_dc=NU.Adam(kab, gs.features_dc; lr=1f-3),
+        features_rest=NU.Adam(kab, gs.features_rest; lr=1f-3),
+        opacities=NU.Adam(kab, gs.opacities; lr=1f-3),
+        scales=NU.Adam(kab, gs.scales; lr=1f-3),
+        rotations=NU.Adam(kab, gs.rotations; lr=1f-3))
+
+    # Ranked opacities: the 20 lowest must go, and only those.
+    raw = Float32[GSP.inverse_sigmoid(0.005f0 + 0.009f0 * i) for i in 1:n]
+    copy!(gs.opacities, adapt(kab, reshape(raw, 1, n)))
+    strategy = GSP.ImprovedGSStrategy(gs; recovery_prune_fraction=0.2f0)
+
+    @test GSP.recovery_prune!(strategy, gs, optimizers) == 20
+    @test length(gs) == 80
+    survivors = Array(reshape(gs.opacities, :))
+    @test sort(survivors) ≈ sort(raw[21:end])
+    @test length(optimizers.points.μ[1]) == length(gs.points)
+    @test length(strategy.denom) == 80
+
+    # Ties must not blow the prune up: right after an opacity reset a large
+    # share of Gaussians sit at exactly the same value, and a threshold on the
+    # quantile *value* would take every one of them.
+    gs2 = GSP.GaussianModel(kab,
+        rand(Float32, 3, n), rand(Float32, 3, n), rand(Float32, 3, n);
+        max_sh_degree=0)
+    gs2.opacities .= GSP.inverse_sigmoid(0.05f0)
+    optimizers2 = (;
+        points=NU.Adam(kab, gs2.points; lr=1f-3),
+        features_dc=NU.Adam(kab, gs2.features_dc; lr=1f-3),
+        features_rest=NU.Adam(kab, gs2.features_rest; lr=1f-3),
+        opacities=NU.Adam(kab, gs2.opacities; lr=1f-3),
+        scales=NU.Adam(kab, gs2.scales; lr=1f-3),
+        rotations=NU.Adam(kab, gs2.rotations; lr=1f-3))
+    strategy2 = GSP.ImprovedGSStrategy(gs2; recovery_prune_fraction=0.2f0)
+    @test GSP.recovery_prune!(strategy2, gs2, optimizers2) == 20
+    @test length(gs2) == 80
+end
+
+@testset "ImprovedGS Canny edge map" begin
+    GSP = GaussianSplatting
+    width, height = 40, 32
+
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, 4), rand(Float32, 3, 4), rand(Float32, 3, 4);
+        max_sh_degree=0)
+    strategy = GSP.ImprovedGSStrategy(gs)
+
+    # A constant image has no edges anywhere.
+    flat = adapt(kab, fill(0.5f0, width, height, 3, 1))
+    GSP.edge_map!(strategy, flat, 1)
+    @test all(iszero, Array(strategy.edge_map))
+
+    # A single vertical step at x = 20. Non-maximum suppression is what turns
+    # the blurred gradient ramp into a narrow ridge at the step itself.
+    step_img = zeros(Float32, width, height, 3, 1)
+    step_img[21:end, :, :, :] .= 1f0
+    GSP.edge_map!(strategy, adapt(kab, step_img), 2)
+    e = Array(strategy.edge_map)
+
+    # Away from the step & the clamped borders, nothing survives.
+    @test all(iszero, e[6:16, 6:(height - 5)])
+    @test all(iszero, e[26:(width - 5), 6:(height - 5)])
+
+    # At the step there is a response, and it is a ridge one or two pixels
+    # wide rather than the full width of the Gaussian-blurred ramp.
+    row = e[:, height ÷ 2]
+    @test maximum(row) > 0f0
+    @test argmax(row) in 20:21
+    @test count(>(0f0), row) ≤ 3
+
+    # Median normalization puts the typical positive response at ~1, which is
+    # what makes scores comparable across views.
+    positive = filter(>(0f0), vec(e))
+    @test !isempty(positive)
+    @test partialsort(positive, cld(length(positive), 2)) ≈ 1f0 rtol=1f-4
+
+    # Rotating the image rotates the edge map: the Sobel pair is not transposed.
+    step_h = zeros(Float32, width, height, 3, 1)
+    step_h[:, 17:end, :, :] .= 1f0
+    GSP.edge_map!(strategy, adapt(kab, step_h), 3)
+    eh = Array(strategy.edge_map)
+    col = eh[width ÷ 2, :]
+    @test argmax(col) in 16:17
+    @test all(iszero, eh[6:(width - 5), 6:12])
+
+    # A supervision weight scopes the map before it is normalized: the edge is
+    # kept only where the loss looks, & the median still lands on the survivors.
+    keep = zeros(Float32, width, height)
+    keep[:, 1:(height ÷ 2)] .= 1f0
+    GSP.edge_map!(strategy, adapt(kab, step_img), 4; weight=adapt(kab, keep))
+    ew = Array(strategy.edge_map)
+    @test all(iszero, ew[:, (height ÷ 2 + 1):end])
+    @test maximum(ew[:, 1:(height ÷ 2)]) > 0f0
+    @test partialsort(filter(>(0f0), vec(ew)), cld(count(>(0f0), ew), 2)) ≈ 1f0 rtol=1f-4
+end
+
+@testset "ImprovedGS supervision weight" begin
+    GSP = GaussianSplatting
+    width, height = 8, 6
+
+    @test GSP.supervision_weight(kab, nothing, nothing, width, height) ≡ nothing
+
+    # Coverage mask alone: passed through, expanded to the train resolution.
+    mask = fill(0.5f0, width, height)
+    mask[1, 1] = 0f0
+    w = Array(GSP.supervision_weight(kab, mask, nothing, width, height))
+    @test w ≈ mask
+
+    # Sky mask alone: inverted, so sky pixels carry no weight.
+    sky = zeros(Float32, width, height)
+    sky[:, 1] .= 1f0
+    w = Array(GSP.supervision_weight(kab, nothing, sky, width, height))
+    @test all(iszero, w[:, 1])
+    @test all(isone, w[:, 2:end])
+
+    # Both: a pixel counts only where it is covered *and* not sky.
+    w = Array(GSP.supervision_weight(kab, mask, sky, width, height))
+    @test all(iszero, w[:, 1])
+    @test w[1, 2] == 0f0
+    @test w[2, 2] ≈ 0.5f0
+
+    # A mask stored below the train resolution is expanded, not rejected.
+    small = fill(0.25f0, width ÷ 2, height ÷ 2)
+    w = GSP.supervision_weight(kab, small, nothing, width, height)
+    @test size(w) == (width, height)
+    @test all(≈(0.25f0), Array(w))
+end
+
+@testset "ImprovedGS render side channels" begin
+    GSP = GaussianSplatting
+    width, height = 64, 48
+    camera = GSP.Camera(; fx=100f0, fy=100f0, width, height)
+
+    # A grid of Gaussians on a plane at `z = 3`, as in the rasterizer tests.
+    xs = range(-0.6f0, 0.6f0; length=6)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n = size(points, 2)
+    colors = adapt(kab, rand(Float32, 3, n))
+    scales = adapt(kab, repeat(Float32[log(0.1f0), log(0.1f0), log(0.1f0)], 1, n))
+
+    gs = GSP.GaussianModel(kab, points, colors, scales;
+        max_sh_degree=0, isotropic=false)
+    gs.opacities .= 5f0
+    rast = GSP.GaussianRasterizer(kab, camera; mode=:rgb)
+
+    # `edge_map` restricted to one pixel box: only the Gaussians projecting
+    # into it may collect any edge-aware score.
+    box = (24:40, 18:30)
+    edge_map = adapt(kab, begin
+        m = zeros(Float32, width, height)
+        m[box...] .= 1f0
+        m
+    end)
+    edge_scores = KA.zeros(kab, Float32, n)
+
+    image = rast(
+        gs.points, gs.opacities, gs.scales, gs.rotations,
+        gs.features_dc, gs.features_rest;
+        camera, sh_degree=0, edge_map, edge_scores)
+
+    scores = Array(edge_scores)
+    @test all(≥(0f0), scores)
+    @test any(>(0f0), scores)
+    # `Σₚ ωₚ·αₚ·Tₚ ≤ Σₚ ωₚ` — the compositing weights of one Gaussian over a
+    # pixel sum to at most 1.
+    @test sum(scores) ≤ length(box[1]) * length(box[2]) + 1f-3
+
+    # Score is exactly the alpha-weighted edge mass, so it must vanish when the
+    # edge map does & scale linearly with it.
+    zero_scores = KA.zeros(kab, Float32, n)
+    rast(gs.points, gs.opacities, gs.scales, gs.rotations,
+        gs.features_dc, gs.features_rest;
+        camera, sh_degree=0, edge_map=zero(edge_map), edge_scores=zero_scores)
+    @test all(iszero, Array(zero_scores))
+
+    doubled = KA.zeros(kab, Float32, n)
+    rast(gs.points, gs.opacities, gs.scales, gs.rotations,
+        gs.features_dc, gs.features_rest;
+        camera, sh_degree=0, edge_map=2f0 .* edge_map, edge_scores=doubled)
+    @test Array(doubled) ≈ 2f0 .* scores rtol=1f-4
+
+    # Absolute gradient accumulation is opt-in, and dominates the signed sum.
+    @test !rast.abs_grad
+    GSP.enable_abs_grad!(rast)
+    @test rast.abs_grad
+
+    weights = adapt(kab, randn(Float32, 3, width, height))
+    Zygote.withgradient(gs.points) do means
+        sum(rast(means, gs.opacities, gs.scales, gs.rotations,
+            gs.features_dc, gs.features_rest;
+            camera, sh_degree=0) .* weights)
+    end
+
+    signed = Array(reinterpret(reshape, Float32, rast.gstate.∇means_2d))
+    absolute = Array(reinterpret(reshape, Float32, rast.gstate.∇means_2d_abs))
+    radii = Array(rast.gstate.radii)
+
+    @test size(absolute) == size(signed)
+    @test all(isfinite, absolute)
+    @test all(≥(0f0), absolute)
+    # `|Σₚ x| ≤ Σₚ |x|`, with strict inequality wherever contributions cancel.
+    @test all(absolute .≥ abs.(signed) .- 1f-5)
+    visible = radii[1:n] .> 0
+    @test any(visible)
+    @test any(absolute[:, visible] .> abs.(signed[:, visible]) .+ 1f-6)
+    # Culled Gaussians contribute to neither.
+    culled = .!visible
+    any(culled) && @test all(iszero, absolute[:, culled])
+end
+
+@testset "ImprovedGS post_train_step! round-trip" begin
+    GSP = GaussianSplatting
+    NU = GSP.NU
+    width, height = 64, 48
+    camera = GSP.Camera(; fx=100f0, fy=100f0, width, height)
+
+    xs = range(-0.6f0, 0.6f0; length=6)
+    points = adapt(kab, Float32[
+        p[i] for i in 1:3, p in vec([(x, y, 3f0) for x in xs, y in xs])])
+    n = size(points, 2)
+    gs = GSP.GaussianModel(kab, points,
+        adapt(kab, rand(Float32, 3, n)),
+        adapt(kab, repeat(Float32[log(0.1f0)], 3, n));
+        max_sh_degree=0, isotropic=false)
+    gs.opacities .= 5f0
+
+    rast = GSP.GaussianRasterizer(kab, camera; mode=:rgb)
+    GSP.enable_abs_grad!(rast)
+
+    optimizers = (;
+        points=NU.Adam(kab, gs.points; lr=1f-3),
+        features_dc=NU.Adam(kab, gs.features_dc; lr=1f-3),
+        features_rest=NU.Adam(kab, gs.features_rest; lr=1f-3),
+        opacities=NU.Adam(kab, gs.opacities; lr=1f-3),
+        scales=NU.Adam(kab, gs.scales; lr=1f-3),
+        rotations=NU.Adam(kab, gs.rotations; lr=1f-3))
+
+    # A short refine window with one refine at its midpoint, where the budget
+    # curve sits above the current count but within reach of a single pass
+    # (each split adds one Gaussian, so one refine can at most double).
+    strategy = GSP.ImprovedGSStrategy(gs;
+        max_cap=2 * n, densify_grad_threshold=0f0,
+        start_refine=0, stop_refine=200, refine_every=100,
+        recovery_prune_iters=Int[])
+    cache = GaussianSplatting.GPUArrays.AllocCache()
+
+    # One render + backward so the strategy has statistics to act on.
+    weights = adapt(kab, randn(Float32, 3, width, height))
+    Zygote.withgradient(gs.points) do means
+        sum(rast(means, gs.opacities, gs.scales, gs.rotations,
+            gs.features_dc, gs.features_rest;
+            camera, sh_degree=0) .* weights)
+    end
+    GSP.update_stats!(strategy, rast.gstate.radii,
+        rast.gstate.∇means_2d_abs, camera.intrinsics.resolution)
+
+    expected = GSP.growth_budget(strategy, 100)
+    @test n < expected ≤ 2 * n
+
+    # No `dataset`, so there is nothing to score edges against & the split draw
+    # is uniform over the gradient candidates.
+    GSP.post_train_step!(strategy, gs, optimizers, rast, camera, cache;
+        step=100, extent=1f0)
+
+    # Nothing here is transparent or oversized, so the prune is a no-op and the
+    # count lands exactly on the budget curve.
+    @test length(gs) == expected
+    for (opt, θ) in zip(values(optimizers),
+        (gs.points, gs.features_dc, gs.features_rest,
+         gs.opacities, gs.scales, gs.rotations))
+        @test length(opt.μ[1]) == length(θ)
+        @test length(opt.ν[1]) == length(θ)
+    end
+    # Statistics are regrown zeroed at the new size, ready for the next window.
+    for name in GSP.stat_array_names(strategy)
+        arr = getfield(strategy, name)
+        @test length(arr) == length(gs)
+        @test all(iszero, Array(arr))
+    end
+    @test all(isfinite, Array(gs.points))
+    @test all(isfinite, Array(gs.scales))
+
+    # Opacity is the only prune criterion: neither reference implementation
+    # carries 3DGS's screen-size or world-scale prune, so a huge, fully opaque
+    # Gaussian must survive a refine that runs well past the first opacity
+    # reset (where `DefaultStrategy` would have culled it).
+    # `step=0` puts the budget curve at zero, so this is a pure prune pass.
+    gs.scales[:, 3] .= log(100f0)   # ≫ 0.1·extent
+    gs.opacities .= 5f0
+    n_before = length(gs)
+    GSP.densify_and_prune!(strategy, gs, optimizers; step=0)
+    @test length(gs) == n_before
+    @test maximum(Array(gs.scales)) ≈ log(100f0) rtol=1f-4
+
+    # ...but a transparent one is still pruned.
+    gs.opacities .= GSP.inverse_sigmoid(1f-4)
+    GSP.densify_and_prune!(strategy, gs, optimizers; step=0)
+    @test length(gs) == 0
+
+    # Past `stop_refine` the strategy is inert.
+    before = length(gs)
+    GSP.post_train_step!(strategy, gs, optimizers, rast, camera, cache;
+        step=300, extent=1f0)
+    @test length(gs) == before
+end
+
+@testset "ImprovedGS edge-score view sampling" begin
+    GSP = GaussianSplatting
+    gs = GSP.GaussianModel(kab,
+        rand(Float32, 3, 4), rand(Float32, 3, 4), rand(Float32, 3, 4);
+        max_sh_degree=0)
+    strategy = GSP.ImprovedGSStrategy(gs;
+        edge_sample_cams=3, edge_full_scan_iters=[500])
+
+    # A sweep covers every view before repeating any: 4 draws of 3 out of 7
+    # views is 12 ids, i.e. one full pass plus 5 of the next.
+    drawn = reduce(vcat, (GSP.sample_score_views!(strategy, 7, 100) for _ in 1:4))
+    @test length(drawn) == 12
+    @test sort(drawn[1:7]) == 1:7
+    @test length(unique(drawn[8:12])) == 5
+
+    @test GSP.sample_score_views!(strategy, 7, 500) == 1:7   # Full scan.
+    @test GSP.sample_score_views!(strategy, 2, 100) == 1:2   # Fewer views than asked for.
+    @test GSP.sample_score_views!(strategy, 0, 100) == Int[]
 end
 
 @testset "Checkpoint" begin
