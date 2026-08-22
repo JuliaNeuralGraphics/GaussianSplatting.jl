@@ -338,7 +338,7 @@ function setup_depth_supervision(rast::GaussianRasterizer, dataset::ColmapDatase
     end
     return load_or_fit_depth_anchors(
         dataset.depths_dir,
-        points, dataset.train_cameras, load_prior;
+        points, dataset.train_cameras, dataset.train_visible_points, load_prior;
         mode=opt_params.depth_loss_mode)
 end
 

@@ -314,7 +314,10 @@ function write_colmap_images(path::String, views::Vector{RCView})
         write(io, Float64.(t)...)
         write(io, COLMAP_CAMERA_ID)
         write(io, codeunits(view.name), UInt8(0))
-        write(io, UInt64(0)) # No 2D observations: nothing downstream reads them.
+        # No 2D observations: RealityCapture's export carries no correspondences.
+        # Depth-anchor fitting wants them (`collect_anchor_samples`) & falls back
+        # to an approximate z-buffer visibility test when they are missing.
+        write(io, UInt64(0))
     end
     write(path, take!(io))
     return
@@ -328,7 +331,7 @@ function write_colmap_points(path::String, points::Matrix{Float64}, colors::Matr
         write(io, points[1, i], points[2, i], points[3, i])
         write(io, colors[1, i], colors[2, i], colors[3, i])
         write(io, 0.0)       # Reprojection error, unused by the dataset.
-        write(io, UInt64(0)) # Empty track.
+        write(io, UInt64(0)) # Empty track, for the same reason as in `write_colmap_images`.
     end
     write(path, take!(io))
     return

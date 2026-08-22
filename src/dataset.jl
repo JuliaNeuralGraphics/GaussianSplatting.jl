@@ -27,6 +27,11 @@ struct ColmapDataset
     train_depth_paths::Vector{Maybe{String}}
     has_depth_priors::Bool
     depths_dir::Maybe{String}
+    # Columns of `points` each train view actually observes, from COLMAP's tracks.
+    # Depth anchors are fitted only on these: a point that lands inside the frame
+    # but is occluded pairs the prior's front-surface value with a depth from
+    # behind that surface, which biases the fit (see `collect_anchor_samples`).
+    train_visible_points::Vector{Vector{UInt32}}
 
     # Sky masks for sky supervision.
     # Soft weights in `[0, 1]`, so antialiased mask borders contribute
@@ -120,6 +125,9 @@ function ColmapDataset(;
     depth_paths = Maybe{String}[]
     sky_paths = Maybe{String}[]
     mask_paths = Maybe{String}[]
+    # Raw COLMAP point ids per view; resolved to `points_3d` columns below,
+    # once carving has settled what that cloud contains.
+    visible_ids = Vector{UInt64}[]
     empty_masks = 0
 
     image_filenames = String[]
@@ -152,6 +160,7 @@ function ColmapDataset(;
         push!(depth_paths, has_depth_dir ? sidecar_path(depths_dir, img.name) : nothing)
         push!(sky_paths, has_sky_dir ? sidecar_path(sky_dir, img.name) : nothing)
         push!(mask_paths, mask_path)
+        push!(visible_ids, img.points_3d_ids)
     end
     empty_masks > 0 && @warn "Dropped $empty_masks image(s): their mask keeps no pixels."
     @info "Found `$(length(image_filenames))` images."
@@ -170,6 +179,9 @@ function ColmapDataset(;
     # Remove points from initial point-cloud that are not covered by the masks.
     points_3d = Float32.(points.points_3d)
     points_colors = Float32.(points.points_colors) .* (1f0 / 255f0)
+    # Load order -> column in `points_3d`, `0` once carved away. Carving
+    # renumbers the cloud, and the per-view tracks index into it.
+    point_column = collect(UInt32, 1:size(points_3d, 2))
     if carve_with_masks && any(!isnothing, mask_paths)
         keep = carve_points(points_3d, cameras, mask_paths; tolerance=carve_tolerance)
         n_keep = count(keep)
@@ -181,7 +193,24 @@ function ColmapDataset(;
             @info "Coverage masks carved the init cloud: `$(size(points_3d, 2))` → `$n_keep` points."
             points_3d = points_3d[:, keep]
             points_colors = points_colors[:, keep]
+            fill!(point_column, 0)
+            @view(point_column[keep]) .= 1:n_keep
         end
+    end
+
+    # Resolve the tracks: COLMAP id -> load order -> surviving column.
+    # Unobserved 2D features carry a sentinel id that is in no lookup, so the
+    # `get` also drops them.
+    visible_points = map(visible_ids) do ids
+        columns = UInt32[]
+        for id in ids
+            i = get(points.point_id_to_idx, id, UInt64(0))
+            i == 0 && continue
+            column = point_column[i]
+            column == 0 && continue
+            push!(columns, column)
+        end
+        columns
     end
 
     scales = compute_scales(points_3d)
@@ -199,6 +228,7 @@ function ColmapDataset(;
     train_thumbnails = with_thumbnails ? thumbnails_list[train_ids] : Array{UInt8, 3}[]
     train_image_filenames = image_filenames[train_ids]
     train_depth_paths = depth_paths[train_ids]
+    train_visible_points = visible_points[train_ids]
     train_sky_paths = sky_paths[train_ids]
     train_mask_paths = mask_paths[train_ids]
 
@@ -223,6 +253,7 @@ function ColmapDataset(;
         train_image_filenames, train_cameras, train_thumbnails,
         train_depth_paths, n_train_depths > 0,
         has_depth_dir ? depths_dir : nothing,
+        train_visible_points,
         train_sky_paths, n_train_sky > 0, has_sky_dir ? sky_dir : nothing,
         train_mask_paths, test_mask_paths, n_masks > 0,
         has_masks_dir ? masks_dir : nothing,

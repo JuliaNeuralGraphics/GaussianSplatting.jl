@@ -3,7 +3,7 @@
 
 Minimal workload to precompile GPU kernels.
 """
-function precompile_workload(kab; mode::Symbol = :rgbd, sh_degrees = 0:0)
+function precompile_workload(kab; mode::Symbol = :rgbdn, sh_degrees = 0:0)
     width, height = 64, 48
     camera = Camera(; fx=100f0, fy=100f0, width, height)
 
