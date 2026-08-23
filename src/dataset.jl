@@ -214,6 +214,17 @@ function ColmapDataset(;
     end
 
     scales = compute_scales(points_3d)
+    # All three axes are identical (isotropic init), so take 1st component only.
+    let s = exp.(@view(scales[1, :]))
+        q = quantile(s, (0.01f0, 0.5f0, 0.99f0))
+        @info "Initial scales (world units): " *
+            "min=$(round(minimum(s); sigdigits=3)), " *
+            "p1=$(round(q[1]; sigdigits=3)), " *
+            "median=$(round(q[2]; sigdigits=3)), " *
+            "p99=$(round(q[3]; sigdigits=3)), " *
+            "max=$(round(maximum(s); sigdigits=3)), " *
+            "mean=$(round(mean(s); sigdigits=3))."
+    end
 
     # Views in filename order.
     order = sortperm(image_filenames)

@@ -15,11 +15,17 @@ Converts a RealityCapture / RealityScan export into a COLMAP dataset.
 SOURCE_PATH is expected to contain:
 
   input/             the images, as exported
-  camera-params.csv  the camera parameters, as exported
-  points.ply         the point cloud, exported with XYZ & RGB
+  bundler.out        the Bundler v0.3 export (either axis option)
+  images.txt         the Bundler image list (list.txt also accepted)
+  camera-params.csv  the camera parameters (cameras.csv also accepted)
+  points.ply         optional, exported with XYZ & RGB
 
 The images are undistorted into a single shared pinhole & written to
 OUTPUT_PATH/images, alongside an OUTPUT_PATH/sparse/0 COLMAP model.
+
+The Bundler export is what carries the SfM tracks the depth anchors are fitted
+on, so it is required. points.ply is folded in as extra, untracked init points
+only when it is a different (denser) cloud than the one in bundler.out.
 
 Options:
   -s, --source_path PATH  RealityCapture export path (required).

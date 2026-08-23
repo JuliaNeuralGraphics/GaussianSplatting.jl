@@ -1,15 +1,17 @@
 # RealityCapture / RealityScan scene conversion.
 #
 # RC exports a scene as an `input/` image directory, a `camera-params.csv` pose
-# table & a dense `points.ply`. Two things keep it from being read directly:
-# its intrinsics are per-image, and its radial distortion is large enough to
-# matter (tens of pixels at the corners), while the training path assumes one
-# shared pinhole over pre-undistorted images (see the notes in `dataset.jl`).
+# & lens table, a `bundler.out` Bundler v0.3 reconstruction with its
+# `images.txt` name list, and a `points.ply` cloud. Three things keep that from
+# being read directly: the intrinsics are per-image, the radial distortion is
+# large enough to matter (tens of pixels at the corners), and the training path
+# assumes one shared pinhole over pre-undistorted images (see the notes in
+# `dataset.jl`).
 #
-# `rc_convert` resolves both once & writes the COLMAP layout `ColmapDataset`
-# already reads, the same way `gs-convert.jl` hands COLMAP's own undistorter
-# the job. Included by `rc-convert.jl`; standalone, so it does not need the
-# package loaded.
+# `rc_convert` resolves all three once & writes the COLMAP layout
+# `ColmapDataset` already reads, the same way `gs-convert.jl` hands COLMAP's own
+# undistorter the job. Included by `rc-convert.jl`; standalone, so it does not
+# need the package loaded.
 
 using FileIO
 using ImageCore
@@ -24,8 +26,11 @@ import PlyIO
 import ProgressMeter
 
 const RC_IMAGES_DIR = "input"
-const RC_PARAMS_FILE = "camera-params.csv"
 const RC_POINTS_FILE = "points.ply"
+const RC_BUNDLER_FILE = "bundler.out"
+# RC has shipped the camera table & the Bundler name list under either name.
+const RC_PARAMS_FILES = ("camera-params.csv", "cameras.csv")
+const RC_BUNDLER_LISTS = ("images.txt", "list.txt")
 
 # Views whose focal deviates from the dataset's median by more than this are
 # dropped: warping a zoomed-in frame into the shared pinhole would leave a
@@ -110,34 +115,193 @@ function read_rc_params(csv_path::String)
     return views
 end
 
-# RC's world frame is ENU (`x` east, `y` north, `alt` up) while its yaw/pitch/roll
-# are the aerospace angles of a NED body frame, so the axis swap below sits
-# outside the Euler product. `RC_BODY_TO_CAM` is `Rz(90°)`, taking that body
-# frame to the OpenCV camera frame the rasterizer works in (+x right, +y down,
-# +z forward — see `pos_world_to_cam` in `rasterization/projection.jl`).
+
+# Bundler v0.3, RC's only export that carries SfM tracks — which point each view
+# actually saw. `dataset.jl` resolves those into `train_visible_points` and
+# `fit_depth_anchors` fits the depth anchors on them alone; without a track it
+# falls back to `visible_by_zbuffer`, an approximation (see the warning in
+# `regularizations/depth_supervision.jl`). So the poses, the points & the tracks
+# all come from the `.out`.
 #
-# NOTE: a level RC camera has `pitch ≈ 90°`, which leaves `yaw` & `roll` almost
-# gimbal-locked against each other. Reading the three angles as a ZXZ rotation
-# instead — the intuitive "azimuth, elevation, tilt" — looks right on frames
-# with little roll & silently falls apart on the rest.
-const RC_ENU_TO_NED = SMatrix{3, 3, Float64, 9}(0, 1, 0, 1, 0, 0, 0, 0, -1)
-const RC_BODY_TO_CAM = SMatrix{3, 3, Float64, 9}(0, 1, 0, -1, 0, 0, 0, 0, 1)
+# What the `.out` does *not* carry is the lens: RC writes `k1 = k2 = 0` there &
+# puts the principal point at the image center, while the real lens needs the
+# `k1..k4, t1, t2` of the CSV — 163px of uncorrected radial at the corner on a
+# typical phone capture. The two agree on the focal, so the CSV stays the
+# authority on distortion & the `.out` on geometry.
+
+# Bundler's cameras look down `-z` with `+y` up; the rasterizer's look down `+z`
+# with `+y` down, so a pose crosses over by a left-multiply with this. RC offers
+# "Bundler v0.3" & "Bundler v0.3 negative z" as separate export options and the
+# file records which one it was, so `bundler_flip` votes rather than assumes.
+const BUNDLER_TO_COLMAP = SMatrix{3, 3, Float64, 9}(1, 0, 0, 0, -1, 0, 0, 0, -1)
+
+# RC writes the Bundler cloud in a world frame `Rx(-90°)` away from the ENU
+# frame of `camera-params.csv`: ENU `(x, y, alt)` lands at `(x, -alt, y)`. Only
+# needed to fold an extra `points.ply` into the model, and checked against the
+# camera centers before it is trusted (see `rc_enu_matches_bundler`).
+const RC_ENU_TO_BUNDLER = SMatrix{3, 3, Float64, 9}(1, 0, 0, 0, 0, 1, 0, -1, 0)
 
 """
-The view's camera-to-world rotation.
+One `<camera> <key> <x> <y>` entry of a Bundler point's view list: the camera
+that saw the point (0-based, indexing the `.out`'s own camera order) & where it
+landed, in pixels from the image center with `+y` up.
 """
-function rc_c2w(view::RCView)
-    yaw, pitch, roll = deg2rad.(view.ypr)
-    return RC_ENU_TO_NED * RotZ(yaw) * RotY(pitch) * RotX(roll) * RC_BODY_TO_CAM
+struct BundlerObservation
+    camera::Int
+    x::Float64
+    y::Float64
+end
+
+struct BundlerPoint
+    position::SVector{3, Float64}
+    color::SVector{3, UInt8}
+    views::Vector{BundlerObservation}
 end
 
 """
-The view's pose in COLMAP's convention: `R` maps world to camera, `t` is the
-world origin in camera space.
+One camera of a Bundler file. `R` maps world to camera & `t` is the world origin
+in camera space, both in Bundler's own axis convention (see
+[`BUNDLER_TO_COLMAP`](@ref)). An unregistered camera has `focal == 0`.
 """
-function rc_pose(view::RCView)
-    R = transpose(rc_c2w(view))
-    return R, -R * view.position
+struct BundlerCamera
+    focal::Float64
+    R::SMatrix{3, 3, Float64, 9}
+    t::SVector{3, Float64}
+end
+
+# Invariant under `BUNDLER_TO_COLMAP`, which cancels with its own transpose.
+bundler_center(camera::BundlerCamera) = -transpose(camera.R) * camera.t
+
+"""
+Read a Bundler v0.3 `.out` file as `(cameras, points)`, both in file order.
+"""
+function read_bundler(path::String)
+    open(path, "r") do io
+        header = readline(io)
+        occursin("Bundle file", header) || error(
+            "`$path` is not a Bundler file (first line: `$header`).")
+
+        counts = split(strip(readline(io)))
+        length(counts) == 2 || error(
+            "`$path` has a malformed camera/point count line: `$(join(counts, " "))`.")
+        n_cameras, n_points = parse.(Int, counts)
+
+        # Bundler is strictly line-structured: 5 lines per camera, 3 per point.
+        function numbers(n)
+            fields = split(strip(readline(io)))
+            length(fields) == n || error(
+                "`$path` has a malformed line: expected $n value(s), " *
+                "got $(length(fields)).")
+            return parse.(Float64, fields)
+        end
+
+        cameras = Vector{BundlerCamera}(undef, n_cameras)
+        for i in 1:n_cameras
+            focal = numbers(3)[1] # `<f> <k1> <k2>`, and RC's k's are zeros.
+            row1, row2, row3 = numbers(3), numbers(3), numbers(3)
+            cameras[i] = BundlerCamera(focal,
+                SMatrix{3, 3, Float64, 9}( # The rows above, laid out by column.
+                    row1[1], row2[1], row3[1],
+                    row1[2], row2[2], row3[2],
+                    row1[3], row2[3], row3[3]),
+                SVector{3, Float64}(numbers(3)))
+        end
+
+        points = Vector{BundlerPoint}(undef, n_points)
+        for i in 1:n_points
+            position = SVector{3, Float64}(numbers(3))
+            color = SVector{3, UInt8}(clamp.(round.(Int, numbers(3)), 0, 255))
+
+            fields = split(strip(readline(io)))
+            n_views = round(Int, parse(Float64, fields[1]))
+            length(fields) == 1 + 4 * n_views || error(
+                "`$path` point $i lists $n_views view(s) but carries " *
+                "$(length(fields) - 1) field(s) after the count.")
+            views = Vector{BundlerObservation}(undef, n_views)
+            for j in 1:n_views
+                base = 1 + (j - 1) * 4
+                views[j] = BundlerObservation(
+                    round(Int, parse(Float64, fields[base + 1])),
+                    parse(Float64, fields[base + 3]),
+                    parse(Float64, fields[base + 4]))
+            end
+            points[i] = BundlerPoint(position, color, views)
+        end
+        return (; cameras, points)
+    end
+end
+
+"""
+Read the Bundler image list: one image per line, in camera order.
+
+RC writes absolute Windows paths, so only the file name is kept. Bundler allows
+an optional focal column after the name; trailing numbers are stripped rather
+than splitting on the first space, so paths with spaces in them survive.
+"""
+function read_bundler_list(path::String)
+    names = String[]
+    for line in eachline(path)
+        entry = strip(line)
+        isempty(entry) && continue
+        fields = split(entry)
+        while length(fields) > 1 && tryparse(Float64, fields[end]) ≢ nothing
+            fields = fields[1:end - 1]
+        end
+        push!(names, basename(replace(join(fields, " "), '\\' => '/')))
+    end
+    isempty(names) && error("`$path` names no images.")
+    return names
+end
+
+"""
+The left-multiply taking this export's poses into the rasterizer's convention:
+[`BUNDLER_TO_COLMAP`](@ref) for a `-z` forward export, the identity for a `+z`
+one.
+
+RC's two Bundler options differ by exactly that factor & the file does not say
+which was used, so the two are told apart by projecting the cloud through every
+camera under both hypotheses and keeping whichever puts more of it inside the
+frame. A real scene is a landslide for one of them: on a 228-view fountain the
+flip wins 961k in-frame samples to 321k.
+"""
+function bundler_flip(bundler, width::Int, height::Int; samples::Int = 4096)
+    stride = max(1, cld(length(bundler.points), samples))
+    sampled = @view bundler.points[1:stride:end]
+
+    in_frame(flip) = sum(bundler.cameras) do camera
+        camera.focal > 0 || return 0
+        R, t = flip * camera.R, flip * camera.t
+        count(sampled) do point
+            p = R * point.position + t
+            p[3] > 0 || return false
+            u = camera.focal * p[1] / p[3] + width / 2
+            v = camera.focal * p[2] / p[3] + height / 2
+            return 0 ≤ u ≤ width && 0 ≤ v ≤ height
+        end
+    end
+
+    as_is = in_frame(one(SMatrix{3, 3, Float64, 9}))
+    flipped = in_frame(BUNDLER_TO_COLMAP)
+    @info "Bundler cameras look down $(flipped ≥ as_is ? "-z" : "+z") " *
+        "($flipped in-frame sample(s) flipped vs $as_is as-is)."
+    return flipped ≥ as_is ? BUNDLER_TO_COLMAP : one(SMatrix{3, 3, Float64, 9})
+end
+
+"""
+Whether [`RC_ENU_TO_BUNDLER`](@ref) really maps this export's CSV positions onto
+its Bundler camera centers, to within `tolerance` of the scene's own size.
+
+The two clouds can only be mixed when it does, so this is checked rather than
+assumed — a silently misaligned init cloud is far more expensive than skipping it.
+"""
+function rc_enu_matches_bundler(cameras, positions; tolerance::Float64 = 1e-3)
+    centers = [bundler_center(camera) for camera in cameras]
+    center = mean(centers)
+    extent = maximum(norm(c - center) for c in centers)
+    worst = maximum(zip(centers, positions)) do (c, position)
+        norm(c - RC_ENU_TO_BUNDLER * position)
+    end
+    return worst ≤ tolerance * max(extent, eps())
 end
 
 """
@@ -302,36 +466,56 @@ function write_colmap_cameras(path::String, width::Int, height::Int, focal::Floa
     end
 end
 
-function write_colmap_images(path::String, views::Vector{RCView})
-    io = IOBuffer()
-    write(io, UInt64(length(views)))
-    for (id, view) in enumerate(views)
-        R, t = rc_pose(view)
-        q = Rotations.params(QuatRotation(R)) # (w, x, y, z), COLMAP's order.
+"""
+One image of the COLMAP model: its pose, its file name & the 2D observations
+tying it to `points3D.bin`.
+"""
+struct ColmapImage
+    name::String
+    q::SVector{4, Float64} # (w, x, y, z), COLMAP's order.
+    t::SVector{3, Float64}
+    # `(x, y, point3D id)` per observation, in COLMAP's top-left pixel frame.
+    observations::Vector{Tuple{Float64, Float64, UInt64}}
+end
 
+function write_colmap_images(path::String, images::Vector{ColmapImage})
+    io = IOBuffer()
+    write(io, UInt64(length(images)))
+    for (id, image) in enumerate(images)
         write(io, Int32(id))
-        write(io, Float64.(q)...)
-        write(io, Float64.(t)...)
+        write(io, image.q...)
+        write(io, image.t...)
         write(io, COLMAP_CAMERA_ID)
-        write(io, codeunits(view.name), UInt8(0))
-        # No 2D observations: RealityCapture's export carries no correspondences.
-        # Depth-anchor fitting wants them (`collect_anchor_samples`) & falls back
-        # to an approximate z-buffer visibility test when they are missing.
-        write(io, UInt64(0))
+        write(io, codeunits(image.name), UInt8(0))
+        write(io, UInt64(length(image.observations)))
+        for (x, y, point_id) in image.observations
+            write(io, x, y, point_id)
+        end
     end
     write(path, take!(io))
     return
 end
 
-function write_colmap_points(path::String, points::Matrix{Float64}, colors::Matrix{UInt8})
+"""
+Write `points3D.bin`. `tracks[i]` holds the `(image id, observation index)`
+pairs of point `i`; an empty one is allowed & means the point initializes the
+model without taking part in the depth-anchor fit.
+"""
+function write_colmap_points(path::String,
+    points::Vector{SVector{3, Float64}}, colors::Vector{SVector{3, UInt8}},
+    tracks::Vector{Vector{Tuple{UInt32, UInt32}}},
+)
     io = IOBuffer()
-    write(io, UInt64(size(points, 2)))
-    for i in axes(points, 2)
+    write(io, UInt64(length(points)))
+    for i in eachindex(points)
         write(io, UInt64(i))
-        write(io, points[1, i], points[2, i], points[3, i])
-        write(io, colors[1, i], colors[2, i], colors[3, i])
-        write(io, 0.0)       # Reprojection error, unused by the dataset.
-        write(io, UInt64(0)) # Empty track, for the same reason as in `write_colmap_images`.
+        write(io, points[i]...)
+        write(io, colors[i]...)
+        write(io, 0.0) # Reprojection error, unused by the dataset.
+        write(io, UInt64(length(tracks[i])))
+        for (image_id, index) in tracks[i]
+            write(io, image_id, index)
+        end
     end
     write(path, take!(io))
     return
@@ -340,20 +524,45 @@ end
 focal2fov(resolution, focal) = 2 * rad2deg(atan(resolution / (2 * focal)))
 
 """
+The first of `candidates` present in `dir`, erroring out when none is.
+"""
+function rc_source_file(dir::String, candidates, what::String)
+    for candidate in candidates
+        path = joinpath(dir, candidate)
+        isfile(path) && return path
+    end
+    error("RealityCapture export is missing its $what: none of " *
+        join(("`$c`" for c in candidates), ", ") * " in `$dir`.")
+end
+
+"""
     rc_convert(source_dir; kwargs...)
 
 Convert a RealityCapture / RealityScan export into the COLMAP layout
 `ColmapDataset` reads: undistorted `images/` & a
 `sparse/0/{cameras,images,points3D}.bin` model.
 
-`source_dir` is expected to hold `$RC_IMAGES_DIR/`, `$RC_PARAMS_FILE` &
-`$RC_POINTS_FILE`.
+`source_dir` is expected to hold
+
+    input/             the images, as exported
+    bundler.out        the Bundler v0.3 export: poses, points & SfM tracks
+    images.txt         the Bundler image list (`list.txt` also accepted)
+    camera-params.csv  the camera & lens table (`cameras.csv` also accepted)
+
+The Bundler export is required: it is the only part of an RC export carrying SfM
+tracks, and the depth anchors are fitted on the points each view actually saw.
+Either of RC's two Bundler options works — the axis convention is detected, not
+assumed (see [`bundler_flip`](@ref)).
+
+`points.ply` is optional & folded in only when it holds a *different* cloud than
+the `.out`, which is RC's dense export: a far better initialization than the
+sparse Bundler cloud, carrying no tracks of its own.
 
 - `output_dir`: where the conversion is written, `source_dir` by default.
 - `resize`: also write 1/2, 1/4 & 1/8 scale image directories.
-- `max_points`: randomly subsample the init cloud down to this many points.
-    `0` keeps it whole. RC clouds carry far-field background the cameras never
-    get near, so capping is sometimes worth it.
+- `max_points`: randomly subsample each init cloud down to this many points.
+    `0` keeps them whole. RC clouds carry far-field background the cameras
+    never get near, so capping is sometimes worth it.
 - `focal_tolerance`: drop views whose focal deviates from the median by more
     than this fraction (see `RC_FOCAL_TOLERANCE`).
 """
@@ -362,44 +571,61 @@ function rc_convert(source_dir::String;
     max_points::Int = 0, focal_tolerance::Float64 = RC_FOCAL_TOLERANCE,
 )
     images_dir = joinpath(source_dir, RC_IMAGES_DIR)
-    params_file = joinpath(source_dir, RC_PARAMS_FILE)
-    points_file = joinpath(source_dir, RC_POINTS_FILE)
-    for path in (images_dir, params_file, points_file)
-        ispath(path) || error("RealityCapture export is missing `$path`.")
+    isdir(images_dir) || error("RealityCapture export is missing `$images_dir`.")
+    bundler_file = joinpath(source_dir, RC_BUNDLER_FILE)
+    isfile(bundler_file) || error("RealityCapture export is missing `$bundler_file`.")
+    params_file = rc_source_file(source_dir, RC_PARAMS_FILES, "camera table")
+    list_file = rc_source_file(source_dir, RC_BUNDLER_LISTS, "Bundler image list")
+
+    params = read_rc_params(params_file)
+    @info "Read `$(length(params))` camera(s) from `$params_file`."
+    by_name = Dict(view.name => view for view in params)
+
+    bundler = read_bundler(bundler_file)
+    names = read_bundler_list(list_file)
+    length(names) == length(bundler.cameras) || error(
+        "`$list_file` names $(length(names)) image(s) but `$bundler_file` has " *
+        "$(length(bundler.cameras)) camera(s).")
+    @info "Read `$(length(bundler.cameras))` camera(s) & " *
+        "`$(length(bundler.points))` point(s) from `$bundler_file`."
+
+    # `kept` holds the Bundler camera indices that make it into the model, in
+    # order. The tracks are remapped through it, so dropping a view here cannot
+    # leave a stale camera index behind.
+    kept = collect(eachindex(bundler.cameras))
+    function drop!(predicate, reason::String)
+        dropped = filter(predicate, kept)
+        isempty(dropped) && return
+        @warn "Dropped $(length(dropped)) view(s), $reason" * (
+            length(dropped) ≤ 8 ?
+                ": " * join((names[i] for i in dropped), ", ") * "." : ".")
+        filter!(!predicate, kept)
+        return
     end
 
-    views = read_rc_params(params_file)
-    @info "Read `$(length(views))` camera(s) from `$params_file`."
+    drop!(i -> bundler.cameras[i].focal ≤ 0, "unregistered in `$bundler_file`")
+    drop!(i -> !haskey(by_name, names[i]), "no row in `$params_file`")
+    drop!(i -> !isfile(joinpath(images_dir, names[i])), "no image in `$images_dir`")
+    isempty(kept) && error("No view survived: nothing to convert.")
 
-    # RC lists only the images it managed to register, and a capture usually has
-    # more frames than that.
-    n_listed = length(views)
-    filter!(view -> isfile(joinpath(images_dir, view.name)), views)
-    n_listed > length(views) && @warn(
-        "Dropped $(n_listed - length(views)) camera(s): no such file in `$images_dir`.")
-    isempty(views) && error("None of the cameras in `$params_file` have an image.")
+    # A zoomed frame warped into the shared pinhole would be a small image in a
+    # black frame, and the border would be trained against.
+    median_focal = median(by_name[names[i]].f_35mm for i in kept)
+    drop!(i -> abs(by_name[names[i]].f_35mm - median_focal) > focal_tolerance * median_focal,
+        "focal deviates from the median $(round(median_focal; digits=2))mm by " *
+        "more than $(round(focal_tolerance * 100; digits=1))%")
+    isempty(kept) && error("No view survived the focal filter.")
 
+    views = [by_name[names[i]] for i in kept]
+    registered = Set(names)
     n_unregistered = count(readdir(images_dir)) do file
-        isfile(joinpath(images_dir, file)) && !any(v -> v.name == file, views)
+        isfile(joinpath(images_dir, file)) && !(file in registered)
     end
     n_unregistered > 0 && @info(
         "`$images_dir` holds $n_unregistered file(s) with no camera — " *
         "unregistered frames & sidecars are ignored.")
 
-    # A zoomed frame warped into the shared pinhole would be a small image in a
-    # black frame, and the border would be trained against.
-    median_focal = median(view.f_35mm for view in views)
-    is_zoomed(view) = abs(view.f_35mm - median_focal) > focal_tolerance * median_focal
-    zoomed = filter(is_zoomed, views)
-    if !isempty(zoomed)
-        @warn "Dropped $(length(zoomed)) view(s) whose focal deviates from the " *
-            "median $(round(median_focal; digits=2))mm by more than " *
-            "$(round(focal_tolerance * 100; digits=1))%: " *
-            join(("$(v.name) ($(round(v.f_35mm; digits=2))mm)" for v in zoomed), ", ")
-        filter!(!is_zoomed, views)
-    end
-
-    height, width = size(load(joinpath(images_dir, views[1].name)))
+    height, width = size(load(joinpath(images_dir, first(views).name)))
     @info "Image resolution: ($width x $height) (width x height)."
 
     focal = maximum(v -> rc_required_focal(v, width, height), views)
@@ -407,6 +633,8 @@ function rc_convert(source_dir::String;
         "focal $(round(focal; digits=2))px, " *
         "fov $(round(focal2fov(width, focal); digits=2))° x " *
         "$(round(focal2fov(height, focal); digits=2))°."
+
+    flip = bundler_flip(bundler, width, height)
 
     out_images_dir = joinpath(output_dir, "images")
     mkpath(out_images_dir)
@@ -417,7 +645,14 @@ function rc_convert(source_dir::String;
 
     progress = ProgressMeter.Progress(length(views); desc="Undistorting: ")
     Threads.@threads for view in views
-        undistorted = rc_undistort(load(joinpath(images_dir, view.name)), view, focal)
+        image = load(joinpath(images_dir, view.name))
+        # One camera covers every view, so a frame of another size would be
+        # trained against intrinsics that are not its own.
+        size(image) == (height, width) || error(
+            "`$(view.name)` is $(size(image, 2))x$(size(image, 1)), but the model " *
+            "assumes $(width)x$(height): every view has to share one resolution.")
+
+        undistorted = rc_undistort(image, view, focal)
         save(joinpath(out_images_dir, view.name), undistorted)
         for scale in scales
             save(
@@ -428,20 +663,95 @@ function rc_convert(source_dir::String;
     end
     ProgressMeter.finish!(progress)
 
-    points, colors = read_rc_points(points_file)
-    @info "Read `$(size(points, 2))` init point(s) from `$points_file`."
-    if max_points > 0 && size(points, 2) > max_points
-        keep = randperm(size(points, 2))[1:max_points]
-        points, colors = points[:, keep], colors[:, keep]
-        @info "Subsampled the init cloud to `$max_points` points."
+    # Poses first: the tracks below address images by position in `kept`.
+    images = map(enumerate(kept)) do (id, i)
+        camera = bundler.cameras[i]
+        R, t = flip * camera.R, flip * camera.t
+        ColmapImage(names[i],
+            SVector{4, Float64}(Rotations.params(QuatRotation(R))),
+            SVector{3, Float64}(t),
+            Tuple{Float64, Float64, UInt64}[])
+    end
+
+    # Bundler camera index -> output image id, `0` for a dropped view.
+    image_id = zeros(Int, length(bundler.cameras))
+    for (id, i) in enumerate(kept)
+        image_id[i] = id
+    end
+
+    selected = eachindex(bundler.points)
+    if max_points > 0 && length(bundler.points) > max_points
+        selected = sort!(randperm(length(bundler.points))[1:max_points])
+        @info "Subsampled the Bundler cloud to `$max_points` points."
+    end
+
+    positions = SVector{3, Float64}[]
+    colors = SVector{3, UInt8}[]
+    tracks = Vector{Tuple{UInt32, UInt32}}[]
+    for i in selected
+        point = bundler.points[i]
+        push!(positions, point.position)
+        push!(colors, point.color)
+
+        point_id = UInt64(length(positions))
+        track = Tuple{UInt32, UInt32}[]
+        for observation in point.views
+            id = get(image_id, observation.camera + 1, 0)
+            id == 0 && continue
+            # Bundler measures from the image center with `+y` up.
+            # NOTE: in the *distorted* frame — `rc_undistort` moves the pixel, and
+            # inverting that per observation buys nothing, as `dataset.jl` reads
+            # the point ids & never the coordinates.
+            observations = images[id].observations
+            push!(observations,
+                (observation.x + width / 2, height / 2 - observation.y, point_id))
+            push!(track, (UInt32(id), UInt32(length(observations) - 1)))
+        end
+        push!(tracks, track)
+    end
+    n_bundler_points = length(positions)
+
+    # A denser `points.ply` initializes far better than the sparse Bundler cloud.
+    # That it carries no tracks is harmless: `collect_anchor_samples` only ever
+    # samples the columns a view's track names, so the extra points feed
+    # initialization & stay out of the depth-anchor fit.
+    points_file = joinpath(source_dir, RC_POINTS_FILE)
+    if isfile(points_file)
+        ply_points, ply_colors = read_rc_points(points_file)
+        @info "Read `$(size(ply_points, 2))` point(s) from `$points_file`."
+        if size(ply_points, 2) == length(bundler.points)
+            @info "`$points_file` is the same cloud as `$bundler_file` — ignoring it."
+        elseif !rc_enu_matches_bundler(
+            (bundler.cameras[i] for i in kept), (by_name[names[i]].position for i in kept))
+            @warn "Ignoring `$points_file`: RealityCapture's ENU frame does not line " *
+                "up with the Bundler frame on this export, so the two clouds cannot " *
+                "be mixed."
+        else
+            keep = axes(ply_points, 2)
+            if max_points > 0 && length(keep) > max_points
+                keep = sort!(randperm(size(ply_points, 2))[1:max_points])
+                @info "Subsampled `$points_file` to `$max_points` points."
+            end
+            for i in keep
+                push!(positions, RC_ENU_TO_BUNDLER * SVector{3, Float64}(
+                    ply_points[1, i], ply_points[2, i], ply_points[3, i]))
+                push!(colors, SVector{3, UInt8}(
+                    ply_colors[1, i], ply_colors[2, i], ply_colors[3, i]))
+                push!(tracks, Tuple{UInt32, UInt32}[])
+            end
+            @info "Added `$(length(keep))` untracked init point(s) from `$points_file`."
+        end
     end
 
     sparse_dir = joinpath(output_dir, "sparse", "0")
     mkpath(sparse_dir)
     write_colmap_cameras(joinpath(sparse_dir, "cameras.bin"), width, height, focal)
-    write_colmap_images(joinpath(sparse_dir, "images.bin"), views)
-    write_colmap_points(joinpath(sparse_dir, "points3D.bin"), points, colors)
+    write_colmap_images(joinpath(sparse_dir, "images.bin"), images)
+    write_colmap_points(joinpath(sparse_dir, "points3D.bin"), positions, colors, tracks)
 
-    @info "Wrote `$(length(views))` image(s) & a COLMAP model to `$output_dir`."
+    observations = sum(length, tracks)
+    @info "Wrote `$(length(images))` image(s) & `$(length(positions))` point(s) " *
+        "($n_bundler_points tracked, $observations observation(s), " *
+        "$(round(observations / length(images); digits=1)) per view) to `$output_dir`."
     return output_dir
 end
