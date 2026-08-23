@@ -373,37 +373,38 @@ end
     f = ransac_affine_fit(ts_small, 2f0 .* ts_small .+ 3f0)
     @test !f.usable
 
-    # The support bracket is reported so `DepthAnchor` can tell interpolation
-    # from extrapolation. Quantiles, so a stray inlier cannot stretch it.
+    # The support bracket is reported so `anchor_from_support` can tell
+    # interpolation from extrapolation. Quantiles, so a stray inlier cannot
+    # stretch it.
     f = ransac_affine_fit(ts, 2f0 .* ts .+ 3f0)
     @test f.t_lo ≈ quantile(ts, 0.02) atol=1f0
     @test f.t_hi ≈ quantile(ts, 0.98) atol=1f0
 end
 
 @testset "Depth anchor extrapolation" begin
-    DepthAnchor = GaussianSplatting.DepthAnchor
+    anchor_from_support = GaussianSplatting.anchor_from_support
     anchor_target = GaussianSplatting.anchor_target
     depth_target = GaussianSplatting.depth_target
 
     # Disparity anchor fitted on priors t ∈ [0.3, 0.9]; sky sits at t ≈ 0.
     a, b, dfloor, disparity = 1f0, 0.05f0, 0.1f0, 1f0
-    anchor = DepthAnchor(a, b, dfloor, disparity, 0.3f0, 0.9f0)
+    anchor = anchor_from_support(a, b, dfloor, disparity, 0.3f0, 0.9f0)
 
     # `p_far` is the *smaller* endpoint target, i.e. the farthest distance the
     # fit vouches for, whichever way the slope runs.
     @test anchor.p_far ≈ anchor_target(anchor, 0.3f0)
     @test anchor.p_far < anchor_target(anchor, 0.9f0)
     # A negative slope flips which endpoint is far; `p_far` must follow.
-    flipped = DepthAnchor(-a, 1f0, dfloor, disparity, 0.3f0, 0.9f0)
+    flipped = anchor_from_support(-a, 1f0, dfloor, disparity, 0.3f0, 0.9f0)
     @test flipped.p_far ≈ anchor_target(flipped, 0.9f0)
 
     # A zero-width bracket carries no support information: fall back to
     # two-sided supervision everywhere rather than flagging everything below
     # one arbitrary target.
-    @test DepthAnchor(a, b, dfloor, disparity, 0f0, 0f0).p_far == 0f0
-    @test DepthAnchor(a, b, dfloor, disparity, 0.5f0, 0.5f0).p_far == 0f0
+    @test anchor_from_support(a, b, dfloor, disparity, 0f0, 0f0).p_far == 0f0
+    @test anchor_from_support(a, b, dfloor, disparity, 0.5f0, 0.5f0).p_far == 0f0
     # With `p_far = 0` nothing is ever flagged.
-    flat = DepthAnchor(a, b, dfloor, disparity, 0.5f0, 0.5f0)
+    flat = anchor_from_support(a, b, dfloor, disparity, 0.5f0, 0.5f0)
     @test !any(depth_target(flat, Float32[0.5 0.005], 1f0 / 255f0)[4])
 
     # Only the sky pixel is flagged; scene pixels inside the support are not.
@@ -416,9 +417,40 @@ end
     @test isfinite(1f0 / target[2, 2] - dfloor)
 end
 
+@testset "Near-side depth extrapolation is dropped" begin
+    anchor_from_support = GaussianSplatting.anchor_from_support
+    anchor_target = GaussianSplatting.anchor_target
+    depth_target = GaussianSplatting.depth_target
+
+    a, b, dfloor, disparity = 1f0, 0.05f0, 0.1f0, 1f0
+    anchor = anchor_from_support(a, b, dfloor, disparity, 0.3f0, 0.9f0)
+
+    # `p_near` is the *larger* endpoint target: the nearest distance the fit
+    # vouches for, mirroring `p_far` at the other end.
+    @test anchor.p_near ≈ anchor_target(anchor, 0.9f0)
+    @test anchor.p_near > anchor.p_far
+    flipped = anchor_from_support(-a, 1f0, dfloor, disparity, 0.3f0, 0.9f0)
+    @test flipped.p_near ≈ anchor_target(flipped, 0.3f0)
+
+    # A prior value above the support maps nearer than anything the fit saw.
+    # Unlike the sky it is dropped outright rather than kept as a bound: the
+    # mirrored bound would push real geometry toward the camera.
+    prior = Float32[0.5 0.7; 0.8 0.99]
+    target, _, valid, far_extrap = depth_target(anchor, prior, 1f0 / 255f0)
+    @test target[2, 2] > anchor.p_near
+    @test valid == Bool[1 1; 1 0]
+    # It is not the far flag doing this — that end is untouched here.
+    @test !any(far_extrap)
+
+    # A zero-width bracket disables both ends, as before.
+    flat = anchor_from_support(a, b, dfloor, disparity, 0.5f0, 0.5f0)
+    @test flat.p_near == 0f0
+    @test all(depth_target(flat, prior, 1f0 / 255f0)[3])
+end
+
 @testset "One-sided sky depth supervision" begin
     ssi_depth_loss = GaussianSplatting.ssi_depth_loss
-    anchor = GaussianSplatting.DepthAnchor(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
+    anchor = GaussianSplatting.anchor_from_support(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
     dfloor = anchor.floor
 
     prior = Float32[0.5 0.7; 0.8 0.005]
@@ -453,7 +485,7 @@ end
 
 @testset "Coverage-masked depth supervision" begin
     ssi_depth_loss = GaussianSplatting.ssi_depth_loss
-    anchor = GaussianSplatting.DepthAnchor(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
+    anchor = GaussianSplatting.anchor_from_support(1f0, 0.05f0, 0.1f0, 1f0, 0.3f0, 0.9f0)
     dfloor = anchor.floor
 
     # Every target lands inside the fit's support, so nothing is one-sided.

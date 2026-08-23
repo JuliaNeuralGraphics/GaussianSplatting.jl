@@ -1,19 +1,18 @@
 """
 Depth supervision: scale-and-shift-invariant loss with monocular depth priors.
 
-The affine alignment between a prior and the scene is not
-re-fitted against the render every iteration.
-Instead a fixed per-camera "anchor" is fitted once at startup
-against the SfM point cloud, which keeps the supervision target absolute
-and multi-view consistent instead of letting the model drag the target
-along with its own errors.
+Affine (scale, bias) per-camera "anchor" is fitted once at startup against SfM point cloud.
+This scales per-view depths to a global scale and makes them multi-view consistent,
+instead of letting per-view relative depths drag the target.
 
-An anchor is only fitted where the SfM cloud has points, so it says nothing
-about the sky: sky pixels sit below every prior value the fit ever saw, and
-evaluating the affine map there is extrapolation. Taken at face value it
-places the sky at a finite depth and manufactures floaters, so pixels beyond
-the far end of the fit's support are supervised one-sidedly instead
-(see [`ssi_depth_loss`](@ref)).
+An anchor is only fitted where the SfM cloud has points, so it vouches only for
+the range of prior values its inliers covered. Outside that bracket the affine
+map is extrapolating, and each end is handled on its own terms (see [`depth_target`](@ref)):
+
+- Past the far end sit the sky pixels. Extrapolating there puts the sky at a
+  finite depth and manufactures floaters, so those pixels are supervised only as
+  a lower bound on distance (see [`ssi_depth_loss`](@ref)).
+- Past the near end the extrapolation is unused: those pixels are dropped.
 """
 
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
@@ -43,10 +42,11 @@ Affine alignment of a relative depth prior to the scene:
 - inverse depth `1 / (z + floor)` when `disparity` is set;
 - to depth `z` otherwise.
 
-`p_far` is the smallest target-space (inverse-depth) value the fit's inlier
-support covers, i.e. the farthest distance the anchor can vouch for. Targets
-below it are extrapolation — see [`anchor_target`](@ref) & [`depth_target`](@ref).
-`0f0` disables the distinction (no support information).
+`p_near` & `p_far` are the largest & smallest target-space (inverse-depth) values
+the fit's inlier support covers:
+the nearest and the farthest distance the anchor can vouch for.
+Outside that bracket the affine map is extrapolating, and the two sides are not equally managed — see [`depth_target`](@ref)
+and [`ssi_depth_loss`](@ref). `0f0` on either disables that side's check.
 """
 struct DepthAnchor
     a::Float32
@@ -54,6 +54,7 @@ struct DepthAnchor
     floor::Float32
     disparity::Float32
     p_far::Float32
+    p_near::Float32
 end
 
 """
@@ -71,30 +72,27 @@ anchor_target(anchor::DepthAnchor, t::Float32) =
     anchor_target(anchor.a, anchor.b, anchor.floor, anchor.disparity, t)
 
 """
-Build an anchor and derive its `p_far` from the prior-value support
-`[t_lo, t_hi]` the fit was estimated on.
+Build an anchor and derive its support bracket `[p_far, p_near]` from the
+prior-value support `[t_lo, t_hi]` the fit was estimated on.
 
-The mapping is monotonic in `t`, so the farther of the two endpoint targets is
-simply the smaller one — which resolves the slope sign & the
-disparity/depth parameterization without special-casing either.
+The mapping is monotonic in `t`, so the farther endpoint target is just the
+smaller of the two & the nearer is the larger.
 
-A bracket has to have width to mean anything: `t_lo == t_hi` says the fit was
-supported at a single value, not over a range, and taking that point as the
-support boundary would flag everything below one arbitrary target. Such a
-bracket, and any non-finite or non-positive bound, yields `p_far = 0` —
-two-sided supervision everywhere, i.e. the behavior from before this existed.
+A degenerate `t_lo == t_hi` fit and any non-finite or non-positive bound, yields `0f0`:
+unbracketed, two-sided everywhere.
 """
-function DepthAnchor(
+function anchor_from_support(
     a::Float32, b::Float32, floor::Float32, disparity::Float32,
     t_lo::Float32, t_hi::Float32,
 )
-    t_hi > t_lo || return DepthAnchor(a, b, floor, disparity, 0f0)
+    t_hi > t_lo || return DepthAnchor(a, b, floor, disparity, 0f0, 0f0)
 
     p_lo = anchor_target(a, b, floor, disparity, t_lo)
     p_hi = anchor_target(a, b, floor, disparity, t_hi)
-    p_far = min(p_lo, p_hi)
+    p_far, p_near = min(p_lo, p_hi), max(p_lo, p_hi)
     (isfinite(p_far) && p_far > 0f0) || (p_far = 0f0)
-    return DepthAnchor(a, b, floor, disparity, p_far)
+    (isfinite(p_near) && p_near > 0f0) || (p_near = 0f0)
+    return DepthAnchor(a, b, floor, disparity, p_far, p_near)
 end
 
 # Helper structure used by ransac_affine_fit.
@@ -127,8 +125,8 @@ function ls_affine_fit(ts, ys; var_ridge::Float32 = 1.5f-5)
 end
 
 """
-RANSAC affine regression `y ≈ a·t + b`, designed to survive the heavily
-contaminated sparse SfM clouds that break least-squares + trimming:
+RANSAC affine regression `y ≈ a·t + b`, designed to survive the residual
+outliers of a sparse SfM cloud that break least-squares + trimming:
 - LS init for the residual scale (from Median Absolute Deviation);
 - 2-point hypotheses scored by inlier count on a subset;
 - then two LS refits on the final set.
@@ -137,7 +135,7 @@ function ransac_affine_fit(
     ts::Vector{Float32}, ys::Vector{Float32};
     ransac_iterations::Int = 256,
     min_anchor_samples::Int = 256,
-    anchor_min_inlier_fraction::Float32 = 0.3f0,
+    anchor_min_inlier_fraction::Float32 = 0.6f0,
     anchor_min_corr::Float32 = 0.35f0,
     score_subset::Int = 16_384,
     support_quantile::Float32 = 0.02f0,
@@ -199,27 +197,63 @@ function ransac_affine_fit(
     return AnchorFit(a, b, corr, inlier_fraction, t_lo, t_hi, usable)
 end
 
-function robust_aabb(points::Matrix{Float32}; q::Float32 = 0.01f0, pad::Float32 = 0.1f0)
-    lo = SVector{3, Float32}(ntuple(i -> quantile(@view(points[i, :]), q), 3))
-    hi = SVector{3, Float32}(ntuple(i -> quantile(@view(points[i, :]), 1f0 - q), 3))
-    margin = pad .* (hi .- lo)
-    return lo .- margin, hi .+ margin
+"""
+Approximate a camera's track with a coarse z-buffer:
+bucket every projected point into a `cell`-pixel grid &
+keep only those within `tolerance` of the nearest depth in their bucket.
+"""
+function visible_by_zbuffer(
+    points::Matrix{Float32}, camera::Camera;
+    cell::Int = 16, tolerance::Float32 = 0.05f0, near_plane::Float32 = 0.2f0,
+)
+    (; width, height) = resolution(camera)
+    fx, fy = camera.intrinsics.focal
+    cx = camera.intrinsics.principal[1] * width
+    cy = camera.intrinsics.principal[2] * height
+    R = SMatrix{3, 3, Float32}(camera.w2c[1:3, 1:3])
+    t = SVector{3, Float32}(camera.w2c[1:3, 4])
+
+    nearest = fill(Inf32, cld(width, cell), cld(height, cell))
+    # `(index, bucket, depth)` for everything that lands in frame.
+    projected = Tuple{UInt32, CartesianIndex{2}, Float32}[]
+    for i in 1:size(points, 2)
+        p = R * SVector{3, Float32}(points[1, i], points[2, i], points[3, i]) + t
+        z = p[3]
+        z > near_plane || continue
+
+        px = floor(Int, fx * p[1] / z + cx) + 1
+        py = floor(Int, fy * p[2] / z + cy) + 1
+        (1 ≤ px ≤ width && 1 ≤ py ≤ height) || continue
+
+        bucket = CartesianIndex(cld(px, cell), cld(py, cell))
+        nearest[bucket] = min(nearest[bucket], z)
+        push!(projected, (UInt32(i), bucket, z))
+    end
+
+    visible = UInt32[]
+    for (i, bucket, z) in projected
+        z ≤ nearest[bucket] * (1f0 + tolerance) && push!(visible, i)
+    end
+    return visible
 end
 
 """
-Given depth `prior` for a `camera`, project `points` onto image plane
-and collect depth values at those pixels, rejecting invalid projections.
+Given depth `prior` for a `camera`, project `visible` points onto the
+image plane and collect depth values at those pixels, rejecting invalid projections.
 
 Return `(prior depth, point depth)` pairs, where `point depth` is the
 depth of the point in camera space after `R * x + t` transformation.
+
+`visible` **must be** COLMAP's track for this camera,
+the points it actually saw, not the whole cloud.
 """
 function collect_anchor_samples(
-    points::Matrix{Float32}, camera::Camera, prior::Matrix{Float32};
-    aabb_min::SVector{3, Float32}, aabb_max::SVector{3, Float32},
+    points::Matrix{Float32}, camera::Camera, prior::Matrix{Float32},
+    visible::Vector{UInt32};
     near_plane::Float32 = 0.2f0,
     max_anchor_samples::Int = 262_144,
 )
-    n = size(points, 2)
+    n = length(visible)
     stride = max(1, cld(n, max_anchor_samples))
 
     (; width, height) = resolution(camera)
@@ -230,9 +264,9 @@ function collect_anchor_samples(
     t = SVector{3, Float32}(camera.w2c[1:3, 4])
 
     ts, zs = Float32[], Float32[]
-    for i in 1:stride:n
+    for k in 1:stride:n
+        i = visible[k]
         x = SVector{3, Float32}(points[1, i], points[2, i], points[3, i])
-        all(aabb_min .≤ x .≤ aabb_max) || continue
 
         p = R * x + t
         z = p[3]
@@ -262,12 +296,17 @@ With `mode = :ssi` the dataset-wide parameterization is resolved by majority vot
 while `:ssi_disparity` and `:ssi_depth` force it.
 Cameras whose selected fit is unusable or has an inconsistent slope sign are dropped from depth supervision.
 
+`visible_points[i]` names the columns of `points` camera `i` observed (COLMAP's
+track). Only those are sampled — see [`collect_anchor_samples`](@ref) for why
+the rest of the cloud is not a harmless surplus.
+
 `load_prior(i)` returns camera `i`'s prior or `nothing`: the priors are read
 from disk one at a time (`ColmapDataset` does not hold them), and this whole
 pass is skipped when the anchor cache is warm — see [`load_or_fit_depth_anchors`](@ref).
 """
 function fit_depth_anchors(
     points::Matrix{Float32}, cameras::Vector{Camera},
+    visible_points::Vector{Vector{UInt32}},
     load_prior;
     mode::Symbol = :ssi,
     min_anchor_samples::Int = 256,
@@ -281,14 +320,20 @@ function fit_depth_anchors(
     anchors = Vector{Maybe{DepthAnchor}}(nothing, n_cameras)
     fits = Vector{Maybe{NamedTuple}}(nothing, n_cameras)
 
-    aabb_min, aabb_max = robust_aabb(points)
+    n_without_track = 0
     for i in 1:n_cameras
         # One prior at a time: they are read from disk here (`load_prior`) and
         # dropped again, never all held at once.
         prior = load_prior(i)
         prior ≡ nothing && continue
 
-        ts, zs = collect_anchor_samples(points, cameras[i], prior; aabb_min, aabb_max)
+        visible = visible_points[i]
+        if isempty(visible)
+            n_without_track += 1
+            visible = visible_by_zbuffer(points, cameras[i])
+        end
+
+        ts, zs = collect_anchor_samples(points, cameras[i], prior, visible)
         length(ts) < min_anchor_samples && continue
         # A constant prior has no geometry signal.
         var(ts) < flat_prior_var && continue
@@ -299,6 +344,12 @@ function fit_depth_anchors(
             disparity=ransac_affine_fit(ts, 1f0 ./ (zs .+ depth_floor); min_anchor_samples),
             depth=ransac_affine_fit(ts, zs; min_anchor_samples))
     end
+
+    n_without_track > 0 && @warn string(
+        "$n_without_track / $n_cameras cameras have no SfM track in `images.bin`; ",
+        "anchors there fall back to a coarse z-buffer visibility test, which is ",
+        "an approximation (see `visible_by_zbuffer`). Reconstruct with COLMAP, ",
+        "or expect the anchors on those views to be less accurate.")
 
     disparity = if mode == :ssi
         votes, total = 0, 0
@@ -331,7 +382,7 @@ function fit_depth_anchors(
         fits[i] ≡ nothing && continue
         f = selected(fits[i])
         (f.usable && sign(f.a) == slope_sign) || continue
-        anchors[i] = DepthAnchor(
+        anchors[i] = anchor_from_support(
             f.a, f.b, fits[i].floor, Float32(disparity), f.t_lo, f.t_hi)
         n_anchored += 1
     end
@@ -342,10 +393,14 @@ function fit_depth_anchors(
     return anchors
 end
 
-function depth_anchors_fingerprint(points::Matrix{Float32}, cameras::Vector{Camera}, mode::Symbol)
+function depth_anchors_fingerprint(
+    points::Matrix{Float32}, cameras::Vector{Camera},
+    visible_points::Vector{Vector{UInt32}}, mode::Symbol,
+)
     h = hash(mode)
     h = hash(size(points), h)
     h = hash(points, h)
+    h = hash(visible_points, h)
 
     cam_hash = zero(UInt)
     for cam in cameras
@@ -366,10 +421,11 @@ Fit per-camera depth anchors, or load them from the cache next to
 function load_or_fit_depth_anchors(
     depths_dir::String,
     points::Matrix{Float32}, cameras::Vector{Camera},
+    visible_points::Vector{Vector{UInt32}},
     load_prior;
     mode::Symbol = :ssi,
 )
-    fingerprint = depth_anchors_fingerprint(points, cameras, mode)
+    fingerprint = depth_anchors_fingerprint(points, cameras, visible_points, mode)
     cache_path = joinpath(dirname(depths_dir), "$(basename(depths_dir))_anchors.toml")
 
     if isfile(cache_path)
@@ -391,7 +447,7 @@ function load_or_fit_depth_anchors(
         end
     end
 
-    anchors = fit_depth_anchors(points, cameras, load_prior; mode)
+    anchors = fit_depth_anchors(points, cameras, visible_points, load_prior; mode)
 
     by_name = Dict{String, Any}()
     for (cam, a) in zip(cameras, anchors)
@@ -400,7 +456,7 @@ function load_or_fit_depth_anchors(
     end
     open(cache_path, "w") do io
         println(io, "# GaussianSplatting.jl depth anchor cache.")
-        println(io, "# `[a, b, floor, disparity, p_far]` per image, see `DepthAnchor`.")
+        println(io, "# `[a, b, floor, disparity, p_far, p_near]` per image, see `DepthAnchor`.")
         TOML.print(io, Dict{String, Any}(
             "fingerprint" => string(fingerprint),
             "anchors" => by_name); sorted=true)
@@ -418,15 +474,19 @@ deadband(r, half) = sign(r) * max(abs(r) - half, 0f0)
 
 """
 Build the per-pixel supervision target from a prior and its anchor:
-inverse-depth target `d`, quantization deadband half-width, validity and the
-extrapolation flag.
-For the depth model the half-step is propagated through the inversion
-as `half·d²`.
+inverse-depth target `d`, quantization deadband half-width, validity and the far-extrapolation flag.
+For the depth model the half-step is propagated through the inversion as `half·d²`.
 
-`far_extrap` marks pixels whose target lies beyond the far end of the fit's
-inlier support (`anchor.p_far`) — typically the sky, which no SfM point ever
-constrained. Their target is an extrapolation of the affine map and is used
-one-sidedly by [`ssi_depth_loss`](@ref).
+Both ends of the fit's inlier support are enforced, asymmetrically, because the
+two extrapolations fail differently:
+
+- `far_extrap` marks pixels beyond the far end (`anchor.p_far`) — typically the
+  sky, which no SfM point ever constrained. Kept, and used one-sidedly by
+  [`ssi_depth_loss`](@ref): the extrapolated value is trustworthy as a lower
+  bound on distance, and that bound is what suppresses sky floaters.
+- Pixels nearer than `anchor.p_near` are dropped from `valid` outright.
+  There is no floater-like failure it would buy back in exchange,
+  so the extrapolation is not used at all rather than used as a bound.
 """
 function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep::Float32)
     affine = anchor.a .* prior .+ anchor.b
@@ -440,6 +500,8 @@ function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep
         half_band = half_step .* target.^2
     end
     far_extrap = target .< anchor.p_far
+    # `p_near == 0` means the fit reported no usable support bracket.
+    anchor.p_near > 0f0 && (valid = valid .& (target .≤ anchor.p_near))
     return target, half_band, valid, far_extrap
 end
 
@@ -467,6 +529,10 @@ practice), so it is trustworthy as a lower bound on distance and nothing more.
 Read as a constraint: nothing may sit closer than the farthest thing the fit
 can vouch for — which is exactly what suppresses sky floaters — while the
 extrapolated value itself never pulls geometry forward onto it.
+
+The near end of the support needs no counterpart here: [`depth_target`](@ref)
+has already cleared those pixels out of `valid`, so they reach neither this term
+nor the scale above.
 
 Gradient term:
 same penalty on the mismatch of forward-difference gradients,
