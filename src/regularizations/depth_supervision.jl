@@ -1,24 +1,18 @@
 """
 Depth supervision: scale-and-shift-invariant loss with monocular depth priors.
 
-The affine alignment between a prior and the scene is not
-re-fitted against the render every iteration.
-Instead a fixed per-camera "anchor" is fitted once at startup
-against the SfM point cloud, which keeps the supervision target absolute
-and multi-view consistent instead of letting the model drag the target
-along with its own errors.
+Affine (scale, bias) per-camera "anchor" is fitted once at startup against SfM point cloud.
+This scales per-view depths to a global scale and makes them multi-view consistent,
+instead of letting per-view relative depths drag the target.
 
 An anchor is only fitted where the SfM cloud has points, so it vouches only for
 the range of prior values its inliers covered. Outside that bracket the affine
-map is extrapolating, and each end is handled on its own terms
-(see [`depth_target`](@ref)):
+map is extrapolating, and each end is handled on its own terms (see [`depth_target`](@ref)):
 
-- Past the far end sit the sky pixels, below every prior value the fit ever saw.
-  Taken at face value the extrapolation places the sky at a finite depth and
-  manufactures floaters, so those pixels are supervised one-sidedly — as a lower
-  bound on distance only (see [`ssi_depth_loss`](@ref)).
-- Past the near end the extrapolation is simply not used: those pixels are
-  dropped from supervision.
+- Past the far end sit the sky pixels. Extrapolating there puts the sky at a
+  finite depth and manufactures floaters, so those pixels are supervised only as
+  a lower bound on distance (see [`ssi_depth_loss`](@ref)).
+- Past the near end the extrapolation is unused: those pixels are dropped.
 """
 
 const DEPTH_LOSS_MIN_ALPHA = 1f-3
@@ -48,11 +42,11 @@ Affine alignment of a relative depth prior to the scene:
 - inverse depth `1 / (z + floor)` when `disparity` is set;
 - to depth `z` otherwise.
 
-`p_near` & `p_far` are the largest & smallest target-space (inverse-depth)
-values the fit's inlier support covers: the nearest and the farthest distance
-the anchor can vouch for. Outside that bracket the affine map is extrapolating,
-and the two sides are not equally salvageable — see [`depth_target`](@ref) and
-[`ssi_depth_loss`](@ref). `0f0` on either disables that side's check.
+`p_near` & `p_far` are the largest & smallest target-space (inverse-depth) values
+the fit's inlier support covers:
+the nearest and the farthest distance the anchor can vouch for.
+Outside that bracket the affine map is extrapolating, and the two sides are not equally managed — see [`depth_target`](@ref)
+and [`ssi_depth_loss`](@ref). `0f0` on either disables that side's check.
 """
 struct DepthAnchor
     a::Float32
@@ -81,18 +75,11 @@ anchor_target(anchor::DepthAnchor, t::Float32) =
 Build an anchor and derive its support bracket `[p_far, p_near]` from the
 prior-value support `[t_lo, t_hi]` the fit was estimated on.
 
-The mapping is monotonic in `t`, so the farther of the two endpoint targets is
-simply the smaller one & the nearer is the larger — which resolves the slope
-sign & the disparity/depth parameterization without special-casing either.
+The mapping is monotonic in `t`, so the farther endpoint target is just the
+smaller of the two & the nearer is the larger.
 
-A bracket has to have width to mean anything: `t_lo == t_hi` says the fit was
-supported at a single value, not over a range, and taking that point as the
-support boundary would flag everything on one side of one arbitrary target.
-Such a bracket, and any non-finite or non-positive bound, yields `0f0` — the
-unbracketed, two-sided-everywhere behavior from before this existed.
-
-Not a `DepthAnchor` constructor: with six fields that method would collide with
-the struct's own.
+A degenerate `t_lo == t_hi` fit and any non-finite or non-positive bound, yields `0f0`:
+unbracketed, two-sided everywhere.
 """
 function anchor_from_support(
     a::Float32, b::Float32, floor::Float32, disparity::Float32,
@@ -143,12 +130,6 @@ outliers of a sparse SfM cloud that break least-squares + trimming:
 - LS init for the residual scale (from Median Absolute Deviation);
 - 2-point hypotheses scored by inlier count on a subset;
 - then two LS refits on the final set.
-
-`anchor_min_inlier_fraction` is a real quality gate rather than a formality
-only because [`collect_anchor_samples`](@ref) now feeds this the camera's own
-track. Against a cloud projected without a visibility test the honest samples
-were a ~12% minority, so any threshold a contaminated fit could clear was one
-the correct fit did not need.
 """
 function ransac_affine_fit(
     ts::Vector{Float32}, ys::Vector{Float32};
@@ -217,16 +198,9 @@ function ransac_affine_fit(
 end
 
 """
-Approximate a camera's track with a coarse z-buffer: bucket every projected
-point into a `cell`-pixel grid & keep only those within `tolerance` of the
-nearest depth in their bucket.
-
-The fallback for datasets whose `images.bin` carries no tracks (RealityCapture
-exports, `scripts/realitycapture.jl`). It rejects a point only when some *other*
-point lands in the same bucket in front of it, so on a sparse cloud plenty of
-occluded points survive — it is a filter, not a visibility oracle. Still far
-better than [`collect_anchor_samples`](@ref)'s failure mode, which is to accept
-every one of them.
+Approximate a camera's track with a coarse z-buffer:
+bucket every projected point into a `cell`-pixel grid &
+keep only those within `tolerance` of the nearest depth in their bucket.
 """
 function visible_by_zbuffer(
     points::Matrix{Float32}, camera::Camera;
@@ -264,24 +238,14 @@ function visible_by_zbuffer(
 end
 
 """
-Given depth `prior` for a `camera`, project the points `visible` names onto the
+Given depth `prior` for a `camera`, project `visible` points onto the
 image plane and collect depth values at those pixels, rejecting invalid projections.
 
 Return `(prior depth, point depth)` pairs, where `point depth` is the
 depth of the point in camera space after `R * x + t` transformation.
 
-!!! warning "Only the camera's own track"
-    `visible` must be COLMAP's track for this camera — the points it actually
-    saw — not the whole cloud. A depth prior describes the *first* surface along
-    each ray, so a point that lands inside the frame from behind an occluder
-    pairs that surface's prior value with a depth from behind it. The pairing is
-    one-sided (occluded points are always farther, never nearer), so it does not
-    average out: it drags the fit apart at both ends, over-predicting near depths
-    and under-predicting far ones — a ground plane bowed into a bowl that every
-    camera agrees on. On a 237-view orbit of a fountain, projecting the whole
-    cloud made ~88% of the samples occluded and biased the anchored target by
-    +68% at 1 m and −46% at 43 m; the same fit on tracks alone stays within ±5%
-    from 2 m to 22 m.
+`visible` **must be** COLMAP's track for this camera,
+the points it actually saw, not the whole cloud.
 """
 function collect_anchor_samples(
     points::Matrix{Float32}, camera::Camera, prior::Matrix{Float32},
@@ -611,10 +575,8 @@ deadband(r, half) = sign(r) * max(abs(r) - half, 0f0)
 
 """
 Build the per-pixel supervision target from a prior and its anchor:
-inverse-depth target `d`, quantization deadband half-width, validity and the
-far-extrapolation flag.
-For the depth model the half-step is propagated through the inversion
-as `half·d²`.
+inverse-depth target `d`, quantization deadband half-width, validity and the far-extrapolation flag.
+For the depth model the half-step is propagated through the inversion as `half·d²`.
 
 Both ends of the fit's inlier support are enforced, asymmetrically, because the
 two extrapolations fail differently:
@@ -623,17 +585,9 @@ two extrapolations fail differently:
   sky, which no SfM point ever constrained. Kept, and used one-sidedly by
   [`ssi_depth_loss`](@ref): the extrapolated value is trustworthy as a lower
   bound on distance, and that bound is what suppresses sky floaters.
-- Pixels nearer than `anchor.p_near` are dropped from `valid` outright. The
-  mirror-image bound would read "nothing may sit farther than the nearest thing
-  the fit vouches for", which pushes geometry *toward* the camera — onto real
-  surfaces, where being wrong costs something, and at the depths where the
-  inverse-depth residual has its steepest gradient (`|dp/dz| = 1/z²`). There is
-  no floater-like failure it would buy back in exchange, so the extrapolation is
-  not used at all rather than used as a bound. It is also a sliver of the frame,
-  unlike the block of sky that motivates the far end.
-
-Dropping them via `valid` also removes them from the residual scale & the
-gradient term, since both are built from it.
+- Pixels nearer than `anchor.p_near` are dropped from `valid` outright.
+  There is no floater-like failure it would buy back in exchange,
+  so the extrapolation is not used at all rather than used as a bound.
 """
 function depth_target(anchor::DepthAnchor, prior::AbstractMatrix{Float32}, qstep::Float32)
     affine = anchor.a .* prior .+ anchor.b
