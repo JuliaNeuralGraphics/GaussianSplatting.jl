@@ -319,8 +319,6 @@ function fit_depth_anchors(
     n_cameras = length(cameras)
     anchors = Vector{Maybe{DepthAnchor}}(nothing, n_cameras)
     fits = Vector{Maybe{NamedTuple}}(nothing, n_cameras)
-    # Kept for `report_anchor_bias` once the parameterization vote has settled.
-    samples = Vector{Maybe{Tuple{Vector{Float32}, Vector{Float32}}}}(nothing, n_cameras)
 
     n_without_track = 0
     for i in 1:n_cameras
@@ -341,7 +339,6 @@ function fit_depth_anchors(
         var(ts) < flat_prior_var && continue
 
         depth_floor = max(1f-8, depth_floor_fraction * median(zs))
-        samples[i] = (ts, zs)
         fits[i] = (;
             floor=depth_floor,
             disparity=ransac_affine_fit(ts, 1f0 ./ (zs .+ depth_floor); min_anchor_samples),
@@ -393,105 +390,7 @@ function fit_depth_anchors(
     @info string(
         "Depth supervision: $n_anchored / $n_cameras cameras anchored ",
         "(", disparity ? "disparity" : "depth", " model).")
-    report_anchor_bias(anchors, samples)
     return anchors
-end
-
-# Bins the anchor residuals by true depth, one line per octave.
-const ANCHOR_BIAS_BIN_RATIO = 2f0
-const ANCHOR_BIAS_MIN_SAMPLES = 64
-# Bins holding less than this share of the samples are reported but excluded
-# from the warning: an octave with a few hundred points at the edge of the
-# reconstruction says little about the geometry the training actually sees, and
-# the affine map is always at its worst there.
-const ANCHOR_BIAS_CORE_FRACTION = 0.05f0
-# A trend this large across the scene's core is the signature of a fit pulled
-# apart by samples it should never have seen.
-const ANCHOR_BIAS_WARN_SPREAD = 0.15f0
-
-"""
-Report how far the fitted anchors place the SfM points they were fitted on,
-as a median relative error binned by true depth.
-
-Only samples inside the anchor's support bracket `[p_far, p_near]` are counted,
-so the table describes the supervision as it is actually applied: outside the
-bracket the near side is unsupervised and the far side is a one-sided bound,
-and a "bias" for either would not mean what the column says it means.
-
-An anchor is an affine map, so it cannot follow a prior whose relation to depth
-is not affine — the leftover curvature shows up here as a trend across the bins,
-near depths pushed out and far ones pulled in (or the reverse).
-
-Read the two columns against each other. `bias` is where the target sits and
-`spread` is how much the cameras disagree about it, so a large bias over a small
-spread is the dangerous combination: the views agree on a wrong answer and
-reinforce it into a warped surface, where disagreement would merely have blurred
-one. A flat `bias` column is the healthy case, whatever the spread.
-"""
-function report_anchor_bias(
-    anchors::Vector{Maybe{DepthAnchor}},
-    samples::Vector{Maybe{Tuple{Vector{Float32}, Vector{Float32}}}},
-)
-    # Bin index is the octave of the true depth, shared across all cameras.
-    bins = Dict{Int, Vector{Float32}}()
-    for (anchor, sample) in zip(anchors, samples)
-        (anchor ≡ nothing || sample ≡ nothing) && continue
-        ts, zs = sample
-        for (t, z) in zip(ts, zs)
-            z > 0f0 || continue
-            # `anchor_target` is inverse depth either way, so this inverts back
-            # to the depth the supervision actually asks for.
-            p = anchor_target(anchor, t)
-            p > 0f0 || continue
-            # Extrapolated samples are not supervised as locations (see
-            # `depth_target`), so a bias for them would describe nothing.
-            (anchor.p_far > 0f0 && p < anchor.p_far) && continue
-            (anchor.p_near > 0f0 && p > anchor.p_near) && continue
-            z_pred = 1f0 / p - anchor.floor
-            isfinite(z_pred) || continue
-            push!(get!(() -> Float32[], bins, floor(Int, log(z) / log(ANCHOR_BIAS_BIN_RATIO))),
-                z_pred / z - 1f0)
-        end
-    end
-    isempty(bins) && return
-
-    total = sum(length, values(bins))
-    lines = String[]
-    core_biases = Float32[]
-    for k in sort!(collect(keys(bins)))
-        errors = bins[k]
-        length(errors) < ANCHOR_BIAS_MIN_SAMPLES && continue
-        bias = median(errors)
-        # Half the 16..84 percentile range: the 1σ equivalent, but robust.
-        spread = 0.5f0 * (quantile(errors, 0.84f0) - quantile(errors, 0.16f0))
-        core = length(errors) ≥ ANCHOR_BIAS_CORE_FRACTION * total
-        core && push!(core_biases, bias)
-        push!(lines, string(
-            "  ", rpad(string(round(ANCHOR_BIAS_BIN_RATIO^k; digits=2), "..",
-                round(ANCHOR_BIAS_BIN_RATIO^(k + 1); digits=2)), 16),
-            lpad(string(round(100 * bias; digits=1), "%"), 8),
-            lpad(string(round(100 * spread; digits=1), "%"), 10),
-            lpad(string(length(errors)), 10),
-            core ? "" : "  (tail)"))
-    end
-    isempty(lines) && return
-
-    @info string(
-        "Depth anchor bias (`z_target / z_sfm - 1` by true depth, ",
-        "inside the fitted support):\n",
-        "  ", rpad("depth", 16), lpad("bias", 8), lpad("spread", 10),
-        lpad("samples", 10), "\n",
-        join(lines, "\n"))
-
-    length(core_biases) < 2 && return
-    spread = maximum(core_biases) - minimum(core_biases)
-    spread > ANCHOR_BIAS_WARN_SPREAD && @warn string(
-        "Depth anchors are biased by $(round(100 * spread; digits=1))% across ",
-        "the scene's depth range: the affine model does not fit these priors, ",
-        "so the supervision target is warped & every view agrees on the warp. ",
-        "Expect flat surfaces to bow. Check the priors' parameterization ",
-        "(`depth_loss_mode`) before trusting the geometry.")
-    return
 end
 
 function depth_anchors_fingerprint(
