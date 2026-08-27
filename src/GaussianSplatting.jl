@@ -102,6 +102,22 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
+"""
+Workgroup size for `∇render_wavefront!`: one workgroup per tile, one lane per
+splat. Trades the wavefront ramp (`BLOCK_SIZE - 1` idle diagonals per batch,
+which this amortizes better as it grows) against lane efficiency
+(`BLOCK_SIZE / (g + BLOCK_SIZE - 1)`, which drops as it grows). Must divide
+`BLOCK_SIZE` so the per-pixel prefetch loop is exact, and be a multiple of 64
+to tile an AMD wavefront.
+
+Measured on a 1.55M-Gaussian bicycle scene at 1236×822 (RX 7900 XTX,
+`∇rasterize` end to end): g=64 → 5.49 ms, g=128 → 4.25 ms, g=256 → 4.13 ms,
+against 11.24 ms for `∇render!`. Barrier count dominates lane efficiency there,
+so the largest legal group wins; 256 also matches the workgroup `render!`
+already uses, so it is the size every backend is known to accept.
+"""
+backward_group_size(kab) = 256
+
 # If `true`, then check for NaN values in loss / gradient / params during training.
 # Set via GSP_DEBUG=1 env variable.
 const GSP_DEBUG::Ref{Bool} = Ref(false)

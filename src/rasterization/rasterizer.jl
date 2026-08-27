@@ -33,10 +33,19 @@ mutable struct GaussianRasterizer{
 
     mode::Symbol
 
-    # Whether `∇render!` also accumulates `gstate.∇means_2d_abs`.
+    # Whether the blend backward also accumulates `gstate.∇means_2d_abs`.
     # Costs two extra atomics per gaussian-pixel, so it is opt-in: only
     # `ImprovedGSStrategy` consumes it (see `enable_abs_grad!`).
     abs_grad::Bool
+
+    # Which blend backward `∇rasterize` launches:
+    #   `:per_pixel` — `∇render!`, one thread per pixel, atomics per fragment.
+    #   `:per_splat` — `∇render_wavefront!`, one lane per splat, atomics per
+    #                  (tile, splat). Same gradients up to summation order.
+    # `:per_splat` is the default: ~2.7x faster (`∇rasterize` 11.2 -> 4.1 ms
+    # on a 1.55M-Gaussian scene). `:per_pixel` is kept as the fallback & as the
+    # reference the A/B test compares against.
+    backward::Symbol
 end
 
 """
@@ -83,9 +92,12 @@ function GaussianRasterizer(kab;
     mode::Symbol = :rgbd,
     near_plane::Float32 = 0.2f0,
     far_plane::Float32 = 1000f0,
+    backward::Symbol = :per_splat,
 )
     modes = (:rgb, :rgbd, :rgbdn)
     mode in modes || error("Invalid render: $mode ∉ $modes")
+    backwards = (:per_pixel, :per_splat)
+    backward in backwards || error("Invalid backward: $backward ∉ $backwards")
 
     grid = SVector{2, Int32}(cld(width, BLOCK[1]), cld(height, BLOCK[2]))
     istate = ImageState(kab; width, height, grid_size=Int(prod(grid)))
@@ -104,7 +116,7 @@ function GaussianRasterizer(kab;
         istate, gstate, bstate,
         shs, scales_act, opacities_act,
         image, pinned_image, host_image,
-        grid, near_plane, far_plane, mode, false)
+        grid, near_plane, far_plane, mode, false, backward)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
     return rast
 end
@@ -491,7 +503,8 @@ function ∇rasterize(
         render_depth ? reshape(reinterpret(SVector{5, Float32}, vpixels), size(vpixels)[2:3]) :
         reshape(reinterpret(SVector{3, Float32}, vpixels), size(vpixels)[2:3])
 
-    ∇render!(kab, (Int.(BLOCK)...,), tile_ndrange(width, height))(
+    # Both kernels take the same arguments; only the launch geometry differs.
+    ∇args = (
         # Outputs.
         vcolor_features,
         vopacities,
@@ -512,7 +525,20 @@ function ∇rasterize(
         rast.istate.ranges,
         SVector{2, Int32}(width, height),
         feature_background(background, channels),
-        rast.grid, BLOCK, Val(BLOCK_SIZE))
+        rast.grid, BLOCK)
+
+    if rast.backward == :per_splat
+        gsz = backward_group_size(kab)
+        # `ndrange` as a keyword, not the 3-arg form used elsewhere in this
+        # file: that one makes `ndrange` a type parameter & would recompile the
+        # kernel for every distinct tile count.
+        ∇render_wavefront!(kab, gsz)(
+            ∇args..., Val(BLOCK_SIZE), Val(gsz);
+            ndrange=gsz * Int(prod(rast.grid)))
+    else
+        ∇render!(kab, (Int.(BLOCK)...,), tile_ndrange(width, height))(
+            ∇args..., Val(BLOCK_SIZE))
+    end
 
     # Row 5 of `vcolor_features` is the cotangent of the constant-1 alpha
     # feature: dropped (the feature is not a parameter). The alpha map's
