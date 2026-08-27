@@ -1059,6 +1059,127 @@ end
     @test maximum(abs, Array(∇rot)) > 0f0
 end
 
+@testset "∇rasterize vs finite differences" begin
+    # The only end-to-end check of the blend backward (`∇render!`): every other
+    # `∇` testset here covers one of its callees in isolation.
+    width, height = 32, 24
+    camera = GaussianSplatting.Camera(; fx=120f0, fy=120f0, width, height)
+
+    Random.seed!(7)
+    n = 6
+    # A tight cluster on the optical axis, spread in depth so the blend order
+    # is non-trivial. Radii land at 19-40 px, far above `radius_clip = 3`: near
+    # that threshold a perturbation flips a Gaussian's visibility outright and
+    # the finite difference sees a step, not a slope.
+    points_h = zeros(Float32, 3, n)
+    points_h[1, :] .= 0.03f0 .* randn(Float32, n)
+    points_h[2, :] .= 0.03f0 .* randn(Float32, n)
+    points_h[3, :] .= collect(range(2f0, 4f0; length=n))
+    colors = adapt(kab, rand(Float32, 3, n))
+    scales = adapt(kab, fill(log(0.2f0), 3, n) .+ 0.1f0 .* randn(Float32, 3, n))
+
+    gaussians = GaussianSplatting.GaussianModel(kab,
+        adapt(kab, points_h), colors, scales; max_sh_degree=0, isotropic=false)
+    # `sigmoid(0.4) ≈ 0.6`, clear of the `min(0.99f0, ·)` clamp in `render!`,
+    # which is a kink. Six of them leave `T_final ≈ 0.4^6`, clear of the
+    # `T < 1f-4` early-out too.
+    gaussians.opacities .= 0.4f0
+
+    # Weight only an 8×8 core window. The render is *piecewise* smooth: at the
+    # `α = 1/255` blend threshold fragments pop in & out, and such a jump `Δ`
+    # pollutes a central difference by `Δ/2h` — which grows as `h` shrinks, so
+    # no step size escapes it. Inside the core every fragment sits far above the
+    # threshold, so the loss there is genuinely smooth.
+    w_h = zeros(Float32, 3, width, height)
+    cx, cy = width ÷ 2, height ÷ 2
+    w_h[:, (cx - 3):(cx + 4), (cy - 3):(cy + 4)] .= randn(Float32, 3, 8, 8)
+    weights = adapt(kab, w_h)
+
+    rast = GaussianSplatting.GaussianRasterizer(kab, camera; mode=:rgb)
+    loss(p, o, s, r, f) = sum(rast(
+        p, o, s, r, f, gaussians.features_rest; camera, sh_degree=0) .* weights)
+
+    args = (gaussians.points, gaussians.opacities, gaussians.scales,
+        gaussians.rotations, gaussians.features_dc)
+    _, ∇ = Zygote.withgradient(loss, args...)
+    @test all(g -> all(isfinite, Array(g)), ∇)
+
+    # Directional derivatives: one random direction per parameter block costs
+    # two renders instead of `2·length(x)`, and is just as strong a check.
+    # A hand-rolled step rather than `central_fdm`'s adaptive one — the
+    # adaptive rule wanders into step sizes where the popping above dominates.
+    Random.seed!(11)
+    h = 3f-3
+    for i in 1:5
+        v = adapt(kab, randn(Float32, size(args[i])))
+        perturb(t) = ntuple(j -> j == i ? args[j] .+ t .* v : args[j], 5)
+        fd = (Float64(loss(perturb(h)...)) - Float64(loss(perturb(-h)...))) / (2h)
+        @test sum(Array(∇[i]) .* Array(v)) ≈ fd rtol=2e-2 atol=1e-4
+    end
+end
+@testset "Blend backward: `:per_splat` vs `:per_pixel`" begin
+    GSP = GaussianSplatting
+
+    # A multi-tile scene with many splats per tile: this is what exercises the
+    # wavefront's batching & skew, which the finite-difference testset above
+    # (one 8×8 loss window) does not reach.
+    width, height = 96, 80
+    camera = GSP.Camera(; fx=90f0, fy=90f0, width, height)
+
+    Random.seed!(3)
+    n = 400
+    points_h = zeros(Float32, 3, n)
+    points_h[1, :] .= 0.6f0 .* randn(Float32, n)
+    points_h[2, :] .= 0.5f0 .* randn(Float32, n)
+    points_h[3, :] .= 2f0 .+ 3f0 .* rand(Float32, n)
+    colors = adapt(kab, rand(Float32, 3, n))
+    # Wildly anisotropic, randomly oriented, spanning the whole opacity range
+    # (including below the `1/255` cull).
+    scales = adapt(kab, fill(log(0.06f0), 3, n) .+ 0.5f0 .* randn(Float32, 3, n))
+
+    for mode in (:rgb, :rgbd, :rgbdn), abs_grad in (false, true)
+        gaussians = GSP.GaussianModel(kab, adapt(kab, points_h), colors, scales;
+            max_sh_degree=0, isotropic=false)
+        gaussians.rotations .= adapt(kab, randn(Float32, 4, n))
+        gaussians.opacities .= adapt(kab, reshape(randn(Float32, n) .* 1.5f0, 1, n))
+
+        weights = adapt(kab, randn(Float32, GSP.n_color_features(mode), width, height))
+        args = (gaussians.points, gaussians.opacities, gaussians.scales,
+            gaussians.rotations, gaussians.features_dc)
+
+        run(backward) = begin
+            rast = GSP.GaussianRasterizer(kab, camera; mode, backward)
+            abs_grad && GSP.enable_abs_grad!(rast)
+            _, ∇ = Zygote.withgradient(args...) do p, o, s, r, f
+                sum(rast(p, o, s, r, f, gaussians.features_rest;
+                    camera, sh_degree=0) .* weights)
+            end
+            (map(Array, ∇), Array(rast.gstate.radii[1:n]),
+                reshape(reinterpret(Float32, Array(rast.gstate.∇means_2d)), 2, :),
+                reshape(reinterpret(Float32, Array(rast.gstate.∇means_2d_abs)), 2, :))
+        end
+        ref, new = run(:per_pixel), run(:per_splat)
+
+        # Only the summation order differs, so the bar is float agreement, not
+        # bitwise — and note `:per_pixel` is itself non-deterministic run to run
+        # (atomic ordering), while `:per_splat` is deterministic within a tile.
+        for k in 1:5
+            scale = max(maximum(abs, ref[1][k]), 1f-12)
+            @test maximum(abs, ref[1][k] .- new[1][k]) < 1f-4 * scale
+            @test all(isfinite, new[1][k])
+        end
+        for k in (3, 4)
+            scale = max(maximum(abs, ref[k]), 1f-12)
+            @test maximum(abs, ref[k] .- new[k]) < 1f-4 * scale
+        end
+
+        # Culled Gaussians receive nothing, from either kernel.
+        culled = ref[2] .== 0
+        @test all(iszero, new[3][:, culled])
+        # `Σₚ|∂L/∂μ|` dominates `|Σₚ ∂L/∂μ|` componentwise, by construction.
+        abs_grad && @test all(new[4] .≥ abs.(new[3]) .- 1f-5)
+    end
+end
 @testset "Partial tiles (resolution not a multiple of the tile size)" begin
     NU = GaussianSplatting.NU
 
@@ -2119,5 +2240,7 @@ end
 end
 
 end
+
+
 
 

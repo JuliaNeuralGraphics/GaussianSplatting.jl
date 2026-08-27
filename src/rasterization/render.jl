@@ -306,6 +306,204 @@ end
     end
 end
 
+
+"""
+Per-splat blend backward: one workgroup per tile, **one lane per splat**, versus
+`∇render!`'s one thread per pixel.
+
+`∇render!` issues `channels + 6` atomics for every contributing (pixel, Gaussian)
+pair, all contending on the same address across the workgroup. Here each lane
+owns a Gaussian for the whole tile, accumulates in registers, and flushes **one**
+set of atomics per (tile, splat) — `O(instances)` instead of `O(fragments)`.
+
+The blend is serial back-to-front per pixel, so lanes cannot simply run free. A
+skewed **diagonal wavefront** restores the order: at step `d`, lane `l` visits
+pixel `d - l + 1`, so lane `l` only reaches a pixel after lane `l-1` (the splat
+behind it) has already updated that pixel's state. Ported from LichtFeld-Studio's
+`blend_backward_cu` (`fastgs/rasterization/include/kernels_backward.cuh`),
+Taming-3DGS lineage.
+
+Per-pixel state must live in `@localmem`, which is what forces the second change:
+instead of `∇render!`'s per-channel `accum_rec`/`last_color`/`last_α`, each pixel
+carries a **single scalar** `W = ∂L/∂T`. The two are algebraically identical —
+with `Sⱼ` the code's `accum_rec`,
+
+    W_{j+1} = Sⱼ ⋅ g + (bg ⋅ g)·∏_{m>j}(1 - αₘ),   ∏_{m>j}(1 - αₘ) = T_final / T_{j+1}
+
+so `Tⱼ(cⱼ ⋅ g) - Tⱼ·W_{j+1}` expands term for term into the `vα` built at
+`∇render!`'s `accum_rec` loop *plus* its separate background correction. One
+scalar therefore replaces all four quantities. Seed: `W = bg ⋅ g`.
+
+Every loop bound below derives from `tile_n`, which is workgroup-uniform, and no
+guard wraps a `@synchronize()` — the convergence rule KA requires.
+"""
+@kernel unsafe_indices=true cpu=false inbounds=true function ∇render_wavefront!(
+    # Outputs.
+    vcolors::AbstractMatrix{Float32},
+    vopacities::AbstractMatrix{Float32},
+    vconics::AbstractMatrix{Float32},
+    vmeans_2d::AbstractMatrix{Float32},
+    # Component-wise `Σₚ |∂L/∂μ|`, accumulated only when given.
+    vmeans_2d_abs::A,
+    # Inputs.
+    vpixels::AbstractMatrix{SVector{channels, Float32}},
+    n_contrib::AbstractMatrix{UInt32},
+    accum_α::AbstractMatrix{Float32},
+
+    gaussian_values_sorted::AbstractVector{UInt32},
+    means_2d::AbstractVector{SVector{2, Float32}},
+    opacities::AbstractMatrix{Float32},
+    conics::AbstractVector{SVector{3, Float32}},
+    rgb_features::AbstractVector{SVector{channels, Float32}},
+
+    ranges::AbstractMatrix{UInt32},
+    resolution::SVector{2, Int32},
+    bg_color::SVector{channels, Float32},
+    grid::SVector{2, Int32}, block::SVector{2, Int32},
+    ::Val{tile_size}, ::Val{group_size},
+) where {tile_size, group_size, channels, A <: Maybe{AbstractMatrix{Float32}}}
+    gid = @index(Group, Linear)  # 1-based tile index ≡ `render!`'s `range_idx`.
+    lane = @index(Local, Linear) # 1-based; one splat per lane.
+
+    range = (Int32(ranges[1, gid]), Int32(ranges[2, gid]))
+    tile_n = range[2] - range[1]
+    # Uniform across the workgroup, so returning here skips no barrier.
+    tile_n ≤ 0i32 && return
+
+    # Tile origin, 0-based. Matches `duplicate_with_keys!`'s `tile = y*grid[1] + x`.
+    t0 = Int32(gid) - 1i32
+    pix_min = SVector{2, Int32}(
+        (t0 % grid[1]) * block[1],
+        (t0 ÷ grid[1]) * block[2])
+
+    # Per-pixel state, indexed by 1-based tile-local rank (x fastest).
+    s_last = @localmem UInt32 tile_size
+    s_T = @localmem Float32 tile_size
+    s_W = @localmem Float32 tile_size
+    s_g = @localmem SVector{channels, Float32} tile_size
+
+    @unroll for k in 0i32:(Int32(tile_size ÷ group_size) - 1i32)
+        p = lane + k * group_size
+        px = pix_min[1] + (p - 1i32) % block[1] + 1i32
+        py = pix_min[2] + (p - 1i32) ÷ block[1] + 1i32
+        # Out-of-frame pixels of a partial tile get `s_last = 0`: no rank ever
+        # clears it, so they are skipped without a separate guard.
+        inside = px ≤ resolution[1] && py ≤ resolution[2]
+        g = inside ? vpixels[px, py] : zeros(SVector{channels, Float32})
+        s_last[p] = inside ? n_contrib[px, py] : 0u32
+        s_T[p] = inside ? accum_α[px, py] : 0f0
+        s_g[p] = g
+        s_W[p] = bg_color ⋅ g
+    end
+    @synchronize()
+
+    vcolor_acc = zeros(MVector{channels, Float32})
+    vconic_acc = zeros(MVector{3, Float32})
+    vmean_acc = zeros(MVector{2, Float32})
+    vmean_abs_acc = zeros(MVector{2, Float32})
+
+    for batch_base in 0i32:Int32(group_size):(tile_n - 1i32)
+        n_batch = min(tile_n - batch_base, Int32(group_size))
+        # 0-based index from the front; lane 1 takes the deepest splat left.
+        rank = tile_n - batch_base - lane
+        valid = lane ≤ n_batch
+
+        gaussian_id = 0u32
+        xy = zeros(SVector{2, Float32})
+        conic = zeros(SVector{3, Float32})
+        color = zeros(SVector{channels, Float32})
+        opacity = 0f0
+        if valid
+            gaussian_id = gaussian_values_sorted[range[1] + rank + 1i32]
+            xy = means_2d[gaussian_id]
+            opacity = opacities[gaussian_id]
+            conic = conics[gaussian_id]
+            color = rgb_features[gaussian_id]
+        end
+
+        @unroll for c in 1i32:channels
+            vcolor_acc[c] = 0f0
+        end
+        vconic_acc[1] = 0f0; vconic_acc[2] = 0f0; vconic_acc[3] = 0f0
+        vmean_acc[1] = 0f0; vmean_acc[2] = 0f0
+        vmean_abs_acc[1] = 0f0; vmean_abs_acc[2] = 0f0
+        vopacity_acc = 0f0
+        contributed = false
+
+        for diagonal in 0i32:(n_batch + Int32(tile_size) - 2i32)
+            p = diagonal - lane + 2i32
+            if valid && 1i32 ≤ p ≤ Int32(tile_size) && rank < Int32(s_last[p])
+                pix = SVector{2, Int32}(
+                    pix_min[1] + (p - 1i32) % block[1],
+                    pix_min[2] + (p - 1i32) ÷ block[1])
+                δ = xy .- pix
+                σ = conic[2] * δ[1] * δ[2] +
+                    0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
+                if σ ≥ 0f0
+                    G = exp(-σ)
+                    α = min(0.99f0, opacity * G)
+                    if α ≥ (1f0 / 255f0)
+                        contributed = true
+                        # `T` runs backwards: `s_T` holds the transmittance
+                        # *after* this splat, so divide to recover it before.
+                        T = s_T[p] / (1f0 - α)
+                        fac = α * T
+                        g = s_g[p]
+
+                        cg = 0f0
+                        @unroll for c in 1i32:channels
+                            vcolor_acc[c] += fac * g[c]
+                            cg += color[c] * g[c]
+                        end
+
+                        W = s_W[p]
+                        vα = T * (cg - W)
+                        vσ = -opacity * G * vα
+
+                        vconic_acc[1] += 0.5f0 * vσ * δ[1]^2
+                        vconic_acc[2] += 0.5f0 * vσ * δ[1] * δ[2]
+                        vconic_acc[3] += 0.5f0 * vσ * δ[2]^2
+
+                        vx = vσ * (conic[1] * δ[1] + conic[2] * δ[2])
+                        vy = vσ * (conic[2] * δ[1] + conic[3] * δ[2])
+                        vmean_acc[1] += vx
+                        vmean_acc[2] += vy
+                        if A !== Nothing
+                            # `abs` per pixel, *before* summing - the AbsGS
+                            # criterion needs `Σₚ|∂L/∂μ|`, not `|Σₚ ∂L/∂μ|`.
+                            vmean_abs_acc[1] += abs(vx)
+                            vmean_abs_acc[2] += abs(vy)
+                        end
+                        vopacity_acc += G * vα
+
+                        s_T[p] = T
+                        s_W[p] = α * cg + (1f0 - α) * W
+                    end
+                end
+            end
+            @synchronize()
+        end
+
+        if valid && contributed
+            @unroll for c in 1i32:channels
+                @atomic vcolors[c, gaussian_id] += vcolor_acc[c]
+            end
+            @atomic vmeans_2d[1, gaussian_id] += vmean_acc[1]
+            @atomic vmeans_2d[2, gaussian_id] += vmean_acc[2]
+            if A !== Nothing
+                @atomic vmeans_2d_abs[1, gaussian_id] += vmean_abs_acc[1]
+                @atomic vmeans_2d_abs[2, gaussian_id] += vmean_abs_acc[2]
+            end
+            @atomic vconics[1, gaussian_id] += vconic_acc[1]
+            @atomic vconics[2, gaussian_id] += vconic_acc[2]
+            @atomic vconics[3, gaussian_id] += vconic_acc[3]
+            @atomic vopacities[gaussian_id] += vopacity_acc
+        end
+        # The next batch overwrites `s_T`/`s_W`: no lane may run ahead into it.
+        @synchronize()
+    end
+end
+
 quat_scale_to_cov(q::SVector{4, Float32}, scale::SVector{3, Float32}) =
     quat_scale_to_cov(unnorm_quat2rot(q), scale)
 

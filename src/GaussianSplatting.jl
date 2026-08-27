@@ -102,6 +102,22 @@ unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
 use_ak(kab) = false
 
+"""
+Workgroup size for `∇render_wavefront!`: one workgroup per tile, one lane per
+splat. Trades the wavefront ramp (`BLOCK_SIZE - 1` idle diagonals per batch,
+which this amortizes better as it grows) against lane efficiency
+(`BLOCK_SIZE / (g + BLOCK_SIZE - 1)`, which drops as it grows). Must divide
+`BLOCK_SIZE` so the per-pixel prefetch loop is exact, and be a multiple of 64
+to tile an AMD wavefront.
+
+Measured on a 1.55M-Gaussian bicycle scene at 1236×822 (RX 7900 XTX,
+`∇rasterize` end to end): g=64 → 5.49 ms, g=128 → 4.25 ms, g=256 → 4.13 ms,
+against 11.24 ms for `∇render!`. Barrier count dominates lane efficiency there,
+so the largest legal group wins; 256 also matches the workgroup `render!`
+already uses, so it is the size every backend is known to accept.
+"""
+backward_group_size(kab) = 256
+
 # If `true`, then check for NaN values in loss / gradient / params during training.
 # Set via GSP_DEBUG=1 env variable.
 const GSP_DEBUG::Ref{Bool} = Ref(false)
@@ -255,19 +271,17 @@ function benchmark(kab, dataset_path::String;
     holdout::Int = 8,
     seed::Int = 42,
     progress::Bool = true,
-    # TODO add geometry_regularization
     configs = [
         # (name="3dgs",                    strategy=:default, opt_params=reference_opt_params()),
-        # (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_bilateral_grid=true)),
-        # (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=false)),
+        # (name="default+bilateral",       strategy=:default, opt_params=OptimizationParams(; use_bilateral_grid=true)),
+        # (name="default+depth",           strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true)),
         # (name="default+depth+bilateral", strategy=:default, opt_params=OptimizationParams(; use_depth_loss=true, use_bilateral_grid=true)),
-        # (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_depth_loss=false, use_normal_loss=true)),
-        (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false)),
-        (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_depth_loss=false, use_sparse_adam=true)),
-        # ImprovedGS claims the same fidelity at a *lower* final count, so read
-        # this one against the gaussian totals, not the metrics alone.
-        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(; use_depth_loss=false)),
+        # (name="default+normal",          strategy=:default, opt_params=OptimizationParams(; use_normal_loss=true)),
+        # (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams()),
+        # (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_sparse_adam=true)),
         # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
+        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_pixel),
+        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_splat),
     ],
 )
     maybe_debug()
@@ -279,8 +293,7 @@ function benchmark(kab, dataset_path::String;
     # `max_extent=Inf32`: the reference implementation does not clamp it &
     # the extent scales the position LR and the densification thresholds.
     dataset = ColmapDataset(dataset_path; scale, holdout, max_extent=Inf32)
-    isempty(dataset.test_cameras) && throw(ArgumentError(
-        "Evaluation needs a test split, but `holdout=$holdout` left none."))
+    isempty(dataset.test_cameras) && throw(ArgumentError("Evaluation needs a test split, but `holdout=$holdout` left none."))
     camera = dataset.test_cameras[1]
     @info "$(length(dataset.train_cameras)) train / $(length(dataset.test_cameras)) test views " *
         "at $(Int.(camera.intrinsics.resolution)) (scale=$scale)."
@@ -299,8 +312,10 @@ function benchmark(kab, dataset_path::String;
         gaussians = GaussianModel(kab,
             dataset.points, dataset.colors, dataset.scales;
             max_sh_degree=3, isotropic=false)
+        @info "Using `$(config.bwd_type)` blend mode for backward pass."
         rasterizer = GaussianRasterizer(kab, camera;
-            mode=training_rasterizer_mode(config.opt_params))
+            mode=training_rasterizer_mode(config.opt_params),
+            backward=config.bwd_type)
         trainer = Trainer(rasterizer, gaussians, dataset, config.opt_params;
             strategy=create_strategy(config.strategy, gaussians))
         use_depth = !isempty(trainer.depth_anchors)
