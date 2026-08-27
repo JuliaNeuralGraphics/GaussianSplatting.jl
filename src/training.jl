@@ -229,7 +229,7 @@ end
 function Trainer(
     rast::GaussianRasterizer, gs::GaussianModel,
     dataset::ColmapDataset, opt_params::OptimizationParams;
-    strategy::AbstractStrategy = DefaultStrategy(gs),
+    strategy::AbstractStrategy = ImprovedGSStrategy(gs),
 )
     ϵ = 1f-15
     kab = get_backend(gs)

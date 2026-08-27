@@ -12,8 +12,9 @@ const CIM_HEADER =
     CImGui.ImGuiTreeNodeFlags_CollapsingHeader |
     CImGui.ImGuiTreeNodeFlags_DefaultOpen
 
-# Densification strategies selectable in the UI.
-const STRATEGIES = (:default, :mcmc, :improved_gs)
+# Densification strategies selectable in the UI, the default one first
+# (`UIState.dataset_strategy` starts at index 0).
+const STRATEGIES = (:improved_gs, :default, :mcmc)
 
 # Highest SH band the rasterizer implements (see `spherical_harmonics.jl`).
 const MAX_SH_DEGREE = 3
@@ -285,7 +286,7 @@ end
 
 # Training mode.
 function GSGUI(kab, dataset_path::String, scale::Int;
-    strategy::Symbol = :default, use_depth_loss::Bool = true,
+    strategy::Symbol = :improved_gs, use_depth_loss::Bool = true,
     use_bilateral_grid::Bool = false, use_normal_loss::Bool = false,
     random_background::Bool = false, use_masks::Bool = true,
     use_sky_dome::Bool = false, sky_dome_shape::Symbol = :hemisphere,
@@ -364,7 +365,7 @@ not touch OpenGL state: the results are applied on the render thread
 in `apply_dataset!`.
 """
 function load_dataset(kab, dataset_path::String;
-    scale::Int, width::Int, height::Int, strategy::Symbol = :default,
+    scale::Int, width::Int, height::Int, strategy::Symbol = :improved_gs,
     opt_params::OptimizationParams = OptimizationParams(),
     max_sh_degree::Int = 3,
 )

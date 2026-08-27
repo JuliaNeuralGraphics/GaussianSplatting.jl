@@ -134,7 +134,7 @@ end
 function main(kab, dataset_path::String;
     scale::Int, save_path::Maybe{String} = nothing,
     opt_params::OptimizationParams = OptimizationParams(),
-    strategy::Symbol = :default,
+    strategy::Symbol = :improved_gs,
     seed::Maybe{Int} = nothing,
 )
     maybe_debug()

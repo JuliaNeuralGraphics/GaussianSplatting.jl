@@ -12,10 +12,10 @@ Must be Zygote-differentiable w.r.t. `opacities` & `scales` (raw, pre-activation
 regularization_loss(::AbstractStrategy, opacities, scales) = 0f0
 
 create_strategy(kind::Symbol, gs; kwargs...) =
+    kind == :improved_gs ? ImprovedGSStrategy(gs; kwargs...) :
     kind == :default ? DefaultStrategy(gs; kwargs...) :
     kind == :mcmc ? MCMCStrategy(; kwargs...) :
-    kind == :improved_gs ? ImprovedGSStrategy(gs; kwargs...) :
-    throw(ArgumentError("Unknown densification strategy `$kind`, must be one of: `:default`, `:mcmc`, `:improved_gs`."))
+    throw(ArgumentError("Unknown densification strategy `$kind`, must be one of: `:improved_gs`, `:default`, `:mcmc`."))
 
 """
 Post train step every strategy must implement.

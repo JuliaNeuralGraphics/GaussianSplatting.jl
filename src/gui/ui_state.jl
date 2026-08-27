@@ -54,7 +54,8 @@ Base.@kwdef mutable struct UIState
     # `Open Dataset` modal.
     open_dataset_popup::Bool = false
     dataset_scale::Ref{Int32} = Ref{Int32}(1)
-    # Index into `STRATEGIES` (densification strategy for the new trainer).
+    # Index into `STRATEGIES` (densification strategy for the new trainer),
+    # `0` being its first entry: the default strategy.
     dataset_strategy::Ref{Int32} = Ref{Int32}(0)
     # Highest SH band the new model allocates (see `GaussianModel`).
     dataset_max_sh_degree::Ref{Int32} = Ref{Int32}(3)
