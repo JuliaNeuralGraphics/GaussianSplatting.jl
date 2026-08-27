@@ -233,11 +233,6 @@ tile 1 from `k₁` to `k₂`, etc.
     end
 end
 
-@kernel cpu=false inbounds=true function _permute!(y, x, ix)
-    i = @index(Global)
-    y[i] = x[ix[i]]
-end
-
 @kernel cpu=false inbounds=true function duplicate_with_keys!(
     # Outputs.
     gaussian_keys::AbstractVector{UInt64},

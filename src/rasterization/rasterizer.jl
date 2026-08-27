@@ -311,7 +311,6 @@ function rasterize(
     end
 
     (; width, height) = resolution(camera)
-    fill!(rast.image, 0f0)
 
     K = camera.intrinsics
     R = R_w2c ≡ nothing ?
@@ -369,7 +368,10 @@ function rasterize(
         @view(rast.gstate.tiles_touched[1:n]))
     # Get total number of tiles touched.
     n_rendered = Int(@allowscalar rast.gstate.points_offset[n])
-    n_rendered == 0 && return rast.image
+    if n_rendered == 0
+        fill!(rast.image, 0f0)
+        return rast.image
+    end
 
     if length(rast.bstate) < n_rendered
         KA.unsafe_free!(rast.bstate)
@@ -380,8 +382,8 @@ function rasterize(
     # and corresponding duplicated Gaussian indices to be sorted.
     duplicate_with_keys!(kab)(
         # Output.
-        rast.bstate.gaussian_keys_unsorted,
-        rast.bstate.gaussian_values_unsorted,
+        rast.bstate.gaussian_keys_sorted,
+        rast.bstate.gaussian_values_sorted,
         # Input.
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
@@ -390,22 +392,11 @@ function rasterize(
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
 
-    if use_ak(kab)
-        AK.sortperm!(
-            @view(rast.bstate.permutation[1:n_rendered]),
-            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]);
-            temp=@view(rast.bstate.permutation_tmp[1:n_rendered]))
-    else
-        sortperm!(
-            @view(rast.bstate.permutation[1:n_rendered]),
-            @view(rast.bstate.gaussian_keys_unsorted[1:n_rendered]))
-    end
-    _permute!(kab)(
-        rast.bstate.gaussian_keys_sorted, rast.bstate.gaussian_keys_unsorted,
-        rast.bstate.permutation; ndrange=n_rendered)
-    _permute!(kab)(
-        rast.bstate.gaussian_values_sorted, rast.bstate.gaussian_values_unsorted,
-        rast.bstate.permutation; ndrange=n_rendered)
+    AK.merge_sort_by_key!(
+        @view(rast.bstate.gaussian_keys_sorted[1:n_rendered]),
+        @view(rast.bstate.gaussian_values_sorted[1:n_rendered]);
+        temp_keys=@view(rast.bstate.keys_scratch[1:n_rendered]),
+        temp_values=@view(rast.bstate.values_scratch[1:n_rendered]))
 
     # Identify start-end of per-tile workloads in sorted keys.
     fill!(rast.istate.ranges, 0u32)
@@ -471,7 +462,6 @@ function ∇rasterize(
     (; width, height) = resolution(camera)
     vcolor_features = KA.zeros(kab, Float32, (channels, n))
     vconics = KA.zeros(kab, Float32, (3, n))
-    vcov = KA.zeros(kab, Float32, (6, n))
 
     vmeans = KA.zeros(kab, Float32, (3, n))
     vshs = KA.zeros(kab, Float32, size(shs))
@@ -598,7 +588,6 @@ function ∇rasterize(
 
     KA.unsafe_free!(vcolor_features)
     KA.unsafe_free!(vconics)
-    KA.unsafe_free!(vcov)
     KA.unsafe_free!(vrgbs)
     isnothing(vdepths) || KA.unsafe_free!(vdepths)
     isnothing(vnormals_buf) || KA.unsafe_free!(vnormals_buf)

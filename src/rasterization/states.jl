@@ -72,35 +72,29 @@ function KA.unsafe_free!(gstate::GeometryState)
 end
 
 struct BinningState{
-    P <: AbstractVector{UInt32},
     K <: AbstractVector{UInt64},
     V <: AbstractVector{UInt32},
 }
-    permutation::P
-    permutation_tmp::P
-    gaussian_keys_unsorted::K
-    gaussian_values_unsorted::V
     gaussian_keys_sorted::K
     gaussian_values_sorted::V
+    # Merge-sort ping-pong buffers.
+    keys_scratch::K
+    values_scratch::V
 end
 
 BinningState(kab, n::Int) = BinningState(
-    KA.zeros(kab, UInt32, n),
-    KA.zeros(kab, UInt32, n),
     KA.zeros(kab, UInt64, n),
     KA.zeros(kab, UInt32, n),
     KA.zeros(kab, UInt64, n),
     KA.zeros(kab, UInt32, n))
 
-Base.length(gstate::BinningState) = length(gstate.permutation)
+Base.length(bstate::BinningState) = length(bstate.gaussian_keys_sorted)
 
 function KA.unsafe_free!(bstate::BinningState)
-    KA.unsafe_free!(bstate.permutation)
-    KA.unsafe_free!(bstate.permutation_tmp)
-    KA.unsafe_free!(bstate.gaussian_keys_unsorted)
-    KA.unsafe_free!(bstate.gaussian_values_unsorted)
     KA.unsafe_free!(bstate.gaussian_keys_sorted)
     KA.unsafe_free!(bstate.gaussian_values_sorted)
+    KA.unsafe_free!(bstate.keys_scratch)
+    KA.unsafe_free!(bstate.values_scratch)
     return
 end
 

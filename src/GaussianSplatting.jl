@@ -100,8 +100,6 @@ blocking_synchronize(kab) = KA.synchronize(kab)
 
 unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
-use_ak(kab) = false
-
 """
 Workgroup size for `∇render_wavefront!`: one workgroup per tile, one lane per
 splat. Trades the wavefront ramp (`BLOCK_SIZE - 1` idle diagonals per batch,

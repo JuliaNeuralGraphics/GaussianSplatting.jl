@@ -6,8 +6,6 @@ using PrecompileTools: @compile_workload
 
 GaussianSplatting.base_array_type(::MetalBackend) = MtlArray
 
-GaussianSplatting.use_ak(::MetalBackend) = true
-
 function GaussianSplatting.allocate_pinned(::MetalBackend, ::Type{T}, shape) where T
     xd = MtlArray{T, length(shape), Metal.SharedStorage}(undef, shape)
     x = reshape(unsafe_wrap(Vector{T}, reshape(xd, :)), shape)
