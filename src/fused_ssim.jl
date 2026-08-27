@@ -23,12 +23,16 @@ const GAUSS = (
     0.001028380123898387f0,
 )
 
+@inline image_dims(img) = (size(img, 2), size(img, 3), size(img, 1))
+
 # Safe pixel fetch with zero padding for out-of-bounds access.
-@inline function get_pix_value(img, b::Int, c::Int, y::Int, x::Int)
-    W, H = size(img, 1), size(img, 2)
+@inline function get_pix_value(img, c::Int, y::Int, x::Int)
+    W, H, _ = image_dims(img)
     (x < 1 || x > W || y < 1 || y > H) && return 0f0
-    return @inbounds img[x, y, c, b]
+    return @inbounds img[c, x, y]
 end
+
+@inline set_pix_value!(img, v::Float32, c::Int, y::Int, x::Int) = @inbounds img[c, x, y] = v
 
 # Forward kernel: Fused SSIM computation.
 @kernel cpu=false unsafe_indices=true inbounds=true function _fused_ssim!(
@@ -36,10 +40,10 @@ end
     @Const(img), @Const(ref),
     C1::Float32, C2::Float32, train::Bool,
 )
-    bx, by, bz = @index(Group, NTuple)
+    bx, by = @index(Group, NTuple)
     tx, ty = @index(Local, NTuple)
 
-    W, H, CH, B = size(img)
+    W, H, CH = image_dims(img)
     pix_x = (bx - 1) * BLOCK_X + tx
     pix_y = (by - 1) * BLOCK_Y + ty
 
@@ -70,8 +74,8 @@ end
                 gy = tile_start_y + local_y - 1 - HALO
                 gx = tile_start_x + local_x - 1 - HALO
 
-                X = get_pix_value(img, bz, c, gy, gx)
-                Y = get_pix_value(ref, bz, c, gy, gx)
+                X = get_pix_value(img, c, gy, gx)
+                Y = get_pix_value(ref, c, gy, gx)
 
                 sTile[1, local_x, local_y] = X
                 sTile[2, local_x, local_y] = Y
@@ -215,7 +219,7 @@ end
             D_val = 2f0 * sigma12 + C2
 
             val = (C_val * D_val) / (A * B_val)
-            ssim_map[pix_x, pix_y, c, bz] = val
+            set_pix_value!(ssim_map, val, c, pix_y, pix_x)
 
             if train
                 # Partial derivatives for backpropagation.
@@ -228,9 +232,9 @@ end
                 d_m_dsigma1_sq = (-C_val * D_val) / (A * B_val * B_val)
                 d_m_dsigma12 = (2f0 * C_val) / (A * B_val)
 
-                dm_dmu1[pix_x, pix_y, c, bz] = d_m_dmu1
-                dm_dsigma1_sq[pix_x, pix_y, c, bz] = d_m_dsigma1_sq
-                dm_dsigma12[pix_x, pix_y, c, bz] = d_m_dsigma12
+                set_pix_value!(dm_dmu1, d_m_dmu1, c, pix_y, pix_x)
+                set_pix_value!(dm_dsigma1_sq, d_m_dsigma1_sq, c, pix_y, pix_x)
+                set_pix_value!(dm_dsigma12, d_m_dsigma12, c, pix_y, pix_x)
             end
         end
         @synchronize
@@ -243,9 +247,9 @@ end
     @Const(img), @Const(ref), @Const(dL_dmap),
     @Const(dm_dmu1), @Const(dm_dsigma1_sq), @Const(dm_dsigma12),
 )
-    W, H, CH, B = size(img)
+    W, H, CH = image_dims(img)
 
-    bx, by, bz = @index(Group, NTuple)
+    bx, by = @index(Group, NTuple)
     tx, ty = @index(Local, NTuple)
 
     pix_x = (bx - 1) * BLOCK_X + tx
@@ -259,8 +263,8 @@ end
         p1 = 0f0
         p2 = 0f0
         if pix_x ≤ W && pix_y ≤ H
-            p1 = get_pix_value(img, bz, c, pix_y, pix_x)
-            p2 = get_pix_value(ref, bz, c, pix_y, pix_x)
+            p1 = get_pix_value(img, c, pix_y, pix_x)
+            p2 = get_pix_value(ref, c, pix_y, pix_x)
         end
 
         # 1) Load + fuse multiplication.
@@ -281,10 +285,10 @@ end
                 gy = start_y + row - 1 - HALO
                 gx = start_x + col - 1 - HALO
 
-                chain = get_pix_value(dL_dmap, bz, c, gy, gx)
-                vmu = get_pix_value(dm_dmu1, bz, c, gy, gx)
-                vs1 = get_pix_value(dm_dsigma1_sq, bz, c, gy, gx)
-                vs12 = get_pix_value(dm_dsigma12, bz, c, gy, gx)
+                chain = get_pix_value(dL_dmap, c, gy, gx)
+                vmu = get_pix_value(dm_dmu1, c, gy, gx)
+                vs1 = get_pix_value(dm_dsigma1_sq, c, gy, gx)
+                vs12 = get_pix_value(dm_dsigma12, c, gy, gx)
 
                 sData[1, col, row] = vmu * chain
                 sData[2, col, row] = vs1 * chain
@@ -364,7 +368,7 @@ end
 
             # Final accumulation.
             dL_dpix = sum0 + 2f0 * p1 * sum1 + p2 * sum2
-            dL_dimg[pix_x, pix_y, c, bz] = dL_dpix
+            set_pix_value!(dL_dimg, dL_dpix, c, pix_y, pix_x)
         end
         @synchronize
     end
@@ -372,17 +376,19 @@ end
 
 function _fused_ssim(
     img::T; ref::T, C1::Float32 = 0.01f0^2, C2::Float32 = 0.03f0^2, train::Bool,
-) where T <: AbstractArray{Float32, 4}
-    W, H, CH, B = size(img)
+) where T <: AbstractArray{Float32, 3}
+    W, H, CH = image_dims(img)
     kab = get_backend(img)
 
-    ssim_map = KA.zeros(kab, Float32, W, H, CH, B)
-    dm_dmu1 = train ? KA.zeros(kab, Float32, W, H, CH, B) : KA.zeros(kab, Float32, 0, 0, 0, 0)
-    dm_dsigma1_sq = train ? KA.zeros(kab, Float32, W, H, CH, B) : KA.zeros(kab, Float32, 0, 0, 0, 0)
-    dm_dsigma12 = train ? KA.zeros(kab, Float32, W, H, CH, B) : KA.zeros(kab, Float32, 0, 0, 0, 0)
+    like(wanted::Bool) = KA.zeros(kab, Float32, wanted ? size(img) : (0, 0, 0))
+
+    ssim_map = like(true)
+    dm_dmu1 = like(train)
+    dm_dsigma1_sq = like(train)
+    dm_dsigma12 = like(train)
 
     workgroupsize = (BLOCK_X, BLOCK_Y)
-    ndrange = (cld(W, BLOCK_X) * BLOCK_X, cld(H, BLOCK_Y) * BLOCK_Y, B)
+    ndrange = (cld(W, BLOCK_X) * BLOCK_X, cld(H, BLOCK_Y) * BLOCK_Y)
     _fused_ssim!(kab, workgroupsize)(
         ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12,
         img, ref, C1, C2, train; ndrange)
@@ -394,20 +400,20 @@ function fused_ssim_bwd(
     img::T, ref::T, dL_dmap::T,
     dm_dmu1::T, dm_dsigma1_sq::T, dm_dsigma12::T;
     C1::Float32 = 0.01f0^2, C2::Float32 = 0.03f0^2,
-) where T <: AbstractArray{Float32, 4}
-    W, H, CH, B = size(img)
+) where T <: AbstractArray{Float32, 3}
+    W, H, CH = image_dims(img)
     kab = get_backend(img)
-    dL_dimg = KA.zeros(kab, Float32, W, H, CH, B)
+    dL_dimg = KA.zeros(kab, Float32, size(img))
 
     workgroupsize = (BLOCK_X, BLOCK_Y)
-    ndrange = (cld(W, BLOCK_X) * BLOCK_X, cld(H, BLOCK_Y) * BLOCK_Y, B)
+    ndrange = (cld(W, BLOCK_X) * BLOCK_X, cld(H, BLOCK_Y) * BLOCK_Y)
     _fused_ssim_bwd!(kab, workgroupsize)(
         dL_dimg, img, ref, dL_dmap,
         dm_dmu1, dm_dsigma1_sq, dm_dsigma12; ndrange)
     return dL_dimg
 end
 
-function fused_ssim(img::T; ref::T, C1::Float32 = 0.01f0^2, C2::Float32 = 0.03f0^2) where T <: AbstractArray{Float32, 4}
+function fused_ssim(img::T; ref::T, C1::Float32 = 0.01f0^2, C2::Float32 = 0.03f0^2) where T <: AbstractArray{Float32, 3}
     train = within_gradient(img)
     y = _fused_ssim(img; ref, C1, C2, train)
     return train ? y : y[1]
@@ -415,7 +421,7 @@ end
 
 function CRC.rrule(::typeof(_fused_ssim),
     img::T; ref::T, C1::Float32 = 0.01f0^2, C2::Float32 = 0.03f0^2, train::Bool,
-) where T <: AbstractArray{Float32, 4}
+) where T <: AbstractArray{Float32, 3}
     ssim_map, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = _fused_ssim(img; ref, C1, C2, train)
     _pullback(Delta) = return CRC.NoTangent(), fused_ssim_bwd(
         img, ref, CRC.unthunk(Delta),

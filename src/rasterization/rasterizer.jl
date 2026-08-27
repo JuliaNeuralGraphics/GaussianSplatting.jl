@@ -367,7 +367,7 @@ function rasterize(
 
     # For each instance to be rendered, produce [tile | depth] key
     # and corresponding duplicated Gaussian indices to be sorted.
-    duplicate_with_keys!(kab)(
+    duplicate_with_keys!(kab, 256)(
         # Output.
         rast.bstate.gaussian_keys_sorted,
         rast.bstate.gaussian_values_sorted,

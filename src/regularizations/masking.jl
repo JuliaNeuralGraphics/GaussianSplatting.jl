@@ -53,14 +53,14 @@ mask_is_empty(mask::AbstractMatrix{Float32}) = sum(mask) < 1f0
 # Threshold for uses that cannot act on a fraction of a pixel.
 mask_hard(mask::AbstractMatrix{Float32}) = mask .> 0.5f0
 
-# A `(width, height)` mask in the `(width, height, 1, 1)` layout of the images
+# A `(width, height)` mask in the `(1, width, height)` layout of the images
 # the loss & metrics are computed on, so it broadcasts over the channels.
-image_mask(mask::AbstractMatrix{Float32}) = reshape(mask, size(mask)..., 1, 1)
+image_mask(mask::AbstractMatrix{Float32}) = reshape(mask, 1, size(mask)...)
 
 """
 A view's target with its mask applied: the image where the mask keeps it, black outside.
 """
-apply_mask(image::AbstractArray{Float32, 4}, mask::AbstractMatrix{Float32}) =
+apply_mask(image::AbstractArray{Float32, 3}, mask::AbstractMatrix{Float32}) =
     image .* image_mask(mask)
 
 """
@@ -69,13 +69,13 @@ behind the splats: the image where the mask keeps it, `background` outside.
 What the training loss is computed against.
 """
 function composite_mask(
-    image::AbstractArray{Float32, 4}, mask::AbstractMatrix{Float32},
+    image::AbstractArray{Float32, 3}, mask::AbstractMatrix{Float32},
     background::SVector{3, Float32},
 )
     iszero(background) && return apply_mask(image, mask)
     m = image_mask(mask)
-    # Channels are the third axis here, as in `image_mask`'s layout.
-    bg = adapt(get_backend(image), reshape(collect(background), 1, 1, 3, 1))
+    # Channels are the first axis here, as in `image_mask`'s layout.
+    bg = adapt(get_backend(image), reshape(collect(background), 3, 1, 1))
     return image .* m .+ bg .* (1f0 .- m)
 end
 

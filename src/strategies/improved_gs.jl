@@ -547,7 +547,7 @@ function edge_scores(
         ahead = k + VIEW_LOOKAHEAD
         ahead ≤ length(ids) && push!(pending, Threads.@spawn(load(ids[ahead])))
 
-        edge_map!(strategy, device_target(kab, image), id;
+        edge_map!(strategy, device_image(kab, image), id;
             weight=supervision_weight(kab, mask, sky_mask, width, height))
 
         fill!(view_scores, 0f0)
@@ -612,7 +612,7 @@ end
 
 """
 Canny edge detection through non-maximum suppression, on the luminance of
-`target_image` (`(width, height, 3, 1)`), normalized by the median of its
+`target_image` (`(3, width, height)`), normalized by the median of its
 positive values so scores are comparable across views.
 
 There is no hysteresis/double-threshold stage and no binarization: the result is
@@ -627,7 +627,8 @@ function edge_map!(
     weight::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     kab = get_backend(strategy.edge_map)
-    width, height = size(target_image, 1), size(target_image, 2)
+    # `(c, w, h)`, as `device_image` hands it over.
+    width, height = size(target_image, 2), size(target_image, 3)
 
     if size(strategy.edge_map) != (width, height)
         KA.unsafe_free!(strategy.edge_map)
@@ -667,9 +668,9 @@ end
         xi = clamp(x + dx, 1, w)
         yi = clamp(y + dy, 1, h)
         luma =
-            0.299f0 * image[xi, yi, 1, 1] +
-            0.587f0 * image[xi, yi, 2, 1] +
-            0.114f0 * image[xi, yi, 3, 1]
+            0.299f0 * image[1, xi, yi] +
+            0.587f0 * image[2, xi, yi] +
+            0.114f0 * image[3, xi, yi]
         total += CANNY_GAUSSIAN_5x5[dy + 3, dx + 3] * luma
     end
     blur[x, y] = total

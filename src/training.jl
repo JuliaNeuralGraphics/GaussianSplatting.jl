@@ -517,8 +517,8 @@ function load_state!(trainer::Trainer, filename::String)
     return
 end
 
-device_target(trainer::Trainer, image::Array{UInt8, 3}) =
-    device_target(get_backend(trainer.gaussians), image)
+device_image(trainer::Trainer, image::Array{UInt8, 3}) =
+    device_image(get_backend(trainer.gaussians), image)
 
 """
 The host-side pieces of view `idx`'s supervision, for a strategy that scores
@@ -550,7 +550,7 @@ end
 # Read view `idx` from disk & convert it, for callers outside the train loop
 # (which goes through `take_view!` to overlap the read with the previous step).
 get_image(trainer::Trainer, idx::Integer, set::Symbol) =
-    device_target(trainer, load_image(trainer.dataset, Int(idx), set))
+    device_image(trainer, load_image(trainer.dataset, Int(idx), set))
 
 """
 Average SSIM / MSE / PSNR over the test views, each metric computed per view &
@@ -578,7 +578,7 @@ function validate(trainer::Trainer; quantize::Bool = false)
     for (idx, camera) in enumerate(dataset.test_cameras)
         view = load_view(dataset, idx, :test, ViewParts(;
             mask=trainer.masks, sky_mask=false, depth=false))
-        target_image = device_target(trainer, view.image)
+        target_image = device_image(trainer, view.image)
         mask = view_mask(trainer, view.mask)
         # `apply_mask`, not `composite_mask`: the pass below renders over the
         # rasterizer's default black, whatever the training background was.
@@ -602,10 +602,7 @@ function validate(trainer::Trainer; quantize::Bool = false)
                 image, image_features[5, :, :], render_sky(trainer.sky, camera))
         end
 
-        # From (c, w, h) to (w, h, c, 1) for SSIM.
-        image_tmp = permutedims(image, (2, 3, 1))
-        image_eval = reshape(image_tmp, size(image_tmp)..., 1)
-        quantize && (image_eval = quantize8(image_eval))
+        image_eval = quantize ? quantize8(image) : image
 
         view_mse = mse(image_eval, target_image)
         eval_ssim += mean(fused_ssim(image_eval; ref=target_image))
@@ -711,7 +708,7 @@ function step!(trainer::Trainer)
 
         # Composite target image over the same background the pass renders through.
         # Required for `random_background` to work.
-        target_image = device_target(trainer, view.image)
+        target_image = device_image(trainer, view.image)
         mask ≡ nothing || (target_image = composite_mask(target_image, mask, background))
 
         # Depth supervision target for this view.
@@ -765,7 +762,7 @@ function step!(trainer::Trainer)
             # mis-route the gradient of the alias past the `getindex`
             # pullback once the depth term adds a second use, crashing
             # gradient accumulation with a shape mismatch.
-            image = image_features[1:3, :, :]
+            image = channel_slice(image_features, 3)
             # NOTE: Same as above.
             depth_img, alpha_img = if (
                 depth_data ≡ nothing &&
@@ -787,13 +784,9 @@ function step!(trainer::Trainer)
                 image = bilateral_slice(image, bgrids[:, :, :, :, idx])
             end
 
-            # From (c, w, h) to (w, h, c, 1) for SSIM.
-            image_tmp = permutedims(image, (2, 3, 1))
-            image_eval = reshape(image_tmp, size(image_tmp)..., 1)
-
-            # Compute losses.
-            l1 = mean(abs.(image_eval .- target_image))
-            s = 1f0 - mean(fused_ssim(image_eval; ref=target_image))
+            # Both terms score the render in its own `(c, w, h)` layout.
+            l1 = l1_loss(image, target_image)
+            s = 1f0 - mean(fused_ssim(image; ref=target_image))
 
             l1_term = (1f0 - params.λ_dssim) * l1
             ssim_term = params.λ_dssim * s

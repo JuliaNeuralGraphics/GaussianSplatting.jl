@@ -151,6 +151,41 @@ within_gradient(x) = false
 CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
 
 """
+The first `n` channels of a `(channels, width, height)` or
+`x` itself when it already has exactly `n` of them.
+"""
+channel_slice(x::AbstractArray{Float32, 3}, n::Int) =
+    size(x, 1) == n ? x : x[1:n, :, :]
+
+function CRC.rrule(::typeof(channel_slice), x::AbstractArray{Float32, 3}, n::Int)
+    function _pullback(Δ)
+        Δ = CRC.unthunk(Δ)
+        size(x, 1) == n && return (NoTangent(), Δ, NoTangent())
+
+        vx = KA.zeros(get_backend(x), Float32, size(x))
+        @view(vx[1:n, :, :]) .= Δ
+        return (NoTangent(), vx, NoTangent())
+    end
+    return channel_slice(x, n), _pullback
+end
+
+"""
+Mean absolute error between a render and its target.
+`y` is the ground truth, so it takes no gradient.
+"""
+l1_loss(x::AbstractArray{Float32}, y::AbstractArray{Float32}) =
+    AK.mapreduce(abs, +, x .- y; init=0f0) / length(x)
+
+function CRC.rrule(::typeof(l1_loss), x::AbstractArray{Float32}, y::AbstractArray{Float32})
+    _pullback(Δ) = (
+        NoTangent(),
+        (CRC.unthunk(Δ) / length(x)) .* sign.(x .- y),
+        NoTangent())
+    return l1_loss(x, y), _pullback
+end
+
+
+"""
 Bilinear upsample of a `(width, height)` map on the device.
 
 Matches `ImageTransformations.imresize`'s convention exactly: outer corners of

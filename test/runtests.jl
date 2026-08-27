@@ -816,14 +816,18 @@ end
     x[13:16, 13:16, :, :] .= 1f0
     @test ssim(adapt(kab, x), ref) ≈ 0.1035 atol=1f-3 rtol=1f-3
 
-    x = adapt(kab, rand(Float32, 128, 128, 3, 2))
-    ref = adapt(kab, rand(Float32, 128, 128, 3, 2))
-    @test ssim(x, ref) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
+    # The reference above is a Flux conv, so it takes `(w, h, c, n)`;
+    # `fused_ssim` scores the rasterizer's `(c, w, h)` layout. One view each.
+    x4 = adapt(kab, rand(Float32, 128, 128, 3, 1))
+    ref4 = adapt(kab, rand(Float32, 128, 128, 3, 1))
+    to_chw(v) = permutedims(reshape(v, size(v, 1), size(v, 2), size(v, 3)), (3, 1, 2))
+    x, ref = to_chw(x4), to_chw(ref4)
+    @test ssim(x4, ref4) ≈ mean(GaussianSplatting.fused_ssim(x; ref))
 
-    y, ∇ = Zygote.withgradient(x -> ssim(x, ref), x)
-    yf, ∇f = Zygote.withgradient(x -> mean(GaussianSplatting.fused_ssim(x; ref)), x)
+    y, ∇ = Zygote.withgradient(v -> ssim(v, ref4), x4)
+    yf, ∇f = Zygote.withgradient(v -> mean(GaussianSplatting.fused_ssim(v; ref)), x)
     @test y ≈ yf
-    @test ∇[1] ≈ ∇f[1]
+    @test to_chw(∇[1]) ≈ ∇f[1]
 end
 
 @testset "Bilateral grid" begin
@@ -1447,12 +1451,12 @@ end
     @test Array(GaussianSplatting.mask_hard(mask)) == (m .> 0.5f0)
 
     # The target is the image where the mask keeps it & black outside.
-    image = adapt(kab, rand(Float32, width, height, 3, 1))
+    image = adapt(kab, rand(Float32, 3, width, height))
     target = apply_mask(image, mask)
     @test size(target) == size(image)
-    @test all(iszero, Array(target)[dropped, :, :, :])
-    @test Array(target)[1:16, :, :, :] == Array(image)[1:16, :, :, :]
-    @test Array(target)[17, :, :, :] ≈ 0.5f0 .* Array(image)[17, :, :, :]
+    @test all(iszero, Array(target)[:, dropped, :])
+    @test Array(target)[:, 1:16, :] == Array(image)[:, 1:16, :]
+    @test Array(target)[:, 17, :] ≈ 0.5f0 .* Array(image)[:, 17, :]
 
     # Black outside is a target like any other: the region is supervised, so a
     # render that puts something there is penalized & pushed to clear it.
@@ -1463,12 +1467,12 @@ end
     @test photometric(target) ≈ 0f0 atol=1f-5
 
     dirty = Array(target)
-    dirty[dropped, :, :, :] .= 0.7f0
+    dirty[:, dropped, :] .= 0.7f0
     D = adapt(kab, dirty)
     @test photometric(D) > 0f0
     _, (∇,) = Zygote.withgradient(photometric, D)
     g = Array(∇)
-    @test all(>(0f0), g[dropped, :, :, :]) # Downward, toward black.
+    @test all(>(0f0), g[:, dropped, :]) # Downward, toward black.
 
     # Color alone would accept an opaque *black* gaussian there, so alpha is
     # supervised on the mask complement — the term that says empty, not dark.
