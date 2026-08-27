@@ -113,8 +113,12 @@ struct ImageState{
     accum_α::A
 end
 
+# `ranges` gets one column past the last real tile: `duplicate_with_keys!` pads
+# any shortfall between the counted and the emitted key runs with a sentinel tile
+# id of `grid_size`, which `identify_tile_range!` then writes into that column.
+# Neither `render!` nor `∇render!` ever reads it.
 ImageState(kab; width::Int, height::Int, grid_size::Int) = ImageState(
-    KA.zeros(kab, UInt32, (2, grid_size)),
+    KA.zeros(kab, UInt32, (2, grid_size + 1)),
     KA.zeros(kab, UInt32, (width, height)),
     KA.zeros(kab, Float32, (width, height)))
 

@@ -329,6 +329,7 @@ function rasterize(
         _as_T(SVector{3, Float32}, means_3d),
         _as_T(SVector{3, Float32}, scales),
         _as_T(SVector{4, Float32}, rotations),
+        opacities,
         # Input camera properties.
         R, t, K.focal, Int32.(K.resolution), K.principal,
         # Config.
@@ -350,6 +351,8 @@ function rasterize(
         rast.gstate.tiles_touched,
         # Input.
         rast.gstate.means_2d,
+        rast.gstate.conic_opacities,
+        opacities,
         rast.gstate.radii,
         rast.grid, BLOCK; ndrange=n)
 
@@ -373,6 +376,8 @@ function rasterize(
         rast.bstate.gaussian_values_unsorted,
         # Input.
         rast.gstate.means_2d,
+        rast.gstate.conic_opacities,
+        opacities,
         rast.gstate.depths,
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)

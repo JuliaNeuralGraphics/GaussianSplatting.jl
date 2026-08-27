@@ -49,6 +49,9 @@ end
     means::AbstractVector{SVector{3, Float32}},
     cov_scales::AbstractVector{SVector{3, Float32}},
     cov_rotations::AbstractVector{SVector{4, Float32}},
+    # Activated opacities: the culling extent is opacity-aware (see `ellipse_radius_sq`).
+    # So a faint Gaussian is culled sooner than an opaque one with the same covariance.
+    opacities::AbstractMatrix{Float32},
 
     # Input camera properties.
     R_w2c::RM, t_w2c,
@@ -96,34 +99,39 @@ end
         return
     end
 
-    _, Σ_2D_inv = inverse(Σ_2D)
+    radius_sq = ellipse_radius_sq(opacities[i])
+    if !(radius_sq > 0f0)
+        radii[i] = 0i32
+        return
+    end
 
-    # Take 3σ as the radius.
+    # Cull too small **on screen** Gaussians, use original 3σ radius.
     λ = max_eigval_2D(Σ_2D, det)
-    radius = gpu_ceil(Int32, 3f0 * sqrt(λ))
-    if radius ≤ radius_clip
+    if gpu_ceil(Int32, 3f0 * sqrt(λ)) ≤ radius_clip
         radii[i] = 0i32
         return
     end
 
     # Discard Gaussians outside of image plane.
+    # The cull uses the anisotropic extent of the ellipse.
+    _, Σ_2D_inv = inverse(Σ_2D)
+    conic = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
+    extent = ellipse_extent(conic, radius_sq)
     if (
-        (mean_2D[1] + radius) ≤ 0f0 ||
-        (mean_2D[1] - radius) ≥ Float32(resolution[1]) ||
-        (mean_2D[2] + radius) ≤ 0f0 ||
-        (mean_2D[2] - radius) ≥ Float32(resolution[2])
+        (mean_2D[1] + extent[1]) ≤ 0f0 ||
+        (mean_2D[1] - extent[1]) ≥ Float32(resolution[1]) ||
+        (mean_2D[2] + extent[2]) ≤ 0f0 ||
+        (mean_2D[2] - extent[2]) ≥ Float32(resolution[2])
     )
         radii[i] = 0i32
         return
     end
 
-    radii[i] = radius
+    radii[i] = gpu_ceil(Int32, sqrt(radius_sq * λ))
     means_2D[i] = mean_2D
     depths[i] = mean_cam[3]
-    conics[i] = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
-    if C <: AbstractMatrix{Float32}
-        compensations[i] = compensation
-    end
+    conics[i] = conic
+    C <: AbstractMatrix{Float32} && (compensations[i] = compensation)
     if N <: AbstractVector{SVector{3, Float32}}
         normals[i], _, _ = gaussian_normal(R, R_g, cov_scale, mean_cam)
     end

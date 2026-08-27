@@ -305,22 +305,146 @@ end
     end
 end
 
-@testset "get_rect" begin
-    width, height = 1024, 1024
+# The kernels' tile walk, driven from the host through the very same helpers
+# `count_tiles_per_gaussian!` & `duplicate_with_keys!` inline.
+function walk_ellipse_tiles(mean_2d, conic, opacity, grid, block)
+    GS = GaussianSplatting
+    rmin, rmax, radius_sq = GS.ellipse_tile_bounds(
+        mean_2d, conic, opacity, grid, block)
+    tiles = Set{Tuple{Int, Int}}()
+    radius_sq > 0f0 || return tiles
+
+    transposed = (rmax[2] - rmin[2]) > (rmax[1] - rmin[1])
+    major = transposed ? (rmin[1], rmax[1]) : (rmin[2], rmax[2])
+    minor = transposed ? (rmin[2], rmax[2]) : (rmin[1], rmax[1])
+    for s in major[1]:(major[2] - 1i32)
+        lo, hi = GS.ellipse_tile_span(
+            mean_2d, conic, radius_sq, s, minor[1], minor[2], block,
+            Val(transposed))
+        for m in lo:(hi - 1i32)
+            push!(tiles, transposed ? (Int(s), Int(m)) : (Int(m), Int(s)))
+        end
+    end
+    return tiles
+end
+
+# Ground truth: a tile is covered iff some *integer* pixel sample in it clears
+# `render!`'s blend test. This is exactly the set the binning must not miss.
+function brute_force_tiles(mean_2d, conic, opacity, grid, block)
+    tiles = Set{Tuple{Int, Int}}()
+    for ty in 0:(grid[2] - 1), tx in 0:(grid[1] - 1)
+        covered = false
+        for py in (ty * block[2]):(ty * block[2] + block[2] - 1),
+            px in (tx * block[1]):(tx * block[1] + block[1] - 1)
+
+            δ = mean_2d .- SVector{2, Float32}(px, py)
+            σ = conic[2] * δ[1] * δ[2] +
+                0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
+            σ < 0f0 && continue
+            if min(0.99f0, opacity * exp(-σ)) ≥ 1f0 / 255f0
+                covered = true
+                break
+            end
+        end
+        covered && push!(tiles, (tx, ty))
+    end
+    return tiles
+end
+
+# Random 2D Gaussian with the same blur the rasterizer applies.
+function random_gaussian_2d(width, height)
+    mean_2d = SVector{2, Float32}(
+        rand() * 1.2 * width - 0.1 * width,
+        rand() * 1.2 * height - 0.1 * height)
+    θ = rand() * 2π
+    R = SMatrix{2, 2, Float32}(cos(θ), sin(θ), -sin(θ), cos(θ))
+    s = SMatrix{2, 2, Float32}(exp(randn() * 0.9 + 0.6)^2, 0, 0, exp(randn() * 0.9 + 0.6)^2)
+    Σ = R * s * R' + SMatrix{2, 2, Float32}(0.3, 0, 0, 0.3)
+    Σ⁻¹ = inv(Σ)
+    conic = SVector{3, Float32}(Σ⁻¹[1, 1], Σ⁻¹[2, 1], Σ⁻¹[2, 2])
+    return mean_2d, Σ, conic, Float32(rand()^2 * 0.999 + 0.001)
+end
+
+@testset "ellipse_range_bound" begin
+    ellipse_range_bound = GaussianSplatting.ellipse_range_bound
+
+    Random.seed!(0)
+    for _ in 1:200
+        _, _, conic, _ = random_gaussian_2d(64, 64)
+        radius_sq = Float32(rand() * 12 + 0.5)
+        y0 = Float32(randn() * 4)
+        y1 = y0 + Float32(rand() * 16)
+
+        x0, x1 = ellipse_range_bound(conic, radius_sq, y0, y1)
+        @test isfinite(x0) && isfinite(x1)
+        @test x0 ≤ x1
+
+        # Densely sample the part of the ellipse inside the strip.
+        Q(x, y) = conic[1] * x^2 + 2f0 * conic[2] * x * y + conic[3] * y^2
+        inside = [
+            x
+            for y in range(y0, y1; length=200),
+                x in range(x0 - 4f0, x1 + 4f0; length=2000)
+            if Q(x, y) ≤ radius_sq]
+        isempty(inside) && continue # The strip misses the ellipse entirely.
+
+        # Sound: nothing inside the ellipse falls outside `[x0, x1]`.
+        @test x0 ≤ minimum(inside) && maximum(inside) ≤ x1
+        # Tight: the bracket is no wider than the sampling resolution.
+        step = (x1 - x0 + 8f0) / 2000f0
+        @test minimum(inside) - x0 ≤ 2f0 * step
+        @test x1 - maximum(inside) ≤ 2f0 * step
+    end
+end
+
+@testset "Exact ellipse-tile intersection" begin
     block = SVector{2, Int32}(16, 16)
+    width, height = 128, 96
     grid = SVector{2, Int32}(cld(width, block[1]), cld(height, block[2]))
 
-    # rect covering only one block
-    rmin, rmax = @inferred GaussianSplatting.get_rect(
-        SVector{2, Float32}(0, 0), 1i32, grid, block)
-    @test all(rmin .== (0, 0))
-    @test all(rmax .== (1, 1))
+    Random.seed!(0xC0FFEE)
+    n_exact, n_truth = 0, 0
+    for _ in 1:500
+        mean_2d, _, conic, opacity = random_gaussian_2d(width, height)
+        got = walk_ellipse_tiles(mean_2d, conic, opacity, grid, block)
+        truth = brute_force_tiles(mean_2d, conic, opacity, grid, block)
 
-    # rect covering 2 blocks
-    rmin, rmax = @inferred GaussianSplatting.get_rect(
-        SVector{2, Float32}(0, 0), Int32(block[1] + 1), grid, block)
-    @test all(rmin .== (0, 0))
-    @test all(rmax .== (2, 2))
+        # The invariant that matters: the walk never drops a tile `render!`
+        # would have blended into. (The converse is not exact — a thin ellipse
+        # can cross a tile between two pixel samples, so the analytic per-row
+        # bound admits it. Those tiles cost a key & are then skipped by the
+        # `α < 1/255` test, so they are safe; the excess is ~0.2%.)
+        @test issubset(truth, got)
+        n_exact += length(got)
+        n_truth += length(truth)
+    end
+    # Conservative, but barely.
+    @test n_exact ≤ 1.02 * n_truth
+end
+
+@testset "Opacity-aware culling" begin
+    ellipse_radius_sq = GaussianSplatting.ellipse_radius_sq
+    ellipse_tile_bounds = GaussianSplatting.ellipse_tile_bounds
+
+    # `α = o·exp(-σ)` can never reach `1/255` once `o ≤ 1/255`, whatever the
+    # covariance — such a Gaussian touches no tile at all.
+    @test ellipse_radius_sq(1f0 / 255f0) ≈ 0f0 atol=1f-6
+    @test ellipse_radius_sq(1f0 / 512f0) < 0f0
+    @test ellipse_radius_sq(1f0) ≈ 2f0 * log(255f0)
+
+    block = SVector{2, Int32}(16, 16)
+    grid = SVector{2, Int32}(8, 6)
+    conic = SVector{3, Float32}(1f0, 0f0, 1f0)
+    mean_2d = SVector{2, Float32}(64f0, 48f0)
+
+    _, _, radius_sq = ellipse_tile_bounds(mean_2d, conic, 1f-3, grid, block)
+    @test radius_sq ≤ 0f0
+
+    # And the extent shrinks monotonically as opacity falls.
+    area(o) = let (rmin, rmax, _) = ellipse_tile_bounds(mean_2d, conic, o, grid, block)
+        prod(rmax .- rmin)
+    end
+    @test area(1f0) ≥ area(0.1f0) ≥ area(0.01f0)
 end
 
 @testset "ls_affine_fit" begin
@@ -598,6 +722,82 @@ end
     GaussianSplatting.identify_tile_range!(kab, 256)(
         ranges, gaussian_keys; ndrange=length(gaussian_keys))
     @test Array(ranges) == UInt32[0; 2;; 2; 3;; 3; 4;; 4; 5;;]
+end
+
+@testset "Tile binning: counted keys == emitted keys" begin
+    NU = GaussianSplatting.NU
+
+    width, height = 96, 80
+    intrinsics = NU.CameraIntrinsics(
+        nothing, SVector{2, Float32}(90f0, 90f0),
+        SVector{2, Float32}(0.5f0, 0.5f0),
+        SVector{2, UInt32}(width, height))
+    camera = GaussianSplatting.Camera(
+        SMatrix{3, 3, Float32, 9}(I), zeros(SVector{3, Float32});
+        intrinsics, img_name="")
+
+    Random.seed!(123)
+    n = 512
+    points = adapt(kab, Float32[
+        (rand(Float32) * 2f0 - 1f0) * (i == 3 ? 0.5f0 : 1.2f0) + (i == 3 ? 3f0 : 0f0)
+        for i in 1:3, _ in 1:n])
+    colors = adapt(kab, rand(Float32, 3, n))
+    # Wildly anisotropic & randomly oriented: the case the 3σ disc over-counts.
+    scales = adapt(kab, Float32[
+        log(0.01f0 + 0.4f0 * rand(Float32)) for _ in 1:3, _ in 1:n])
+
+    gaussians = GaussianSplatting.GaussianModel(kab,
+        points, colors, scales; max_sh_degree=0, isotropic=false)
+    gaussians.rotations .= adapt(kab, randn(Float32, 4, n))
+    # Span the whole opacity range, including below the `1/255` cull.
+    gaussians.opacities .= adapt(kab, reshape(
+        Float32[randn(Float32) * 4f0 - 2f0 for _ in 1:n], 1, n))
+
+    rast = GaussianSplatting.GaussianRasterizer(kab, camera; mode=:rgb)
+    rast(
+        gaussians.points, gaussians.opacities, gaussians.scales,
+        gaussians.rotations, gaussians.features_dc, gaussians.features_rest;
+        camera, sh_degree=0)
+
+    n_tiles = Int(prod(rast.grid))
+    @test size(rast.istate.ranges, 2) == n_tiles + 1
+
+    tiles_touched = Array(rast.gstate.tiles_touched[1:n])
+    points_offset = Array(rast.gstate.points_offset[1:n])
+    n_rendered = Int(points_offset[end])
+
+    @test n_rendered == sum(tiles_touched)
+    @test n_rendered > 0
+    @test all(≥(0), tiles_touched)
+
+    # A Gaussian is either culled (`radii == 0`, no keys) or it is visible &
+    # touches at least one tile — the exact walk never counts a visible
+    # Gaussian as covering nothing.
+    radii = Array(rast.gstate.radii[1:n])
+    @test all(tiles_touched[radii .== 0] .== 0)
+
+    keys = Array(rast.bstate.gaussian_keys_sorted[1:n_rendered])
+    tile_ids = keys .>> 32
+    # No sentinel: the counting & emitting walks agreed for every Gaussian.
+    # (`duplicate_with_keys!` pads a shortfall with tile id `n_tiles`, which
+    # would land here and in the extra `ranges` column.)
+    @test maximum(tile_ids) < n_tiles
+    @test Array(rast.istate.ranges)[:, end] == UInt32[0, 0]
+
+    # And the exact binning is a real cut against the 3σ disc it replaced.
+    means_2d = Array(rast.gstate.means_2d)[1:n]
+    conics = Array(rast.gstate.conic_opacities)[1:n]
+    n_rect = 0
+    for i in 1:n
+        radii[i] > 0 || continue
+        r = radii[i]
+        rmin = (clamp(fld(Int(floor(means_2d[i][1])) - r, 16), 0, rast.grid[1]),
+                clamp(fld(Int(floor(means_2d[i][2])) - r, 16), 0, rast.grid[2]))
+        rmax = (clamp(cld(Int(ceil(means_2d[i][1])) + r, 16), 0, rast.grid[1]),
+                clamp(cld(Int(ceil(means_2d[i][2])) + r, 16), 0, rast.grid[2]))
+        n_rect += max(0, rmax[1] - rmin[1]) * max(0, rmax[2] - rmin[2])
+    end
+    @test n_rendered < n_rect
 end
 
 @testset "SSIM" begin
@@ -912,9 +1112,9 @@ end
     # multiplied back in `perspective_projection`, so the pixel principal point
     # only round-trips exactly when the resolution divides it evenly
     # (`32/64*64` does, `32/61*61` lands an ulp low). The resulting ~4f-6 px
-    # shift in the projected means flips tile-boundary comparisons in
-    # `get_rect`, rebinning marginal gaussians. The invariants below hold at any
-    # resolution & are what partial-tile correctness actually rests on.
+    # shift in the projected means flips tile-boundary comparisons in the
+    # tile binning, rebinning marginal gaussians. The invariants below hold at
+    # any resolution & are what partial-tile correctness actually rests on.
     α = small[5, :, :]
     α_big = big[5, :, :]
     @test all(isfinite, small)
@@ -1919,3 +2119,5 @@ end
 end
 
 end
+
+
