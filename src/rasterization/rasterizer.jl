@@ -15,7 +15,6 @@ mutable struct GaussianRasterizer{
     bstate::B
 
     # Temporary storage to avoid allocating during rendering outside of AD.
-    shs::K
     scales_act::S
     opacities_act::S
 
@@ -101,7 +100,6 @@ function GaussianRasterizer(kab;
     bstate = BinningState(kab, 0)
 
     # TODO organize in a render cache/state
-    shs = KA.allocate(kab, Float32, (3, 0, 0))
     scales_act = KA.allocate(kab, Float32, (3, 0))
     opacities_act = KA.allocate(kab, Float32, (1, 0))
 
@@ -110,7 +108,7 @@ function GaussianRasterizer(kab;
 
     rast = GaussianRasterizer(
         istate, gstate, bstate,
-        shs, scales_act, opacities_act,
+        scales_act, opacities_act,
         image, pinned_image, host_image,
         grid, near_plane, far_plane, mode, false, backward)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
@@ -144,7 +142,6 @@ function release_scene_buffers!(rast::GaussianRasterizer)
     rast.gstate = GeometryState(kab, 0; n_features=n_color_features(rast.mode))
     rast.bstate = BinningState(kab, 0)
 
-    cache!(rast, :shs, (3, 0, 0))
     cache!(rast, :scales_act, (3, 0))
     cache!(rast, :opacities_act, (1, 0))
     return
@@ -156,7 +153,6 @@ memory_usage(rast::GaussianRasterizer) =
     memory_usage(rast.istate) +
     memory_usage(rast.gstate) +
     memory_usage(rast.bstate) +
-    memory_usage(rast.shs) +
     memory_usage(rast.scales_act) +
     memory_usage(rast.opacities_act) +
     memory_usage(rast.image)
@@ -165,7 +161,6 @@ function KA.unsafe_free!(rast::GaussianRasterizer)
     KA.unsafe_free!(rast.istate)
     KA.unsafe_free!(rast.gstate)
     KA.unsafe_free!(rast.bstate)
-    KA.unsafe_free!(rast.shs)
     KA.unsafe_free!(rast.scales_act)
     KA.unsafe_free!(rast.opacities_act)
     KA.unsafe_free!(rast.image)
@@ -244,17 +239,6 @@ function (rast::GaussianRasterizer)(
     # If rendering outside AD, use non-allocating path.
     within_AD = within_gradient(means_3d)
 
-    shs = if within_AD
-        isempty(sh_remainder) ? sh_color : hcat(sh_color, sh_remainder)
-    else
-        n_features = size(sh_color, 2) + size(sh_remainder, 2)
-        target_size = (3, n_features, size(sh_color, 3))
-        rshs = cache!(rast, :shs, target_size)
-        rshs[:, 1:1, :] .= sh_color
-        isempty(sh_remainder) || (rshs[:, 2:end, :] .= sh_remainder)
-        rshs
-    end
-
     opacities_act = if within_AD
         NU.sigmoid.(opacities)
     else
@@ -278,14 +262,16 @@ function (rast::GaussianRasterizer)(
     end
 
     return rasterize(
-        means_3d, shs, opacities_act, scales_act, rotations, R_w2c, t_w2c;
+        means_3d, sh_color, sh_remainder, opacities_act, scales_act, rotations,
+        R_w2c, t_w2c;
         rast, camera, sh_degree, background, covisibilities, uncertainties,
         edge_scores, edge_map)
 end
 
 function rasterize(
     means_3d::AbstractMatrix{Float32},
-    shs::AbstractArray{Float32, 3},
+    sh_dc::AbstractArray{Float32, 3},
+    sh_rest::AbstractArray{Float32, 3},
     opacities::AbstractMatrix{Float32},
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
@@ -350,7 +336,8 @@ function rasterize(
         rast.gstate.radii,
         _as_T(SVector{3, Float32}, means_3d),
         camera.camera_center,
-        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        as_sh_coefficients(sh_dc, n),
+        as_sh_coefficients(sh_rest, n),
         Val(sh_degree); ndrange=n)
 
     count_tiles_per_gaussian!(kab)(
@@ -444,7 +431,8 @@ feature_background(background::SVector{3, Float32}, channels::Int) =
 function ∇rasterize(
     vpixels::AbstractArray{Float32, 3},
     means_3d::AbstractMatrix{Float32},
-    shs::AbstractArray{Float32, 3},
+    sh_dc::AbstractArray{Float32, 3},
+    sh_rest::AbstractArray{Float32, 3},
     scales::AbstractMatrix{Float32},
     rotations::AbstractMatrix{Float32},
     opacities::AbstractMatrix{Float32},
@@ -464,7 +452,10 @@ function ∇rasterize(
     vconics = KA.zeros(kab, Float32, (3, n))
 
     vmeans = KA.zeros(kab, Float32, (3, n))
-    vshs = KA.zeros(kab, Float32, size(shs))
+    # `∇spherical_harmonics!` writes only the `(sh_degree + 1)²` coefficients in
+    # use, so the coefficients above that keep the zero these give them.
+    vsh_dc = KA.zeros(kab, Float32, size(sh_dc))
+    vsh_rest = KA.zeros(kab, Float32, size(sh_rest))
     vopacities = KA.zeros(kab, Float32, (1, n))
     vscales = KA.zeros(kab, Float32, (3, n))
     vrot = KA.zeros(kab, Float32, (4, n))
@@ -576,11 +567,13 @@ function ∇rasterize(
 
     ∇spherical_harmonics!(kab)(
         # Output.
-        reinterpret(SVector{3, Float32}, reshape(vshs, :, n)),
+        as_sh_coefficients(vsh_dc, n),
+        as_sh_coefficients(vsh_rest, n),
         _as_T(SVector{3, Float32}, vmeans),
         # Input.
         _as_T(SVector{3, Float32}, means_3d),
-        reinterpret(SVector{3, Float32}, reshape(shs, :, n)),
+        as_sh_coefficients(sh_dc, n),
+        as_sh_coefficients(sh_rest, n),
         rast.gstate.clamped,
         _as_T(SVector{3, Float32}, vrgbs),
         camera.camera_center,
@@ -592,11 +585,11 @@ function ∇rasterize(
     isnothing(vdepths) || KA.unsafe_free!(vdepths)
     isnothing(vnormals_buf) || KA.unsafe_free!(vnormals_buf)
 
-    return vmeans, vshs, vopacities, vscales, vrot, vR, vt
+    return vmeans, vsh_dc, vsh_rest, vopacities, vscales, vrot, vR, vt
 end
 
 function ChainRulesCore.rrule(::typeof(rasterize),
-    means_3d, shs, opacities, scales, rotations,
+    means_3d, sh_dc, sh_rest, opacities, scales, rotations,
     R_w2c = nothing, t_w2c = nothing;
     rast::GaussianRasterizer, camera::Camera, sh_degree::Int,
     background::SVector{3, Float32},
@@ -607,14 +600,14 @@ function ChainRulesCore.rrule(::typeof(rasterize),
     edge_map::Maybe{AbstractMatrix{Float32}} = nothing,
 )
     image = rasterize(
-        means_3d, shs, opacities, scales, rotations, R_w2c, t_w2c;
+        means_3d, sh_dc, sh_rest, opacities, scales, rotations, R_w2c, t_w2c;
         rast, camera, sh_degree, background, covisibilities, uncertainties,
         edge_scores, edge_map)
 
     function _pullback(vpixels)
         ∇ = ∇rasterize(
             unthunk(vpixels),
-            means_3d, shs, scales, rotations, opacities,
+            means_3d, sh_dc, sh_rest, scales, rotations, opacities,
             rast.gstate.radii, R_w2c, t_w2c; rast, camera, sh_degree, background)
         return (NoTangent(), ∇...)
     end

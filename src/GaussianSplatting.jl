@@ -278,7 +278,7 @@ function benchmark(kab, dataset_path::String;
         # (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams()),
         # (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_sparse_adam=true)),
         # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
-        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_pixel),
+        # (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_pixel),
         (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_splat),
     ],
 )

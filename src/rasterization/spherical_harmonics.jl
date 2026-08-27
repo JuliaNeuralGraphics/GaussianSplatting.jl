@@ -1,3 +1,24 @@
+as_sh_coefficients(x::AbstractArray{Float32, 3}, n::Int) =
+    reinterpret(SVector{3, Float32}, reshape(x, :, n))
+
+"""
+The `(degree + 1)²` SH coefficients of one Gaussian, addressed as if they were
+one vector while living in the two arrays the model actually stores them in.
+"""
+struct SplitSH{D, R}
+    dc::D
+    rest::R
+end
+
+# Coefficients of Gaussian `i`, from `(n_coefficients, n_gaussians)` matrices.
+@inline split_sh(dc, rest, i::Integer) = @inbounds SplitSH(@view(dc[:, i]), @view(rest[:, i]))
+
+Base.@propagate_inbounds Base.getindex(sh::SplitSH, k::Integer) =
+    k == 1 ? sh.dc[1] : sh.rest[k - 1]
+
+Base.@propagate_inbounds Base.setindex!(sh::SplitSH, v, k::Integer) =
+    k == 1 ? (sh.dc[1] = v) : (sh.rest[k - 1] = v)
+
 @kernel cpu=false inbounds=true function spherical_harmonics!(
     # Output.
     rgbs::AbstractVector{SVector{3, Float32}},
@@ -6,7 +27,8 @@
     radii::AbstractVector{Int32},
     means::AbstractVector{SVector{3, Float32}},
     camera_position::SVector{3, Float32},
-    spherical_harmonics::AbstractMatrix{SVector{3, Float32}},
+    sh_dc::AbstractMatrix{SVector{3, Float32}},
+    sh_rest::AbstractMatrix{SVector{3, Float32}},
     degree,
 )
     i = @index(Global)
@@ -14,16 +36,18 @@
 
     mean = means[i]
     rgbs[i], clamped[i] = compute_colors_from_sh(
-        mean, camera_position, @view(spherical_harmonics[:, i]), degree)
+        mean, camera_position, split_sh(sh_dc, sh_rest, i), degree)
 end
 
 @kernel cpu=false inbounds=true function ∇spherical_harmonics!(
     # Output.
-    vshs::AbstractMatrix{SVector{3, Float32}},
+    vsh_dc::AbstractMatrix{SVector{3, Float32}},
+    vsh_rest::AbstractMatrix{SVector{3, Float32}},
     vmeans::AbstractVector{SVector{3, Float32}},
     # Input.
     means::AbstractVector{SVector{3, Float32}},
-    shs::AbstractMatrix{SVector{3, Float32}},
+    sh_dc::AbstractMatrix{SVector{3, Float32}},
+    sh_rest::AbstractMatrix{SVector{3, Float32}},
     clamped::AbstractVector{SVector{3, Bool}},
     vcolors::AbstractVector{SVector{3, Float32}},
     camera_position::SVector{3, Float32},
@@ -31,8 +55,8 @@ end
 )
     i = @index(Global)
     vmean = ∇color_from_sh!(
-        @view(vshs[:, i]),
-        means[i], camera_position, @view(shs[:, i]),
+        split_sh(vsh_dc, vsh_rest, i),
+        means[i], camera_position, split_sh(sh_dc, sh_rest, i),
         sh_degree, clamped[i], vcolors[i])
     vmeans[i] += vmean
 end
@@ -40,7 +64,7 @@ end
 # Convert spherical harmonics coefficients of each Gaussian to a RGB color.
 @inbounds function compute_colors_from_sh(
     point::SVector{3, Float32}, camera_position::SVector{3, Float32},
-    shs::AbstractVector{SVector{3, Float32}}, ::Val{degree}
+    shs, ::Val{degree},
 ) where degree
     res = SH0 * shs[1]
     if degree > 0
@@ -75,11 +99,11 @@ end
 
 @inbounds function ∇color_from_sh!(
     # Outputs.
-    ∂L∂shs::AbstractVector{SVector{3, Float32}},
+    ∂L∂shs,
     # Inputs.
     point::SVector{3, Float32},
     camera_position::SVector{3, Float32},
-    shs::AbstractVector{SVector{3, Float32}}, ::Val{degree},
+    shs, ::Val{degree},
     clamped::SVector{3, Bool},
     ∂L∂color::SVector{3, Float32},
 ) where degree
