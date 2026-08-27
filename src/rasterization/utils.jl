@@ -20,19 +20,18 @@ gpu_cld(x::X, y::T) where {X, T} = unsafe_trunc(T, floor(Float32(x + y - one(X))
 
 Squared Mahalanobis radius of the `α ≥ 1/255` contour of a Gaussian.
 
-`render!` blends a fragment iff `α = min(0.99f0, opacity * exp(-σ)) ≥ 1/255`, and
-since `0.99 > 1/255` the clamp never decides the test, so the fragment survives iff
-`σ ≤ log(255·opacity)`, i.e. iff `δᵀ·Σ⁻¹·δ ≤ 2·log(255·opacity)` (note `2σ` is the
-quadratic form `δᵀ·Σ⁻¹·δ`). The result is `≤ 0` exactly when `opacity ≤ 1/255`,
-i.e. when the Gaussian can never clear the blend threshold anywhere.
+At `opacity = 1` it's `≈ 3.3σ` (slightly larger than original `3σ` radius),
+at `opacity < 1 / 255` it's negative and can be discarded
+since it does not contribute to rendering.
 """
 @inline ellipse_radius_sq(opacity::Float32) = 2f0 * log(255f0 * opacity)
 
 """
     ellipse_extent(conic, radius_sq)
 
-Per-axis half-extents of the ellipse `δᵀ·conic·δ ≤ radius_sq`, from the marginal
-variances `Σ[1, 1] = conic[3] / detᶜ` and `Σ[2, 2] = conic[1] / detᶜ`.
+Per-axis half-extents of the ellipse `δᵀ·conic·δ ≤ radius_sq`, from the marginal variances
+`Σ[1, 1] = conic[3] / detᶜ` and
+`Σ[2, 2] = conic[1] / detᶜ`.
 
 Tighter than a disc of radius `sqrt(radius_sq · λ_max)` for anything anisotropic.
 """
@@ -47,37 +46,26 @@ end
 """
     sample_tile_span(c_lo, c_hi, block, lo, hi)
 
-Half-open tile span `[a, b)` covering every *integer* pixel sample in the
-continuous interval `[c_lo, c_hi]`, clamped to `[lo, hi]`.
-
-`render!` samples at integer pixel coordinates (`δ = xy .- pix` with 0-based
-integer `pix`), so the covered samples are `ceil(c_lo):floor(c_hi)` — being
-sample-exact rather than merely conservative is the whole point of the exact
-intersection. Returns an empty span when no sample falls inside.
+From Gaussian extents `[c_lo, c_hi]`, construct `[tile_low, tile_high)` tile ranges of the image.
+Tile range is clamped to `[lo, hi]` range.
+Returns an empty span when no sample falls inside.
 """
-@inline function sample_tile_span(
-    c_lo::Float32, c_hi::Float32, block::Int32, lo::Int32, hi::Int32,
-)
-    # Clamp in float space before truncating: the extent can be arbitrarily
-    # large and `unsafe_trunc` on an out-of-range float is undefined.
-    limit = Float32(hi) + 1f0
-    t_lo = clamp(ceil(c_lo) / block, -1f0, limit)
-    t_hi = clamp(floor(c_hi) / block, -1f0, limit)
-    a = clamp(gpu_floor(Int32, t_lo), lo, hi)
-    b = clamp(gpu_floor(Int32, t_hi) + 1i32, lo, hi)
-    # `b < a` can only happen when the interval holds no sample at all.
+@inline function sample_tile_span(c_lo::Float32, c_hi::Float32, block::Int32, lo::Int32, hi::Int32)
+    tile_limit = Float32(hi) + 1f0
+    tile_lo = clamp(ceil(c_lo) / block, -1f0, tile_limit)
+    tile_hi = clamp(floor(c_hi) / block, -1f0, tile_limit)
+    a = clamp(gpu_floor(Int32, tile_lo), lo, hi)
+    b = clamp(gpu_floor(Int32, tile_hi) + 1i32, lo, hi)
     return b < a ? (lo, lo) : (a, b)
 end
 
 """
     ellipse_range_bound(conic, radius_sq, y0, y1)
 
-Closed-form x-span of `a·x² + 2b·x·y + c·y² ≤ radius_sq` (with
-`(a, b, c) = conic`) restricted to the strip `y ∈ [y0, y1]`.
+Closed-form x-span of `a·x² + 2b·x·y + c·y² ≤ radius_sq`
+(with `(a, b, c) = conic`) restricted to the strip `y ∈ [y0, y1]`.
 
-Port of LichtFeld-Studio's `ellipse_range_bound`
-(`fastgs/rasterization/include/kernel_utils.cuh`), itself from StopThePop;
-derivation: https://www.desmos.com/calculator/sjdw2xmohr.
+Port of LichtFeld-Studio's `ellipse_range_bound`.
 """
 @inline function ellipse_range_bound(
     conic::SVector{3, Float32}, radius_sq::Float32, y0::Float32, y1::Float32,
@@ -97,11 +85,11 @@ end
 """
     ellipse_tile_bounds(mean_2d, conic, opacity, grid, block)
 
-Coarse, opacity-aware, half-open tile AABB of the ellipse a Gaussian actually
-covers — the AABB of the *ellipse*, not of a disc of radius `3σ`.
+Opacity-aware, half-open tile AABB of the ellipse a Gaussian actually covers.
 
-Returns `(rmin, rmax, radius_sq)`; `radius_sq ≤ 0` (or an empty rect) means the
-Gaussian touches no tile. `ellipse_tile_span` then refines this rect row by row.
+Return `(rmin, rmax, radius_sq)`.
+`radius_sq ≤ 0` (or an empty rect) means the Gaussian touches no tile.
+`ellipse_tile_span` then refines this rect row by row.
 """
 @inline function ellipse_tile_bounds(
     mean_2d::SVector{2, Float32}, conic::SVector{3, Float32}, opacity::Float32,
@@ -112,37 +100,24 @@ Gaussian touches no tile. `ellipse_tile_span` then refines this rect row by row.
     radius_sq > 0f0 || return z, z, 0f0
 
     extent = ellipse_extent(conic, radius_sq)
-    xlo, xhi = sample_tile_span(
-        mean_2d[1] - extent[1], mean_2d[1] + extent[1], block[1], 0i32, grid[1])
-    ylo, yhi = sample_tile_span(
-        mean_2d[2] - extent[2], mean_2d[2] + extent[2], block[2], 0i32, grid[2])
-    return (
-        SVector{2, Int32}(xlo, ylo),
-        SVector{2, Int32}(xhi, yhi),
-        radius_sq)
+    xlo, xhi = sample_tile_span(mean_2d[1] - extent[1], mean_2d[1] + extent[1], block[1], 0i32, grid[1])
+    ylo, yhi = sample_tile_span(mean_2d[2] - extent[2], mean_2d[2] + extent[2], block[2], 0i32, grid[2])
+    return (SVector{2, Int32}(xlo, ylo), SVector{2, Int32}(xhi, yhi), radius_sq)
 end
 
 """
     ellipse_tile_span(mean_2d, conic, radius_sq, s, lo, hi, block, Val(transposed))
 
-Exact half-open tile span of the ellipse within one tile row (`transposed=false`:
-`s` is a 0-based `tile_y`, the result is an x-span) or one tile column
+Exact half-open tile span of the ellipse within one tile row.
+(`transposed=false`: `s` is a 0-based `tile_y`, the result is an x-span) or one tile column
 (`transposed=true`: `s` is a 0-based `tile_x`, the result is a y-span).
-
-Scanning the *shorter* axis of the coarse rect keeps the loop short in either
-orientation; the caller picks `transposed` from the rect alone so that the
-counting and the key-emitting walks always take the same branch.
-
-The strip is `[s·block, s·block + block - 1]` — the Gaussian's *sample* rows, one
-short of the continuous tile rectangle, because `render!` only evaluates integer
-pixel coordinates.
 """
 @inline function ellipse_tile_span(
     mean_2d::SVector{2, Float32}, conic::SVector{3, Float32}, radius_sq::Float32,
     s::Int32, lo::Int32, hi::Int32, block::SVector{2, Int32}, ::Val{transposed},
-) where {transposed}
-    # `ellipse_range_bound` solves for `x` given a `y`-strip. To scan columns
-    # instead, swap the axes and transpose the quadratic form to `(c, b, a)`.
+) where transposed
+    # `ellipse_range_bound` solves for `x` given a `y`-strip.
+    # To scan columns instead, swap the axes and transpose the conic.
     conicᵀ, m_major, m_minor, b_major, b_minor = if transposed
         SVector{3, Float32}(conic[3], conic[2], conic[1]),
         mean_2d[1], mean_2d[2], block[1], block[2]
@@ -150,18 +125,15 @@ pixel coordinates.
         conic, mean_2d[2], mean_2d[1], block[2], block[1]
     end
 
-    # `ellipse_range_bound` works in `pixel - mean` space; the form is even, so
-    # the sign relative to `render!`'s `δ = mean - pixel` does not matter.
+    # `ellipse_range_bound` works in `pixel - mean` space.
     y0 = Float32(s * b_major) - m_major
     y1 = y0 + Float32(b_major - 1i32)
     bound = ellipse_range_bound(conicᵀ, radius_sq, y0, y1)
-    return sample_tile_span(
-        bound[1] + m_minor, bound[2] + m_minor, b_minor, lo, hi)
+    return sample_tile_span(bound[1] + m_minor, bound[2] + m_minor, b_minor, lo, hi)
 end
 
 """
-Number of tiles the Gaussian's `α ≥ 1/255` ellipse covers. Shares
-`ellipse_tile_span` with `_ellipse_walk_emit!` so the two walks cannot drift.
+Number of tiles the Gaussian covers.
 """
 @inline function _ellipse_walk_count(
     mean_2d::SVector{2, Float32}, conic::SVector{3, Float32}, radius_sq::Float32,
@@ -173,16 +145,16 @@ Number of tiles the Gaussian's `α ≥ 1/255` ellipse covers. Shares
 
     n = 0i32
     for s in major_lo:(major_hi - 1i32)
-        lo, hi = ellipse_tile_span(
-            mean_2d, conic, radius_sq, s, minor_lo, minor_hi, block, Val(transposed))
+        lo, hi = ellipse_tile_span(mean_2d, conic, radius_sq, s, minor_lo, minor_hi, block, Val(transposed))
         n += hi - lo
     end
     return n
 end
 
 """
-Emit one `[tile_id | depth]` key per covered tile, starting at `offset` and never
-writing past `offset_end`. Returns the next free offset.
+Emit one `[tile_id | depth]` key per covered tile,
+starting at `offset` and limited by `offset_end`.
+Return next free offset.
 """
 @inline function _ellipse_walk_emit!(
     gaussian_keys::AbstractVector{UInt64}, gaussian_values::AbstractVector{UInt32},
@@ -196,13 +168,9 @@ writing past `offset_end`. Returns the next free offset.
     minor_lo, minor_hi = transposed ? (rmin[2], rmax[2]) : (rmin[1], rmax[1])
 
     for s in major_lo:(major_hi - 1i32)
-        lo, hi = ellipse_tile_span(
-            mean_2d, conic, radius_sq, s, minor_lo, minor_hi, block, Val(transposed))
+        lo, hi = ellipse_tile_span(mean_2d, conic, radius_sq, s, minor_lo, minor_hi, block, Val(transposed))
         for m in lo:(hi - 1i32)
-            # `_ellipse_walk_count` produced `offset_end`, so this can only trip
-            # if the two walks disagreed; bail out rather than corrupt a
-            # neighbouring Gaussian's slots.
-            offset > offset_end && return offset
+            offset > offset_end && return offset # This should not happen, but guard just in case.
 
             x, y = transposed ? (s, m) : (m, s)
             key::UInt64 = UInt64(y) * grid[1] + x
@@ -286,27 +254,24 @@ end
     i = @index(Global)
 
     # No key/value for invisible Gaussians.
-    # No need for the default key/value, since `gaussian_offset` covers
-    # only valid gaussians.
+    # No need for the default key/value, since `gaussian_offset` covers only valid gaussians.
     radii[i] > 0i32 || return
 
     offset = i == 1 ? 1i32 : (gaussian_offset[i - 1] + 1i32)
     offset_end = gaussian_offset[i]
     offset ≤ offset_end || return
 
-    # For each tile the `α ≥ 1/255` ellipse covers, emit a key/value pair.
+    # For each tile the ellipse covers, emit a key/value pair.
     # Key: [tile_id | depth], value: id of the Gaussian.
     # Sorting the values with this key yields Gaussian ids in a list,
     # such that they are first sorted by the tile and then depth.
     depth::UInt64 = reinterpret(UInt32, depths[i])
 
     mean_2d, conic = means_2d[i], conics[i]
-    rmin, rmax, radius_sq = ellipse_tile_bounds(
-        mean_2d, conic, opacities[i], grid, block)
-
+    rmin, rmax, radius_sq = ellipse_tile_bounds(mean_2d, conic, opacities[i], grid, block)
     if radius_sq > 0f0
-        # Scan the shorter axis. Derived from the rect alone, so this matches
-        # the branch `count_tiles_per_gaussian!` took.
+        # Scan the shorter axis.
+        # Derived from the rect alone, so this matches the branch `count_tiles_per_gaussian!` took.
         offset = (rmax[2] - rmin[2]) > (rmax[1] - rmin[1]) ?
             _ellipse_walk_emit!(
                 gaussian_keys, gaussian_values, i, depth,
@@ -318,13 +283,8 @@ end
                 offset, offset_end, Val(false))
     end
 
-    # Defense in depth: if the walk emitted fewer keys than
-    # `count_tiles_per_gaussian!` counted, the leftover slots would still hold
-    # keys from a previous frame, whose tile ids can index `ranges` out of
-    # bounds. Pad with a sentinel tile one past the last real one — it sorts to
-    # the very end and neither `render!` nor `∇render!` ever visits it (they
-    # index `ranges` only up to `prod(grid)`, and `ImageState` allocates one
-    # extra column for exactly this).
+    # If walk emitted fewer keys than `count_tiles_per_gaussian`,
+    # fill remainint slots with `sentinel` value to avoid using keys from previous frame.
     sentinel::UInt64 = (UInt64(grid[1]) * UInt64(grid[2])) << 32
     while offset ≤ offset_end
         gaussian_keys[offset] = sentinel
@@ -351,8 +311,7 @@ end
     end
 
     mean_2d, conic = means_2d[i], conics[i]
-    rmin, rmax, radius_sq = ellipse_tile_bounds(
-        mean_2d, conic, opacities[i], tile_grid, tile_size)
+    rmin, rmax, radius_sq = ellipse_tile_bounds(mean_2d, conic, opacities[i], tile_grid, tile_size)
     if !(radius_sq > 0f0)
         tiles_touched[i] = 0i32
         return
@@ -360,8 +319,6 @@ end
 
     # Scan the shorter axis; `duplicate_with_keys!` repeats this choice.
     tiles_touched[i] = (rmax[2] - rmin[2]) > (rmax[1] - rmin[1]) ?
-        _ellipse_walk_count(
-            mean_2d, conic, radius_sq, rmin, rmax, tile_size, Val(true)) :
-        _ellipse_walk_count(
-            mean_2d, conic, radius_sq, rmin, rmax, tile_size, Val(false))
+        _ellipse_walk_count(mean_2d, conic, radius_sq, rmin, rmax, tile_size, Val(true)) :
+        _ellipse_walk_count(mean_2d, conic, radius_sq, rmin, rmax, tile_size, Val(false))
 end

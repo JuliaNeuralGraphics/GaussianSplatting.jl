@@ -49,9 +49,8 @@ end
     means::AbstractVector{SVector{3, Float32}},
     cov_scales::AbstractVector{SVector{3, Float32}},
     cov_rotations::AbstractVector{SVector{4, Float32}},
-    # Activated opacities: the culling extent is opacity-aware (see
-    # `ellipse_radius_sq`), so a faint Gaussian is culled sooner than an opaque
-    # one with the same covariance.
+    # Activated opacities: the culling extent is opacity-aware (see `ellipse_radius_sq`).
+    # So a faint Gaussian is culled sooner than an opaque one with the same covariance.
     opacities::AbstractMatrix{Float32},
 
     # Input camera properties.
@@ -100,30 +99,23 @@ end
         return
     end
 
-    _, Σ_2D_inv = inverse(Σ_2D)
-    conic = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
-
-    # Take the `α ≥ 1/255` contour as the radius, rather than a fixed 3σ: this
-    # is exactly the region `render!` does not skip, and it is what the tile
-    # binning (`ellipse_tile_bounds`) uses. `radius_sq ≤ 0` means α never clears
-    # the blend threshold anywhere, so the Gaussian is invisible.
     radius_sq = ellipse_radius_sq(opacities[i])
     if !(radius_sq > 0f0)
         radii[i] = 0i32
         return
     end
+
+    # Cull too small **on screen** Gaussians, use original 3σ radius.
     λ = max_eigval_2D(Σ_2D, det)
-    # `radius_clip` culls Gaussians too *small on screen* to matter, which is a
-    # question about geometry alone — keep testing it against the 3σ radius so
-    # that lowering a Gaussian's opacity cannot make it subpixel.
     if gpu_ceil(Int32, 3f0 * sqrt(λ)) ≤ radius_clip
         radii[i] = 0i32
         return
     end
-    radius = gpu_ceil(Int32, sqrt(radius_sq * λ))
 
-    # Discard Gaussians outside of image plane. The cull uses the anisotropic
-    # extent of the ellipse, not the scalar radius of its bounding disc.
+    # Discard Gaussians outside of image plane.
+    # The cull uses the anisotropic extent of the ellipse.
+    _, Σ_2D_inv = inverse(Σ_2D)
+    conic = SVector{3, Float32}(Σ_2D_inv[1, 1], Σ_2D_inv[2, 1], Σ_2D_inv[2, 2])
     extent = ellipse_extent(conic, radius_sq)
     if (
         (mean_2D[1] + extent[1]) ≤ 0f0 ||
@@ -135,13 +127,11 @@ end
         return
     end
 
-    radii[i] = radius
+    radii[i] = gpu_ceil(Int32, sqrt(radius_sq * λ))
     means_2D[i] = mean_2D
     depths[i] = mean_cam[3]
     conics[i] = conic
-    if C <: AbstractMatrix{Float32}
-        compensations[i] = compensation
-    end
+    C <: AbstractMatrix{Float32} && (compensations[i] = compensation)
     if N <: AbstractVector{SVector{3, Float32}}
         normals[i], _, _ = gaussian_normal(R, R_g, cov_scale, mean_cam)
     end
