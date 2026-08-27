@@ -4,7 +4,10 @@
 const THUMBNAIL_WIDTH = 128
 
 # How many steps ahead [`ViewLoader`](@ref) reads.
-const VIEW_LOOKAHEAD = 3
+const VIEW_LOOKAHEAD = 8
+
+# Percentage of *free* system memory [`ViewLoader`](@ref) may spend on caching decoded views.
+const VIEW_CACHE_FRACTION = 0.25
 
 struct ColmapDataset
     points::Matrix{Float32}
@@ -98,8 +101,7 @@ function ColmapDataset(;
     has_sky_dir = isdir(sky_dir)
     masks_dir = joinpath(dirname(images_dir), "masks")
     has_masks_dir = use_masks && isdir(masks_dir)
-    !use_masks && isdir(masks_dir) &&
-        @info "Coverage masks are disabled: ignoring `$masks_dir`."
+    !use_masks && isdir(masks_dir) && @info "Coverage masks are disabled: ignoring `$masks_dir`."
 
     colmap_cameras = NU.COLMAP.load_cameras_data(cameras_file)
     images = NU.COLMAP.load_images_data(images_file)
@@ -110,9 +112,18 @@ function ColmapDataset(;
     width, height = cam.resolution
     fx, fy, cx, cy = cam.intrinsics
 
-    focal = SVector{2, Float32}(fx, fy) ./ Float32(scale)
-    resolution = round.(UInt32, SVector{2, Float32}(width, height) ./ Float32(scale))
-    principal = (SVector{2, Float32}(cx, cy) ./ Float32(scale)) ./ SVector{2, Float32}(resolution)
+    # Take the training resolution from the images on disk rather than from `scale`.
+    # Sometimes the resolution differs by only a few pixels and this way we can avoid resizing.
+    probed = probe_image_resolution(images_dir, images)
+    resolution::SVector{2, UInt32} = probed ≡ nothing ?
+        round.(UInt32, SVector{2, Float32}(width, height) ./ Float32(scale)) :
+        probed
+
+    # The intrinsics belong to the COLMAP resolution,
+    # so rescale them by the ratio the images actually represent, not by `scale`.
+    resize_ratio = SVector{2, Float32}(resolution) ./ SVector{2, Float32}(width, height)
+    focal = SVector{2, Float32}(fx, fy) .* resize_ratio
+    principal = SVector{2, Float32}(cx, cy) ./ SVector{2, Float32}(width, height)
 
     # NOTE: no distortion.
     intrinsics = NU.CameraIntrinsics(nothing, focal, principal, resolution)
@@ -331,6 +342,21 @@ The dataset's resolution as `(width, height)` `Int`s.
 view_resolution(dataset::ColmapDataset) = (Int(dataset.resolution[1]), Int(dataset.resolution[2]))
 
 """
+`(width, height)` of the first image of `images` that exists under `images_dir`,
+or `nothing` when none of them do (the caller then falls back to `scale`).
+"""
+function probe_image_resolution(images_dir::String, images)
+    for (_, img) in images
+        path = joinpath(images_dir, img.name)
+        isfile(path) || continue
+        # `load` returns `(height, width)`; the dataset stores `(width, height)`.
+        h, w = size(load(path))
+        return SVector{2, UInt32}(w, h)
+    end
+    return nothing
+end
+
+"""
 Resize image to a `target` resolution if needed.
 """
 fit_resolution(image::AbstractMatrix, target::Tuple{Int, Int}) =
@@ -350,20 +376,31 @@ image_bytes(channels::AbstractArray{N0f8}) = reinterpret(UInt8, channels)
 image_bytes(channels::AbstractArray) = floor.(UInt8, Float32.(channels) .* 255f0)
 
 """
-Load view `idx` of `set` in full. The four files are read on separate tasks:
+Which of a view's sidecar maps to load from disk.
+"""
+Base.@kwdef struct ViewParts
+    mask::Bool = true
+    sky_mask::Bool = true
+    depth::Bool = true
+end
+
+"""
+Load view `idx` of `set` in full. The files are read on separate tasks:
 they are independent, and at full resolution the image alone is ~500 ms of
 decode & resize (see [`ViewLoader`](@ref)).
 
 Only train views have depth priors & sky masks; coverage masks apply to both
 splits, so training & scoring see the same image (`masking.jl`).
+
+`parts` skips the maps the caller has no use for.
 """
-function load_view(dataset::ColmapDataset, idx::Int, set::Symbol)
+function load_view(dataset::ColmapDataset, idx::Int, set::Symbol, parts::ViewParts = ViewParts())
     width, height = view_resolution(dataset)
 
     mask_paths = set == :train ? dataset.train_mask_paths : dataset.test_mask_paths
-    mask_path = mask_paths[idx]
-    sky_path = set == :train ? dataset.train_sky_paths[idx] : nothing
-    depth_path = set == :train ? dataset.train_depth_paths[idx] : nothing
+    mask_path = parts.mask ? mask_paths[idx] : nothing
+    sky_path = (parts.sky_mask && set == :train) ? dataset.train_sky_paths[idx] : nothing
+    depth_path = (parts.depth && set == :train) ? dataset.train_depth_paths[idx] : nothing
 
     image_task = Threads.@spawn load_image(dataset, idx, set)
     mask_task = Threads.@spawn(mask_path ≡ nothing ? nothing : load_mask(mask_path, width, height))
@@ -378,6 +415,13 @@ function load_view(dataset::ColmapDataset, idx::Int, set::Symbol)
         depth_prior ≡ nothing ? nothing : depth_prior[1],
         depth_prior ≡ nothing ? 0f0 : depth_prior[2])
 end
+
+# Host memory a decoded view occupies, for the `ViewLoader` cache budget.
+view_bytes(view::ViewData) =
+    sizeof(view.image) +
+    (view.mask ≡ nothing ? 0 : sizeof(view.mask)) +
+    (view.sky_mask ≡ nothing ? 0 : sizeof(view.sky_mask)) +
+    (view.depth ≡ nothing ? 0 : sizeof(view.depth))
 
 device_image(kab, image::Array{UInt8, 3}) = adapt(kab, image) .* (1f0 / 255f0)
 
@@ -394,30 +438,103 @@ get_image(dataset::ColmapDataset, kab, idx::Int, set::Symbol) =
 
 """
 Reads the views the train loop is about to want, on background tasks,
-so the disk work overlaps the GPU work.
+so the disk work overlaps the GPU work — and keeps the decoded result,
+up to `cache_budget` bytes of host memory.
 """
 mutable struct ViewLoader
     dataset::ColmapDataset
     lookahead::Int
+    parts::ViewParts
     # Train view index → the task reading it.
     pending::Dict{Int, Task}
+    # Train view index → its decoded view, for as long as the budget holds out.
+    # Guarded by `cache_lock`: the strategy's scoring pass reads it from the
+    # tasks it spawns (see `view_target`), not only from the train loop.
+    cache::Dict{Int, ViewData}
+    cache_lock::ReentrantLock
+    cache_budget::Int
+    cached_bytes::Int
+    # Warn once when the budget runs out rather than on every view after it.
+    cache_full_warned::Bool
 end
 
-ViewLoader(dataset::ColmapDataset; lookahead::Int = VIEW_LOOKAHEAD) =
-    ViewLoader(dataset, lookahead, Dict{Int, Task}())
+"""
+Host memory the view cache may use by default: a quarter of what is free.
+`0` disables the cache.
+"""
+default_view_cache_bytes() = floor(Int, VIEW_CACHE_FRACTION * Sys.free_memory())
+
+function ViewLoader(dataset::ColmapDataset;
+    lookahead::Int = VIEW_LOOKAHEAD,
+    parts::ViewParts = ViewParts(),
+    cache_budget::Int = default_view_cache_bytes(),
+)
+    # `Threads.@spawn` runs inline on a single-threaded process, so every
+    # prefetch would be paid for synchronously inside the step it precedes.
+    Threads.nthreads() == 1 && @warn string(
+        "Julia is running with a single thread: view loading cannot overlap ",
+        "training & will dominate the step. Start with `julia -t auto`."
+    ) maxlog=1
+
+    @info "Using `$(Base.format_bytes(cache_budget))` of RAM for dataset caching."
+    ViewLoader(
+        dataset, lookahead, parts,
+        Dict{Int, Task}(), Dict{Int, ViewData}(), ReentrantLock(),
+        max(cache_budget, 0), 0, false)
+end
 
 """
-Fetch `ViewData` either immediately (for :test set) or from a pre-fetching task (:train).
+View `idx` if it is in the cache, `nothing` otherwise.
+"""
+function cached_view(loader::ViewLoader, idx::Int)
+    loader.cache_budget == 0 && return nothing
+    return Base.@lock loader.cache_lock get(loader.cache, idx, nothing)
+end
+
+# Keep `view` for later if the budget still has room for it.
+# Returns `view` either way, so callers can wrap the value they are about to hand out.
+function cache_view!(loader::ViewLoader, idx::Int, view::ViewData)
+    loader.cache_budget == 0 && return view
+
+    Base.@lock loader.cache_lock begin
+        haskey(loader.cache, idx) && return view
+
+        n = view_bytes(view)
+        if loader.cached_bytes + n > loader.cache_budget
+            if !loader.cache_full_warned
+                loader.cache_full_warned = true
+                @info string(
+                    "View cache full at `$(length(loader.cache))` of ",
+                    "`$(length(loader.dataset))` views ",
+                    "(`$(round(loader.cached_bytes / 2^30; digits=2))` GiB); ",
+                    "the rest are re-read from disk each epoch.")
+            end
+            return view
+        end
+
+        loader.cache[idx] = view
+        loader.cached_bytes += n
+    end
+    return view
+end
+
+"""
+Fetch `ViewData` from the cache, from a pre-fetching task, or (failing both)
+by reading it here and now. `:test` views are always read immediately.
 """
 function take_view!(loader::ViewLoader, idx::Int, set::Symbol)
     # Load :test immediately.
-    set == :train || return load_view(loader.dataset, idx, set)
+    set == :train || return load_view(loader.dataset, idx, set, loader.parts)
 
-    # Try fetching pre-fetching task, load immediately if no such task.
-    # Otherwise, wait on it.
+    view = cached_view(loader, idx)
+    view ≡ nothing || return view
+
+    # Take the pre-fetching task if there is one, otherwise read it here.
     task = pop!(loader.pending, idx, nothing)
-    task ≡ nothing && return load_view(loader.dataset, idx, :train)
-    return fetch(task)::ViewData
+    view = task ≡ nothing ?
+        load_view(loader.dataset, idx, :train, loader.parts) :
+        fetch(task)::ViewData
+    return cache_view!(loader, idx, view)
 end
 
 """
@@ -425,13 +542,14 @@ Queue upcoming `ViewData` for the training loop.
 
 Remove views from queue that are not in `upcoming` list.
 If views from the `upcoming` are already in queue, they arer left intact,
-only new ones are added.
+only new ones are added. Cached views need no task at all.
 """
 function prefetch!(loader::ViewLoader, upcoming)
     filter!(kv -> kv.first in upcoming, loader.pending)
     for idx in upcoming
-        haskey(loader.pending, idx) && continue
-        loader.pending[idx] = Threads.@spawn load_view(loader.dataset, idx, :train)
+        (haskey(loader.pending, idx) || cached_view(loader, idx) ≢ nothing) && continue
+        loader.pending[idx] = Threads.@spawn load_view(
+            loader.dataset, idx, :train, loader.parts)
     end
     return
 end

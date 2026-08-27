@@ -1,3 +1,9 @@
+# Run with `julia --project=. -t auto benchmark/pipeline.jl`.
+#
+# The thread count is not optional: `ViewLoader` decodes the upcoming views on
+# background tasks, and on a single-threaded process those run inline, turning
+# every step into a step *plus* a JPEG decode.
+
 import GaussianSplatting as GSP
 import ProgressMeter
 
@@ -29,11 +35,19 @@ function benchmark(kab, dataset_path::String; scale::Int)
 
     println("Benchmark for `$n_steps` steps:")
     meter = ProgressMeter.Progress(n_steps; desc="benchmark ", showspeed=true)
-    @time for i in 1:n_steps
+    elapsed = @elapsed for i in 1:n_steps
         GSP.step!(trainer)
         ProgressMeter.next!(meter;
             showvalues=() -> [("gaussians", length(gaussians))])
     end
+
+    # The Gaussian count belongs next to the rate: the per-step cost scales with
+    # it, so two runs that report different it/s at different counts are not
+    # comparable.
+    println(
+        "$(round(n_steps / elapsed; digits=2)) it/s " *
+        "($(round(1e3 * elapsed / n_steps; digits=3)) ms/step) " *
+        "at $(length(gaussians)) gaussians, $(Threads.nthreads()) thread(s).")
     return
 end
 benchmark(ROCBackend(), "/home/pxlth/Downloads/360_v2/bicycle"; scale=4)

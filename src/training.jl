@@ -274,8 +274,16 @@ function Trainer(
     normals = setup_normal_supervision(rast, opt_params)
     masks = setup_masking(dataset, opt_params)
 
+    # Read only what this run supervises with: a `depths/` directory next to the
+    # images otherwise costs a prior decoded per step & thrown away.
+    parts = ViewParts(;
+        mask=masks,
+        sky_mask=sky_loss,
+        depth=!isempty(depth_anchors))
+    loader = ViewLoader(dataset; parts)
+
     Trainer(
-        rast, gs, dataset, ViewLoader(dataset), optimizers, cache,
+        rast, gs, dataset, loader, optimizers, cache,
         points_lr_scheduler, opt_params, strategy, densify, step, ids,
         depth_anchors, bilateral_grid, sky, sky_loss, normals, masks, LossLog())
 end
@@ -522,6 +530,12 @@ background task, & expanding the maps is the caller's job (see [`device_map`](@r
 """
 function view_target(trainer::Trainer, idx::Int)
     dataset = trainer.dataset
+    # The train loop already paid for this view if the loader kept it: the
+    # scoring pass reads the same files the loop does (see `ViewLoader`).
+    cached = cached_view(trainer.loader, idx)
+    cached ≡ nothing ||
+        return (cached.image, cached.mask, cached.sky_mask)
+
     width, height = view_resolution(dataset)
     mask_path = dataset.train_mask_paths[idx]
     sky_path = dataset.train_sky_paths[idx]
@@ -562,7 +576,8 @@ function validate(trainer::Trainer; quantize::Bool = false)
         return (; eval_ssim, eval_mse, eval_psnr)
 
     for (idx, camera) in enumerate(dataset.test_cameras)
-        view = load_view(dataset, idx, :test)
+        view = load_view(dataset, idx, :test, ViewParts(;
+            mask=trainer.masks, sky_mask=false, depth=false))
         target_image = device_target(trainer, view.image)
         mask = view_mask(trainer, view.mask)
         # `apply_mask`, not `composite_mask`: the pass below renders over the
