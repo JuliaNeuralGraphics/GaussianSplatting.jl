@@ -40,11 +40,7 @@ mutable struct GaussianRasterizer{
 
     # Which blend backward `∇rasterize` launches:
     #   `:per_pixel` — `∇render!`, one thread per pixel, atomics per fragment.
-    #   `:per_splat` — `∇render_wavefront!`, one lane per splat, atomics per
-    #                  (tile, splat). Same gradients up to summation order.
-    # `:per_splat` is the default: ~2.7x faster (`∇rasterize` 11.2 -> 4.1 ms
-    # on a 1.55M-Gaussian scene). `:per_pixel` is kept as the fallback & as the
-    # reference the A/B test compares against.
+    #   `:per_splat` — `∇render_wavefront!`, one lane per splat, atomics per (tile, splat).
     backward::Symbol
 end
 
