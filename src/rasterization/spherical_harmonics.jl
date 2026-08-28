@@ -45,6 +45,7 @@ end
     vsh_rest::AbstractMatrix{SVector{3, Float32}},
     vmeans::AbstractVector{SVector{3, Float32}},
     # Input.
+    radii::AbstractVector{Int32},
     means::AbstractVector{SVector{3, Float32}},
     sh_dc::AbstractMatrix{SVector{3, Float32}},
     sh_rest::AbstractMatrix{SVector{3, Float32}},
@@ -54,6 +55,8 @@ end
     sh_degree,
 )
     i = @index(Global)
+    radii[i] > 0 || return
+
     vmean = ∇color_from_sh!(
         split_sh(vsh_dc, vsh_rest, i),
         means[i], camera_position, split_sh(sh_dc, sh_rest, i),

@@ -67,7 +67,7 @@
     contributor = 0u32
     last_contributor = 0u32
 
-    color = zeros(MVector{channels, Float32})
+    color = zeros(SVector{channels, Float32})
     uncertainty = 0f0 # Computed if `uncertainties ≢ nothing`.
     # This pixel's edge weight, hoisted out of the blend loop.
     ω = (S !== Nothing && E !== Nothing && inside) ?
@@ -112,9 +112,7 @@
 
             gaussian_id = collected_id[j]
             feature = rgb_features[gaussian_id]
-            @unroll for c in 1i32:channels
-                color[c] += feature[c] * α * T
-            end
+            color = color .+ feature .* (α * T)
 
             U !== Nothing && (uncertainty += α * T)
             # Since we are processing Gaussians front-to-back,
@@ -210,9 +208,9 @@ end
     contributor = to_do
     last_contributor = inside ? n_contrib[px, py] : 0i32
 
-    accum_rec = zeros(MVector{channels, Float32})
+    accum_rec = zeros(SVector{channels, Float32})
     vpixel = inside ? vpixels[px, py] : zeros(SVector{channels, Float32})
-    last_color = zeros(MVector{channels, Float32})
+    last_color = zeros(SVector{channels, Float32})
     last_α = 0f0
 
     for round in 0i32:(rounds - 1i32)
@@ -258,14 +256,11 @@ end
                 @atomic vcolors[c, gaussian_id] += fac * vpixel[c]
             end
 
-            vα = 0f0
             color = collected_colors[j]
-            @unroll for c in 1i32:channels
-                # Update last color (to be used in the next iteration).
-                accum_rec[c] = last_α * last_color[c] + (1f0 - last_α) * accum_rec[c]
-                last_color[c] = color[c]
-                vα += (color[c] - accum_rec[c]) * vpixel[c]
-            end
+            # Update last color (to be used in the next iteration).
+            accum_rec = last_α .* last_color .+ (1f0 - last_α) .* accum_rec
+            last_color = color
+            vα = (color .- accum_rec) ⋅ vpixel
             # The alpha-map cotangent needs no special handling here: the map
             # is rendered as a constant-1 feature channel, so it enters `vα`
             # through the generic per-channel loop above.
@@ -397,11 +392,6 @@ guard wraps a `@synchronize()` — the convergence rule KA requires.
     end
     @synchronize()
 
-    vcolor_acc = zeros(MVector{channels, Float32})
-    vconic_acc = zeros(MVector{3, Float32})
-    vmean_acc = zeros(MVector{2, Float32})
-    vmean_abs_acc = zeros(MVector{2, Float32})
-
     for batch_base in 0i32:Int32(group_size):(tile_n - 1i32)
         n_batch = min(tile_n - batch_base, Int32(group_size))
         # 0-based index from the front; lane 1 takes the deepest splat left.
@@ -421,12 +411,10 @@ guard wraps a `@synchronize()` — the convergence rule KA requires.
             color = rgb_features[gaussian_id]
         end
 
-        @unroll for c in 1i32:channels
-            vcolor_acc[c] = 0f0
-        end
-        vconic_acc[1] = 0f0; vconic_acc[2] = 0f0; vconic_acc[3] = 0f0
-        vmean_acc[1] = 0f0; vmean_acc[2] = 0f0
-        vmean_abs_acc[1] = 0f0; vmean_abs_acc[2] = 0f0
+        vcolor_acc = zeros(SVector{channels, Float32})
+        vconic_acc = zeros(SVector{3, Float32})
+        vmean_acc = zeros(SVector{2, Float32})
+        vmean_abs_acc = zeros(SVector{2, Float32})
         vopacity_acc = 0f0
         contributed = false
 
@@ -450,29 +438,26 @@ guard wraps a `@synchronize()` — the convergence rule KA requires.
                         fac = α * T
                         g = s_g[p]
 
-                        cg = 0f0
-                        @unroll for c in 1i32:channels
-                            vcolor_acc[c] += fac * g[c]
-                            cg += color[c] * g[c]
-                        end
+                        vcolor_acc = vcolor_acc .+ fac .* g
+                        cg = color ⋅ g
 
                         W = s_W[p]
                         vα = T * (cg - W)
                         vσ = -opacity * G * vα
 
-                        vconic_acc[1] += 0.5f0 * vσ * δ[1]^2
-                        vconic_acc[2] += 0.5f0 * vσ * δ[1] * δ[2]
-                        vconic_acc[3] += 0.5f0 * vσ * δ[2]^2
+                        vconic_acc = vconic_acc + SVector{3, Float32}(
+                            0.5f0 * vσ * δ[1]^2,
+                            0.5f0 * vσ * δ[1] * δ[2],
+                            0.5f0 * vσ * δ[2]^2)
 
-                        vx = vσ * (conic[1] * δ[1] + conic[2] * δ[2])
-                        vy = vσ * (conic[2] * δ[1] + conic[3] * δ[2])
-                        vmean_acc[1] += vx
-                        vmean_acc[2] += vy
+                        vxy = SVector{2, Float32}(
+                            vσ * (conic[1] * δ[1] + conic[2] * δ[2]),
+                            vσ * (conic[2] * δ[1] + conic[3] * δ[2]))
+                        vmean_acc = vmean_acc + vxy
                         if A !== Nothing
                             # `abs` per pixel, *before* summing - the AbsGS
                             # criterion needs `Σₚ|∂L/∂μ|`, not `|Σₚ ∂L/∂μ|`.
-                            vmean_abs_acc[1] += abs(vx)
-                            vmean_abs_acc[2] += abs(vy)
+                            vmean_abs_acc = vmean_abs_acc + abs.(vxy)
                         end
                         vopacity_acc += G * vα
 

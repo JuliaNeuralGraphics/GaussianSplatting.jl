@@ -174,7 +174,9 @@ Mean absolute error between a render and its target.
 `y` is the ground truth, so it takes no gradient.
 """
 l1_loss(x::AbstractArray{Float32}, y::AbstractArray{Float32}) =
-    AK.mapreduce(abs, +, x .- y; init=0f0) / length(x)
+    AK.mapreduce(
+        i -> @inbounds(abs(x[i] - y[i])), +,
+        eachindex(x), KA.get_backend(x); init=0f0) / length(x)
 
 function CRC.rrule(::typeof(l1_loss), x::AbstractArray{Float32}, y::AbstractArray{Float32})
     _pullback(Δ) = (

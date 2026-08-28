@@ -36,6 +36,17 @@ end
         SMatrix{3, 3, Float32, 9}(z, z, z, z, z, z, g[1], g[2], g[3])
 end
 
+Base.@propagate_inbounds function activated_scale(
+    scales::AbstractMatrix{Float32}, i::Integer, ::Val{isotropic},
+) where isotropic
+    if isotropic
+        s = exp(scales[1, i])
+        return SVector{3, Float32}(s, s, s)
+    end
+    return SVector{3, Float32}(
+        exp(scales[1, i]), exp(scales[2, i]), exp(scales[3, i]))
+end
+
 @kernel cpu=false inbounds=true function project!(
     # Output.
     depths::AbstractVector{Float32},
@@ -44,13 +55,14 @@ end
     conics::AbstractVector{SVector{3, Float32}},
     compensations::C,
     normals::N,
+    # Activated opacities, `σ(opacities)`: the culling extent is opacity-aware
+    # (see `ellipse_radius_sq`), and every later stage reads this buffer.
+    opacities_act::AbstractMatrix{Float32},
 
-    # Input Gaussians.
+    # Input Gaussians, as the model stores them: the activations are applied here.
     means::AbstractVector{SVector{3, Float32}},
-    cov_scales::AbstractVector{SVector{3, Float32}},
+    scales::AbstractMatrix{Float32},
     cov_rotations::AbstractVector{SVector{4, Float32}},
-    # Activated opacities: the culling extent is opacity-aware (see `ellipse_radius_sq`).
-    # So a faint Gaussian is culled sooner than an opaque one with the same covariance.
     opacities::AbstractMatrix{Float32},
 
     # Input camera properties.
@@ -64,12 +76,17 @@ end
     far_plane::Float32,
     radius_clip::Int32,
     blur_ϵ::Float32,
+    isotropic::Val,
 ) where {
     C <: Maybe{AbstractMatrix{Float32}},
     N <: Maybe{AbstractVector{SVector{3, Float32}}},
     RM,
 }
     i = @index(Global)
+
+    # Written before every cull below, so it never holds the previous view's value.
+    opacity = NU.sigmoid(opacities[i])
+    opacities_act[i] = opacity
 
     R, t = if RM <: StaticArray
         R_w2c, t_w2c
@@ -86,7 +103,7 @@ end
 
     # Project Gaussian onto image plane.
     cov_rotation = vload(pointer(cov_rotations, i)) # SIMD load
-    cov_scale = cov_scales[i]
+    cov_scale = activated_scale(scales, i, isotropic)
     R_g = unnorm_quat2rot(cov_rotation)
     Σ = quat_scale_to_cov(R_g, cov_scale)
     Σ_cam = covar_world_to_cam(R, Σ)
@@ -99,7 +116,7 @@ end
         return
     end
 
-    radius_sq = ellipse_radius_sq(opacities[i])
+    radius_sq = ellipse_radius_sq(opacity)
     if !(radius_sq > 0f0)
         radii[i] = 0i32
         return
@@ -140,10 +157,14 @@ end
 @kernel cpu=false inbounds=true function ∇project!(
     # Output.
     vmeans::AbstractVector{SVector{3, Float32}},
-    vcov_scales::AbstractVector{SVector{3, Float32}},
+    # Cotangent on the *raw* log-scales, so it has the model's row count.
+    vscales::AbstractMatrix{Float32},
     vcov_rotations::AbstractVector{SVector{4, Float32}},
     vR_out::RG,
     vt_out,
+    # Rescaled in place from `∂L/∂σ(o)` to `∂L/∂o`: the blend backward, which
+    # runs before this kernel, accumulates the activated form.
+    vopacities::AbstractMatrix{Float32},
 
     # Input grad outputs.
     vmeans_2d::AbstractVector{SVector{2, Float32}},
@@ -155,10 +176,11 @@ end
     conics::AbstractVector{SVector{3, Float32}},
     radii::AbstractVector{Int32},
 
-    # Input Gaussians.
+    # Input Gaussians, as the model stores them: see `project!`.
     means::AbstractVector{SVector{3, Float32}},
-    cov_scales::AbstractVector{SVector{3, Float32}},
+    scales::AbstractMatrix{Float32},
     cov_rotations::AbstractVector{SVector{4, Float32}},
+    opacities::AbstractMatrix{Float32},
     compensations::C,
 
     # Input camera properties.
@@ -167,6 +189,7 @@ end
     resolution::SVector{2, Int32},
     principal::SVector{2, Float32},
     ϵ::Float32,
+    isotropic::Val,
 ) where {
     C <: Maybe{AbstractMatrix{Float32}},
     VC <: Maybe{AbstractVector{Float32}},
@@ -211,7 +234,7 @@ end
     mean_cam = pos_world_to_cam(R, t, mean)
 
     cov_rotation = vload(pointer(cov_rotations, i))
-    cov_scale = cov_scales[i]
+    cov_scale = activated_scale(scales, i, isotropic)
     R_g = unnorm_quat2rot(cov_rotation)
     Σ = quat_scale_to_cov(R_g, cov_scale)
     Σ_cam = covar_world_to_cam(R, Σ)
@@ -244,8 +267,20 @@ end
     vq, vscale = ∇quat_scale_to_cov(cov_rotation, cov_scale, R_g, vΣ, vR_g)
 
     vmeans[i] = vmean
-    vcov_scales[i] = vscale
     vstore!(pointer(vcov_rotations, i), vq) # SIMD store
+
+    # `∂exp(s)/∂s = exp(s)`, which `cov_scale` already is. An isotropic model
+    # shares one raw row across the three axes, so their cotangents sum.
+    if isotropic isa Val{true}
+        vscales[1, i] = vscale ⋅ cov_scale
+    else
+        vscales[1, i] = vscale[1] * cov_scale[1]
+        vscales[2, i] = vscale[2] * cov_scale[2]
+        vscales[3, i] = vscale[3] * cov_scale[3]
+    end
+
+    opacity = NU.sigmoid(opacities[i])
+    vopacities[i] *= opacity * (1f0 - opacity)
 
     # TODO reduce within warp/workgroup to decrease number of atomic ops.
     if RG != Nothing

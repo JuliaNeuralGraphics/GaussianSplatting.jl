@@ -14,8 +14,7 @@ mutable struct GaussianRasterizer{
     gstate::G
     bstate::B
 
-    # Temporary storage to avoid allocating during rendering outside of AD.
-    scales_act::S
+    # Activated opacities, written by `project!` & read by every later stage.
     opacities_act::S
 
     image::K
@@ -100,7 +99,6 @@ function GaussianRasterizer(kab;
     bstate = BinningState(kab, 0)
 
     # TODO organize in a render cache/state
-    scales_act = KA.allocate(kab, Float32, (3, 0))
     opacities_act = KA.allocate(kab, Float32, (1, 0))
 
     image = KA.allocate(kab, Float32, (n_color_features(mode), width, height))
@@ -108,7 +106,7 @@ function GaussianRasterizer(kab;
 
     rast = GaussianRasterizer(
         istate, gstate, bstate,
-        scales_act, opacities_act,
+        opacities_act,
         image, pinned_image, host_image,
         grid, near_plane, far_plane, mode, false, backward)
     finalizer(rast -> unpin_memory(rast.pinned_image), rast)
@@ -119,7 +117,10 @@ function cache!(rast::GaussianRasterizer, name::Symbol, target_size)
     x = getproperty(rast, name)
     if size(x) != target_size
         KA.unsafe_free!(x)
-        x = KA.allocate(get_backend(rast), eltype(x), target_size)
+        # `@uncached`: rasterizer-owned scratch outlives the `GPUArrays.@cached`
+        # block a training step wraps around the render, which would otherwise
+        # recycle it from under us. Same reason `gstate`/`bstate` are uncached.
+        x = GPUArrays.@uncached KA.allocate(get_backend(rast), eltype(x), target_size)
         setproperty!(rast, name, x)
     end
     return x
@@ -142,7 +143,6 @@ function release_scene_buffers!(rast::GaussianRasterizer)
     rast.gstate = GeometryState(kab, 0; n_features=n_color_features(rast.mode))
     rast.bstate = BinningState(kab, 0)
 
-    cache!(rast, :scales_act, (3, 0))
     cache!(rast, :opacities_act, (1, 0))
     return
 end
@@ -153,7 +153,6 @@ memory_usage(rast::GaussianRasterizer) =
     memory_usage(rast.istate) +
     memory_usage(rast.gstate) +
     memory_usage(rast.bstate) +
-    memory_usage(rast.scales_act) +
     memory_usage(rast.opacities_act) +
     memory_usage(rast.image)
 
@@ -161,7 +160,6 @@ function KA.unsafe_free!(rast::GaussianRasterizer)
     KA.unsafe_free!(rast.istate)
     KA.unsafe_free!(rast.gstate)
     KA.unsafe_free!(rast.bstate)
-    KA.unsafe_free!(rast.scales_act)
     KA.unsafe_free!(rast.opacities_act)
     KA.unsafe_free!(rast.image)
     return
@@ -236,33 +234,9 @@ function (rast::GaussianRasterizer)(
     edge_scores::Maybe{AbstractVector{Float32}} = nothing,
     edge_map::Maybe{AbstractMatrix{Float32}} = nothing,
 )
-    # If rendering outside AD, use non-allocating path.
-    within_AD = within_gradient(means_3d)
-
-    opacities_act = if within_AD
-        NU.sigmoid.(opacities)
-    else
-        ropacities = cache!(rast, :opacities_act, size(opacities))
-        ropacities .= NU.sigmoid.(opacities)
-    end
-
-    isotropic = size(scales, 1) == 1
-    scales_act = if within_AD
-        exp.(isotropic ? vcat(scales, scales, scales) : scales)
-    else
-        rscales = cache!(rast, :scales_act, (3, size(scales, 2)))
-        if isotropic
-            rscales[[1], :] .= exp.(scales)
-            rscales[2, :] .= rscales[1, :]
-            rscales[3, :] .= rscales[1, :]
-            rscales
-        else
-            rscales .= exp.(scales)
-        end
-    end
-
+    # `sigmoid`/`exp` are applied by `project!` & undone by `∇project!`.
     return rasterize(
-        means_3d, sh_color, sh_remainder, opacities_act, scales_act, rotations,
+        means_3d, sh_color, sh_remainder, opacities, scales, rotations,
         R_w2c, t_w2c;
         rast, camera, sh_degree, background, covisibilities, uncertainties,
         edge_scores, edge_map)
@@ -309,7 +283,9 @@ function rasterize(
     near_plane, far_plane = rast.near_plane, rast.far_plane
     radius_clip = Int32(3) # In pixels.
     blur_ϵ = 0.3f0
+    isotropic = Val(size(scales, 1) == 1)
 
+    opacities_act = cache!(rast, :opacities_act, size(opacities))
     project!(kab)(
         # Output.
         rast.gstate.depths,
@@ -318,15 +294,16 @@ function rasterize(
         rast.gstate.conic_opacities,
         nothing, # compensations
         render_normals ? rast.gstate.normals : nothing,
+        opacities_act,
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
-        _as_T(SVector{3, Float32}, scales),
+        scales,
         _as_T(SVector{4, Float32}, rotations),
         opacities,
         # Input camera properties.
         R, t, K.focal, Int32.(K.resolution), K.principal,
         # Config.
-        near_plane, far_plane, radius_clip, blur_ϵ; ndrange=n)
+        near_plane, far_plane, radius_clip, blur_ϵ, isotropic; ndrange=n)
 
     spherical_harmonics!(kab)(
         # Output.
@@ -346,7 +323,7 @@ function rasterize(
         # Input.
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
-        opacities,
+        opacities_act,
         rast.gstate.radii,
         rast.grid, BLOCK; ndrange=n)
 
@@ -374,7 +351,7 @@ function rasterize(
         # Input.
         rast.gstate.means_2d,
         rast.gstate.conic_opacities,
-        opacities,
+        opacities_act,
         rast.gstate.depths,
         rast.gstate.points_offset,
         rast.gstate.radii, rast.grid, BLOCK; ndrange=n)
@@ -412,7 +389,7 @@ function rasterize(
         edge_map,
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
-        opacities,
+        opacities_act,
         rast.gstate.conic_opacities,
         color_features,
         rast.istate.ranges,
@@ -457,7 +434,8 @@ function ∇rasterize(
     vsh_dc = KA.zeros(kab, Float32, size(sh_dc))
     vsh_rest = KA.zeros(kab, Float32, size(sh_rest))
     vopacities = KA.zeros(kab, Float32, (1, n))
-    vscales = KA.zeros(kab, Float32, (3, n))
+    # Cotangents on the raw parameters: an isotropic model has one scale row.
+    vscales = KA.zeros(kab, Float32, size(scales))
     vrot = KA.zeros(kab, Float32, (4, n))
     fill!(reinterpret(Float32, rast.gstate.∇means_2d), 0f0)
     vmeans_2d_abs = if rast.abs_grad
@@ -495,7 +473,7 @@ function ∇rasterize(
 
         rast.bstate.gaussian_values_sorted,
         rast.gstate.means_2d,
-        opacities,
+        rast.opacities_act,
         rast.gstate.conic_opacities,
         color_features,
 
@@ -544,9 +522,10 @@ function ∇rasterize(
     ∇project!(kab)(
         # Output.
         _as_T(SVector{3, Float32}, vmeans),
-        _as_T(SVector{3, Float32}, vscales),
+        vscales,
         _as_T(SVector{4, Float32}, vrot),
         vR, vt,
+        vopacities,
 
         # Input grad outputs.
         rast.gstate.∇means_2d,
@@ -559,11 +538,13 @@ function ∇rasterize(
         rast.gstate.radii,
         # Input Gaussians.
         _as_T(SVector{3, Float32}, means_3d),
-        _as_T(SVector{3, Float32}, scales),
+        scales,
         _as_T(SVector{4, Float32}, rotations),
+        opacities,
         nothing, # compensations
         # Input camera properties.
-        R, t, K.focal, Int32.(K.resolution), K.principal, blur_ϵ; ndrange=n)
+        R, t, K.focal, Int32.(K.resolution), K.principal, blur_ϵ,
+        Val(size(scales, 1) == 1); ndrange=n)
 
     ∇spherical_harmonics!(kab)(
         # Output.
@@ -571,6 +552,7 @@ function ∇rasterize(
         as_sh_coefficients(vsh_rest, n),
         _as_T(SVector{3, Float32}, vmeans),
         # Input.
+        radii,
         _as_T(SVector{3, Float32}, means_3d),
         as_sh_coefficients(sh_dc, n),
         as_sh_coefficients(sh_rest, n),
