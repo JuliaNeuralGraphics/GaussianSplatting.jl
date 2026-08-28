@@ -217,6 +217,7 @@ function post_train_step!(
         rast.gstate.∇means_2d_abs, camera.intrinsics.resolution)
 
     if step in strategy.recovery_prune_iters
+        KA.synchronize(get_backend(gs))
         GPUArrays.unsafe_free!(cache)
         recovery_prune!(strategy, gs, optimizers)
     end
@@ -225,6 +226,7 @@ function post_train_step!(
         step ≥ strategy.start_refine &&
         step % strategy.refine_every == 0
     if do_densify
+        KA.synchronize(get_backend(gs))
         GPUArrays.unsafe_free!(cache)
         densify_and_prune!(strategy, gs, optimizers, rast, dataset; step, view_target)
     end

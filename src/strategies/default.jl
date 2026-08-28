@@ -69,6 +69,7 @@ function post_train_step!(
         step ≥ strategy.densify_from_iter &&
         step % strategy.densification_interval == 0
     if do_densify
+        KA.synchronize(get_backend(gs))
         GPUArrays.unsafe_free!(cache)
         densify_and_prune!(strategy, gs, optimizers; extent,
             pruning_extent=extent,

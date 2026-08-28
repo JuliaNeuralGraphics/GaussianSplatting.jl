@@ -116,6 +116,7 @@ function post_train_step!(
         strategy.start_refine < step < strategy.stop_refine &&
         step % strategy.refine_every == 0
     if refining
+        KA.synchronize(get_backend(gs))
         GPUArrays.unsafe_free!(cache)
         relocate_gaussians!(strategy, gs, optimizers; extent)
         add_gaussians!(strategy, gs, optimizers)
