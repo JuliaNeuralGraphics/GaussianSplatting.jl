@@ -1,4 +1,5 @@
 # Copyright © 2024 Advanced Micro Devices, Inc. All rights reserved.
+include("theme.jl")
 include("ui_state.jl")
 include("render_state.jl")
 include("worker.jl")
@@ -44,6 +45,16 @@ end
 
 function red_button_end()
     CImGui.PopStyleColor(3)
+end
+
+# One `label | value` row of a two-column stats table.
+function stat_row!(label::String, value::String)
+    CImGui.TableNextRow()
+    CImGui.TableNextColumn()
+    CImGui.Text(label)
+    CImGui.TableNextColumn()
+    CImGui.Text(value)
+    return
 end
 
 function disabled_begin()
@@ -249,6 +260,10 @@ function GSGUI(kab, gaussians::Maybe{GaussianModel}, camera::Camera; gl_kwargs..
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
+    apply_theme!()
+    # `width`/`height` above only size the initial framebuffer: the window
+    # itself opens filling the screen. A no-op in fullscreen mode.
+    GLFW.MaximizeWindow(context.window)
 
     font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
     fonts = unsafe_load(CImGui.GetIO().Fonts)
@@ -297,6 +312,10 @@ function GSGUI(kab, dataset_path::String, scale::Int;
     NGL.init(3, 2)
     context = NGL.Context("GaussianSplatting.jl"; gl_kwargs...)
     NGL.set_resize_callback!(context, resize_callback)
+    apply_theme!()
+    # `width`/`height` above only size the initial framebuffer: the window
+    # itself opens filling the screen. A no-op in fullscreen mode.
+    GLFW.MaximizeWindow(context.window)
 
     font_file = joinpath(pkgdir(CImGui), "fonts", "Roboto-Medium.ttf")
     fonts = unsafe_load(CImGui.GetIO().Fonts)
@@ -536,10 +555,42 @@ function reset_ui!(ui_state::UIState)
     return
 end
 
+"""
+Write the current gaussians as a 3DGS `.ply`, through a native save
+dialog. Reached from the `File` menu & from `Ctrl+E`.
+"""
+function export_ply_dialog!(gui::GSGUI)
+    ply_file = save_file(homedir(); filterlist="ply") # Empty when cancelled.
+    isempty(ply_file) && return
+    endswith(ply_file, ".ply") || (ply_file *= ".ply")
+    # Reads GPU arrays: run on the worker so it is ordered with training steps.
+    submit!(gui.worker, (:export_ply, ply_file))
+    return
+end
+
+# `Ctrl` + `key`, as `CImGui.Shortcut` wants it.
+ctrl(key) = Int(iglib.ImGuiMod_Ctrl) | Int(key)
+
 function menu_bar!(gui::GSGUI)
+    # The menu actions worth a key, from anywhere in the UI. Both are held
+    # back while the `Open Dataset` modal is up: re-opening it would clear
+    # the error a failed load just reported, and an export dialog stacked
+    # on top of it has no way back.
+    shortcuts_live = !CImGui.IsPopupOpen("Open Dataset")
+    route_global = iglib.ImGuiInputFlags_RouteGlobal
+
+    if shortcuts_live && CImGui.Shortcut(ctrl(iglib.ImGuiKey_O), route_global)
+        gui.ui_state.open_dataset_popup = true
+    end
+    # Same condition as the menu item: nothing to export from an empty scene.
+    if shortcuts_live && gui.worker.n_gaussians[] > 0 &&
+        CImGui.Shortcut(ctrl(iglib.ImGuiKey_E), route_global)
+        export_ply_dialog!(gui)
+    end
+
     CImGui.BeginMainMenuBar() || return
     if CImGui.BeginMenu("File")
-        if CImGui.MenuItem("Open Dataset...")
+        if CImGui.MenuItem("Open Dataset...", "Ctrl+O")
             gui.ui_state.open_dataset_popup = true
         end
         CImGui.Separator()
@@ -581,13 +632,8 @@ function menu_bar!(gui::GSGUI)
 
         # Exporting only needs the gaussians, so it also works in viewer-only mode;
         # drops the optimizers & the training step, unlike `Save Checkpoint`.
-        if CImGui.MenuItem("Export PLY...", C_NULL, false, gui.worker.n_gaussians[] > 0)
-            ply_file = save_file(homedir(); filterlist="ply") # Empty when cancelled.
-            if !isempty(ply_file)
-                endswith(ply_file, ".ply") || (ply_file *= ".ply")
-                # Reads GPU arrays: run on the worker so it is ordered with training steps.
-                submit!(gui.worker, (:export_ply, ply_file))
-            end
+        if CImGui.MenuItem("Export PLY...", "Ctrl+E", false, gui.worker.n_gaussians[] > 0)
+            export_ply_dialog!(gui)
         end
         CImGui.SetItemTooltip("Write the current gaussians as a 3DGS `.ply`, readable by other splat viewers.")
         CImGui.Separator()
@@ -893,6 +939,7 @@ function open_dataset_modal!(gui::GSGUI)
     can_open = isdir(dataset_path)
 
     can_open || disabled_begin()
+    accent_button_begin()
     if CImGui.Button("Open", CImGui.ImVec2(120, 0))
         ui_state.dataset_error = ""
         kab = get_backend(gui.rasterizer)
@@ -905,12 +952,15 @@ function open_dataset_modal!(gui::GSGUI)
             kab, dataset_path; scale, width, height, strategy,
             opt_params, max_sh_degree)
     end
+    accent_button_end()
     can_open || disabled_end()
 
     CImGui.SameLine()
+    red_button_begin()
     if CImGui.Button("Cancel", CImGui.ImVec2(120, 0))
         CImGui.CloseCurrentPopup()
     end
+    red_button_end()
     CImGui.EndPopup()
     return
 end
@@ -1212,15 +1262,19 @@ function handle_ui!(gui::GSGUI; frame_time)
     gui.ui_state.capture_tab = false
 
     if CImGui.Begin("GaussianSplatting")
+        # Scene stats: a `label | value` table, so the values line up
+        # instead of starting wherever their label happens to end.
         (; width, height) = resolution(gui.camera)
-        CImGui.Text("Render Resolution: $width x $height")
-        CImGui.Text("Backend: $(backend_name(get_backend(gui.rasterizer)))")
-        CImGui.Text("GPU Memory: $(Base.format_bytes(w.memory[]))")
+        CImGui.BeginTable("##scene-stats", 2, CImGui.ImGuiTableFlags_SizingFixedFit)
+        stat_row!("Render Resolution", "$width x $height")
+        stat_row!("Backend", string(backend_name(get_backend(gui.rasterizer))))
+        stat_row!("GPU Memory", Base.format_bytes(w.memory[]))
         CImGui.SetItemTooltip(
             "Device memory held by the gaussians, the optimizers & the " *
             "rasterizers.\nThe backend's memory pool keeps freed blocks " *
             "around, so the process always holds at least this much.")
-        CImGui.Text("Number of Gaussians: $(w.n_gaussians[])")
+        stat_row!("Number of Gaussians", string(w.n_gaussians[]))
+        CImGui.EndTable()
         worker_busy_line!(w)
 
         isempty(gui.ui_state.worker_error) || CImGui.TextColored(
@@ -1250,22 +1304,46 @@ end
 function scene_tab!(gui::GSGUI)
     w = gui.worker
 
-    if CImGui.Checkbox("Render", gui.ui_state.render)
+    # Accent while the scene view is live, red while it is frozen: the
+    # button's color is the state, its label is what it toggles.
+    rendering = gui.ui_state.render[]
+    rendering ? accent_button_begin() : red_button_begin()
+    if CImGui.Button("Render", CImGui.ImVec2(-1, 0))
+        gui.ui_state.render[] = !rendering
         w.render[] = gui.ui_state.render[]
         notify(w.wakeup)
     end
+    rendering ? accent_button_end() : red_button_end()
+    CImGui.SetItemTooltip(
+        "Whether the scene view keeps re-rendering. " *
+        "Off frees the GPU for training.")
+
+    # What the scene view shows. GUI rasterizers always render in `:rgbd`
+    # mode, so switching is free: no re-rasterization, just a different
+    # channel of the same result.
+    if mode_buttons!(
+        "##render-mode-buttons", gui.ui_state.selected_mode,
+        gui.ui_state.render_modes,
+    )
+        gui.render_state.need_render = true
+    end
 
     CImGui.PushItemWidth(-100)
-    if CImGui.Combo("Controller", gui.ui_state.controller_mode,
+
+    CImGui.Text("Controller")
+    if mode_buttons!(
+        "##controller-mode-buttons", gui.ui_state.controller_mode,
         gui.ui_state.controller_modes,
     ) && gui.ui_state.controller_mode[] == 1
         # Entering orbit mode: place the target in front of the
         # camera, at a scene-sized distance.
         d = viewer_only(gui) ? 10f0 : Float32(gui.trainer.dataset.camera_extent)
-        gui.control_settings.orbiting_target = view_pos(gui.camera) .+ d .* view_dir(gui.camera)
+        gui.control_settings.orbiting_target =
+            view_pos(gui.camera) .+ d .* view_dir(gui.camera)
     end
 
     # Yaw-axis calibration: see `estimate_up_vec` & `level_horizon!`.
+    CImGui.Text("Camera Orientation")
     CImGui.BeginTable("##up-vec-buttons-table", 2)
     CImGui.TableNextRow()
     CImGui.TableNextColumn()
@@ -1301,12 +1379,6 @@ function scene_tab!(gui::GSGUI)
         "SH degree", gui.ui_state.sh_degree,
         -1, max_sh_degree, "%d / $max_sh_degree",
     )
-        gui.render_state.need_render = true
-    end
-
-    # GUI rasterizers always render in `:rgbd` mode.
-    CImGui.PushItemWidth(-100)
-    if CImGui.Combo("Mode", gui.ui_state.selected_mode, gui.ui_state.render_modes)
         gui.render_state.need_render = true
     end
 

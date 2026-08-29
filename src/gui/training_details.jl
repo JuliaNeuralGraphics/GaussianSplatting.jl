@@ -180,17 +180,21 @@ function training_controls!(gui)
     CImGui.TableNextRow()
     CImGui.TableNextColumn()
     # Reflect worker-side stops (e.g. training error)
-    # before drawing the checkbox.
+    # before drawing the button.
     ui_state.train[] = w.train[]
-    # Disable `Train` checkbox if no more steps left, until it's raised.
+    # Disable the button if no more steps left, until the limit is raised.
     training_steps_left = w.max_steps[] ≤ 0 || w.step[] < w.max_steps[]
     training_steps_left || disabled_begin()
-    if CImGui.Checkbox("Train", ui_state.train)
+    accent_button_begin()
+    label = ui_state.train[] ? "Stop Training" : "Start Training"
+    if CImGui.Button(label, CImGui.ImVec2(-1, 0))
         GC.gc(false)
         GC.gc(true)
+        ui_state.train[] = !ui_state.train[]
         w.train[] = ui_state.train[]
         notify(w.wakeup)
     end
+    accent_button_end()
     training_steps_left || CImGui.SetItemTooltip("Step limit reached: raise `Max Steps` to train further.")
     training_steps_left || disabled_end()
 
@@ -212,8 +216,6 @@ function training_controls!(gui)
     end
     CImGui.SetItemTooltip("Training stops itself once it has taken this many steps. 0 means no limit.")
 
-    autosave_controls!(gui)
-
     if ui_state.has_max_cap
         # Benign cross-thread write: `max_cap` is a word-sized Int
         # the worker only reads at densification time.
@@ -227,6 +229,8 @@ function training_controls!(gui)
             "The population densification grows to; " *
             "never below the count the scene already has.")
     end
+
+    autosave_controls!(gui)
 
     training_time_line!(w)
     return

@@ -45,7 +45,7 @@ Base.@kwdef mutable struct UIState
     worker_error::String = ""
 
     controller_mode::Ref{Int32} = Ref{Int32}(0)
-    controller_modes::Vector{String} = ["FPV", "Orbiting"]
+    controller_modes::Vector{String} = ["FPV", "Orbit"]
 
     # Whether the `Capture` tab is the open one: capture mode is active
     # (camera path drawn & editable). Refreshed every frame by `handle_ui!`.

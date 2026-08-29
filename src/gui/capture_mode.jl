@@ -174,7 +174,7 @@ function capture_ui!(c::CaptureMode, gui)
             "Capturing. Please wait...\nThe scene view is not resizable " *
             "during this stage.")
 
-        CImGui.PushStyleColor(CImGui.ImGuiCol_PlotHistogram, CImGui.HSV(0.61f0, 1.0f0, 1f0))
+        CImGui.PushStyleColor(CImGui.ImGuiCol_PlotHistogram, gray(0.75))
         CImGui.ProgressBar(c.frame_index / c.total_frames, CImGui.ImVec2(-1f0, 0f0),
             "$(c.frame_index) / $(c.total_frames)")
         CImGui.PopStyleColor()
