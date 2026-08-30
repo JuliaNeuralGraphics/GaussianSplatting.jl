@@ -39,12 +39,24 @@ Because the dome sits far behind everything, compositing it as a background is
 """
 Frozen Gaussian shell + the rasterizer & optimizer that drive it.
 `gaussians.features_dc` is the only trainable array.
+
+`neighbors` & `hits` exist for [`diffuse_sky!`](@ref): the lattice's k-NN graph
+(frozen with the geometry) and how many optimizer steps actually supervised
+each Gaussian.
 """
-struct SkyDome{M <: GaussianModel, R <: GaussianRasterizer}
+struct SkyDome{
+    M <: GaussianModel, R <: GaussianRasterizer,
+    N <: AbstractMatrix{Int32}, H <: AbstractVector{Float32},
+}
     gaussians::M
     optimizer::NU.Adam
     rast::R
     radius::Float32
+    neighbors::N
+    hits::H
+    # Angular spacing of the lattice, which sets how many sweeps
+    # `diffuse_sky!` needs to cross the dome.
+    spacing::Float32
 end
 
 """
@@ -97,6 +109,34 @@ function sky_dome_directions(n::Int, shape::Symbol, up::SVector{3, Float32})
 end
 
 """
+Neighbors per dome Gaussian in the lattice graph [`diffuse_sky!`](@ref) walks.
+Six is the Fibonacci lattice's own coordination number — its cells are
+hexagonal — so this is the full ring around a Gaussian, not a subsample.
+"""
+const SKY_DOME_NEIGHBORS = 6
+
+"""
+The `(k, n)` `Int32` k-NN graph of the dome lattice.
+
+Built on the unit directions, whose chord distance is monotone in angle, so a
+Euclidean `KDTree` returns the angular neighbors. Frozen with the geometry:
+the dome is never densified, so this is computed once.
+"""
+function sky_dome_neighbors(dirs::Matrix{Float32}, k::Int = SKY_DOME_NEIGHBORS)
+    n = size(dirs, 2)
+    k = clamp(k, 0, n - 1)
+    neighbors = Matrix{Int32}(undef, k, n)
+    k == 0 && return neighbors
+
+    idxs, _ = knn(KDTree(dirs), dirs, k + 1, true #= sort results =#)
+    for i in 1:n
+        # The first hit is the query point itself.
+        neighbors[:, i] .= Int32.(@view(idxs[i][2:(k + 1)]))
+    end
+    return neighbors
+end
+
+"""
 Gaussian std as a multiple of the lattice spacing.
 
 Sized by the *deepest* gap, the circumcenter of three neighboring cells at
@@ -142,7 +182,9 @@ function SkyDome(
 
     optimizer = NU.Adam(kab, gaussians.features_dc; lr=opt_params.sky_dome_lr, ϵ=1f-15)
     rast = GaussianRasterizer(kab, camera; mode=:rgb, far_plane=4f0 * radius)
-    return SkyDome(gaussians, optimizer, rast, radius)
+    neighbors = adapt(kab, sky_dome_neighbors(dirs))
+    hits = KA.zeros(kab, Float32, n)
+    return SkyDome(gaussians, optimizer, rast, radius, neighbors, hits, spacing)
 end
 
 """
@@ -161,16 +203,154 @@ end
 memory_usage(sky::SkyDome) =
     memory_usage(sky.gaussians) +
     memory_usage(sky.optimizer) +
-    memory_usage(sky.rast)
+    memory_usage(sky.rast) +
+    memory_usage(sky.neighbors) +
+    memory_usage(sky.hits)
 
 function KA.unsafe_free!(sky::SkyDome)
     KA.unsafe_free!(sky.gaussians)
     free_optimizer!(sky.optimizer)
     KA.unsafe_free!(sky.rast)
+    KA.unsafe_free!(sky.neighbors)
+    KA.unsafe_free!(sky.hits)
     return
 end
 
 Base.length(sky::SkyDome) = length(sky.gaussians)
+
+"""
+Optimizer steps a dome Gaussian must have been supervised by before
+[`diffuse_sky!`](@ref) trusts its color as a boundary value.
+
+Not one: Adam's step is gradient-*normalized*, so a Gaussian grazed by a single
+view's edge pixel is "supervised" by the same infinitesimal amount as one
+covering half a sky, and has moved essentially nowhere from the init color.
+Admitting those as boundary values speckles the extrapolated cap with init-grey.
+"""
+const SKY_MIN_HITS = 8f0
+
+"""
+    record_sky_supervision!(sky, ∇features_dc)
+
+Count the dome Gaussians this step's gradient actually reached.
+
+The dome's gradient is dense & exactly zero wherever no pixel of the view was
+explained by that Gaussian, so a nonzero entry means "some train view saw it,
+through the scene" — occlusion included, which is the property
+[`diffuse_sky!`](@ref) needs and a frustum test would not give.
+"""
+function record_sky_supervision!(sky::SkyDome, ∇features_dc::AbstractArray{Float32, 3})
+    isempty(sky.hits) && return
+    _accumulate_sky_hits!(get_backend(sky.gaussians))(
+        sky.hits, ∇features_dc; ndrange=length(sky.hits))
+    return
+end
+
+@kernel cpu=false inbounds=true function _accumulate_sky_hits!(
+    hits::AbstractVector{Float32}, @Const(∇features_dc),
+)
+    i = @index(Global)
+    ∇ =
+        abs(∇features_dc[1, 1, i]) +
+        abs(∇features_dc[2, 1, i]) +
+        abs(∇features_dc[3, 1, i])
+    ∇ > 0f0 && (hits[i] += 1f0)
+end
+
+"""
+    diffuse_sky!(sky)
+
+Extrapolate the learned sky over the part of the dome no train view covers.
+
+A dataset that does not photograph the zenith still renders it: those Gaussians
+keep `sky_init_color` while their supervised neighbors move to the real sky, and
+the boundary between the two is a visible seam in any view that looks up.
+
+The fix is an inpaint over the lattice graph. Supervised Gaussians
+([`SKY_MIN_HITS`](@ref)) are Dirichlet boundary values — never written — and
+every other one is a weighted Jacobi average of its neighbors. Confidence
+starts at 1 on the boundary and 0 in the hole, so the first sweeps advance a
+front one ring per sweep (the fill) and later ones relax what is behind it (the
+smoothing): the result is the discrete harmonic extension of the observed sky,
+which meets the boundary with no step in value.
+
+Cheap enough to run periodically during training (`sky_dome_fill_every`):
+a few hundred launches of one `n`-wide kernel, all of it on the device.
+"""
+function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
+    n = length(sky)
+    (n == 0 || size(sky.neighbors, 1) == 0) && return
+
+    kab = get_backend(sky.gaussians)
+    # A front advances one ring per sweep, so crossing the widest possible hole
+    # — half the dome — takes `π / spacing` of them.
+    sweeps = ceil(Int, Float32(π) / max(sky.spacing, 1f-6)) + smooth_sweeps
+    iseven(sweeps) || (sweeps += 1) # Land the result back in `features_dc`.
+
+    features = sky.gaussians.features_dc
+    src, dst = features, similar(features)
+    w_src = KA.zeros(kab, Float32, n)
+    w_dst = KA.zeros(kab, Float32, n)
+
+    diffuse! = _diffuse_sky!(kab)
+    for _ in 1:sweeps
+        diffuse!(dst, w_dst, src, w_src, sky.neighbors, sky.hits; ndrange=n)
+        src, dst = dst, src
+        w_src, w_dst = w_dst, w_src
+    end
+    @assert src ≡ features # Even sweep count.
+
+    KA.unsafe_free!(dst)
+    KA.unsafe_free!(w_src)
+    KA.unsafe_free!(w_dst)
+    return
+end
+
+@kernel cpu=false inbounds=true function _diffuse_sky!(
+    # Outputs.
+    features_dst::AbstractArray{Float32, 3},
+    w_dst::AbstractVector{Float32},
+    # Inputs.
+    @Const(features_src), @Const(w_src), @Const(neighbors), @Const(hits),
+)
+    i = @index(Global)
+
+    if hits[i] ≥ SKY_MIN_HITS
+        # Supervised: a boundary value, carried through untouched.
+        @unroll for c in 1:3
+            features_dst[c, 1, i] = features_src[c, 1, i]
+        end
+        w_dst[i] = 1f0
+    else
+        k = size(neighbors, 1)
+        acc = zero(SVector{3, Float32})
+        Σw = 0f0
+        for ki in 1:k
+            j = neighbors[ki, i]
+            w = w_src[j]
+            w > 0f0 || continue # Nothing has reached this neighbor yet.
+            acc += w * SVector{3, Float32}(
+                features_src[1, 1, j], features_src[2, 1, j], features_src[3, 1, j])
+            Σw += w
+        end
+
+        if Σw > 0f0
+            acc = acc ./ Σw
+            @unroll for c in 1:3
+                features_dst[c, 1, i] = acc[c]
+            end
+            # Confidence of an average is the confidence of what it averaged:
+            # full only where the whole ring is, which is what keeps the front
+            # ahead of the values it is still relaxing.
+            w_dst[i] = Σw / Float32(k)
+        else
+            @unroll for c in 1:3
+                features_dst[c, 1, i] = features_src[c, 1, i]
+            end
+            w_dst[i] = w_src[i]
+        end
+    end
+end
 
 """
     render_sky(sky, camera; rast)
@@ -294,11 +474,25 @@ function write_state!(tensors, meta, prefix::String, sky::SkyDome)
     write_state!(tensors, meta, "$prefix.gaussians", sky.gaussians)
     write_state!(tensors, meta, "$prefix.optimizer", sky.optimizer)
     write_scalar!(meta, "$prefix.radius", sky.radius)
+    tensors["$prefix.hits"] = adapt(CPU(), sky.hits)
     return
 end
 
 function read_state!(sky::SkyDome, ckpt::Checkpoint, prefix::String)
     read_state!(sky.gaussians, ckpt, "$prefix.gaussians")
     read_state!(sky.optimizer, ckpt, "$prefix.optimizer")
+
+    # The lattice is rebuilt from the same params, so `hits` lines up. Without
+    # it — a checkpoint from before it was recorded, or a dome resized since —
+    # every Gaussian counts as supervised: `diffuse_sky!` then leaves the
+    # restored colors alone rather than inpainting over colors it cannot tell
+    # were learned.
+    key = "$prefix.hits"
+    hits = haskey(ckpt, key) ? tensor(ckpt, key)::Vector{Float32} : Float32[]
+    if length(hits) == length(sky.hits)
+        copyto!(sky.hits, hits)
+    else
+        fill!(sky.hits, SKY_MIN_HITS)
+    end
     return
 end
