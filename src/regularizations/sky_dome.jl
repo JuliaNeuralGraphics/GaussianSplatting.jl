@@ -219,15 +219,16 @@ end
 Base.length(sky::SkyDome) = length(sky.gaussians)
 
 """
-Optimizer steps a dome Gaussian must have been supervised by before
-[`diffuse_sky!`](@ref) trusts its color as a boundary value.
+How much supervision a dome Gaussian needs before [`diffuse_sky!`](@ref) trusts
+its color, as a fraction of what the median supervised Gaussian got.
 
-Not one: Adam's step is gradient-*normalized*, so a Gaussian grazed by a single
-view's edge pixel is "supervised" by the same infinitesimal amount as one
-covering half a sky, and has moved essentially nowhere from the init color.
-Admitting those as boundary values speckles the extrapolated cap with init-grey.
+Relative, because the count grows with the run: a fifth of the median is the
+same claim at step 1000 & at step 30000, whereas any absolute number is "seen
+by nothing" early and "seen by everything" late. Median rather than mean
+because the distribution has a long tail — the Gaussians at the center of the
+view coverage are seen by an order of magnitude more steps than typical ones.
 """
-const SKY_MIN_HITS = 8f0
+const SKY_SUPERVISED_FRACTION = 0.2f0
 
 """
     record_sky_supervision!(sky, ∇features_dc)
@@ -266,13 +267,29 @@ A dataset that does not photograph the zenith still renders it: those Gaussians
 keep `sky_init_color` while their supervised neighbors move to the real sky, and
 the boundary between the two is a visible seam in any view that looks up.
 
-The fix is an inpaint over the lattice graph. Supervised Gaussians
-([`SKY_MIN_HITS`](@ref)) are Dirichlet boundary values — never written — and
-every other one is a weighted Jacobi average of its neighbors. Confidence
-starts at 1 on the boundary and 0 in the hole, so the first sweeps advance a
-front one ring per sweep (the fill) and later ones relax what is behind it (the
-smoothing): the result is the discrete harmonic extension of the observed sky,
-which meets the boundary with no step in value.
+The fix is an inpaint over the lattice graph. Well supervised Gaussians
+([`SKY_SUPERVISED_FRACTION`](@ref)) are Dirichlet boundary values — never
+written — and every other one is a weighted Jacobi average of its neighbors.
+Confidence starts at 1 on the boundary and 0 elsewhere, so the early sweeps
+advance a front one ring per sweep (the fill) and the later ones relax what is
+behind it (the smoothing): the result is the discrete harmonic extension of the
+observed sky, which meets the boundary with no step in value.
+
+Where the boundary falls is the whole game. A dome Gaussian glimpsed through a
+sliver of foreground gets a handful of steps of a gradient-normalized Adam
+update against an under-determined blend — its neighbors overlap it, so only
+their composite is constrained — and lands on a saturated color. Those
+Gaussians ring the observed sky, which is where a *barely* supervised one must
+count as unknown and be overwritten: admitted to the boundary, each one paints
+a streak of its color across the whole cap, since a harmonic extension takes
+its extremes from its boundary and nowhere else. That is the red/green/purple
+fringe at a seam.
+
+Nor is it enough to admit them *partially* — anchoring such a Gaussian to a
+fraction of its own color and diffusing the rest. Since they ring the sky
+rather than dot it, the part of the average that is not anchored comes right
+back through the region they themselves filled, and the ring converges to
+roughly the color it started with. The boundary is binary for that reason.
 
 Cheap enough to run periodically during training (`sky_dome_fill_every`):
 a few hundred launches of one `n`-wide kernel, all of it on the device.
@@ -282,6 +299,14 @@ function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
     (n == 0 || size(sky.neighbors, 1) == 0) && return
 
     kab = get_backend(sky.gaussians)
+    # Nothing has been seen yet on an untrained dome: there is no sky to
+    # extrapolate from, so leave it alone. The median is over the supervised
+    # Gaussians only — the unsupervised ones are the majority in the very case
+    # this pass exists for, and would drag it to zero.
+    seen = filter(>(0f0), adapt(CPU(), sky.hits))
+    isempty(seen) && return
+    min_hits = SKY_SUPERVISED_FRACTION * median(seen)
+
     # A front advances one ring per sweep, so crossing the widest possible hole
     # — half the dome — takes `π / spacing` of them.
     sweeps = ceil(Int, Float32(π) / max(sky.spacing, 1f-6)) + smooth_sweeps
@@ -294,7 +319,9 @@ function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
 
     diffuse! = _diffuse_sky!(kab)
     for _ in 1:sweeps
-        diffuse!(dst, w_dst, src, w_src, sky.neighbors, sky.hits; ndrange=n)
+        diffuse!(
+            dst, w_dst, src, w_src, sky.neighbors, sky.hits, min_hits;
+            ndrange=n)
         src, dst = dst, src
         w_src, w_dst = w_dst, w_src
     end
@@ -312,10 +339,11 @@ end
     w_dst::AbstractVector{Float32},
     # Inputs.
     @Const(features_src), @Const(w_src), @Const(neighbors), @Const(hits),
+    min_hits::Float32,
 )
     i = @index(Global)
 
-    if hits[i] ≥ SKY_MIN_HITS
+    if hits[i] ≥ min_hits
         # Supervised: a boundary value, carried through untouched.
         @unroll for c in 1:3
             features_dst[c, 1, i] = features_src[c, 1, i]
@@ -484,15 +512,16 @@ function read_state!(sky::SkyDome, ckpt::Checkpoint, prefix::String)
 
     # The lattice is rebuilt from the same params, so `hits` lines up. Without
     # it — a checkpoint from before it was recorded, or a dome resized since —
-    # every Gaussian counts as supervised: `diffuse_sky!` then leaves the
-    # restored colors alone rather than inpainting over colors it cannot tell
-    # were learned.
+    # nothing is known about who was seen. Uniform is then the safe answer:
+    # every Gaussian is exactly as supervised as the median one, so
+    # `diffuse_sky!` takes all of them as boundary values & leaves the restored
+    # colors alone rather than inpainting over colors it cannot tell were learned.
     key = "$prefix.hits"
     hits = haskey(ckpt, key) ? tensor(ckpt, key)::Vector{Float32} : Float32[]
     if length(hits) == length(sky.hits)
         copyto!(sky.hits, hits)
     else
-        fill!(sky.hits, SKY_MIN_HITS)
+        fill!(sky.hits, 1f0)
     end
     return
 end
