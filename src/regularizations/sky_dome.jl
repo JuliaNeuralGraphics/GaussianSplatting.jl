@@ -36,13 +36,34 @@ Because the dome sits far behind everything, compositing it as a background is
 *exactly* depth-sorted blending, not an approximation — see [`composite_sky`](@ref).
 """
 
+# Shapes `sky_dome_shape` selects between.
+const SKY_DOME_SHAPES = (:hemisphere, :sphere)
+
+"""
+Neighbors per dome Gaussian in the lattice graph [`diffuse_sky!`](@ref) walks.
+Six is the Fibonacci lattice's own coordination number — its cells are hexagonal —
+so this is the full ring around a Gaussian.
+"""
+const SKY_DOME_NEIGHBORS = 6
+
+"""
+Gaussian std as a multiple of the lattice spacing.
+"""
+const SKY_DOME_OVERLAP = 1f0
+
+"""
+How much supervision a dome Gaussian needs before [`diffuse_sky!`](@ref)
+trusts its color, as a fraction of what the median supervised Gaussian got.
+Relative, because the count grows with the run.
+"""
+const SKY_SUPERVISED_FRACTION = 0.2f0
+
 """
 Frozen Gaussian shell + the rasterizer & optimizer that drive it.
 `gaussians.features_dc` is the only trainable array.
 
 `neighbors` & `hits` exist for [`diffuse_sky!`](@ref): the lattice's k-NN graph
-(frozen with the geometry) and how many optimizer steps actually supervised
-each Gaussian.
+(frozen with the geometry) and how many optimizer steps actually supervised each Gaussian.
 """
 struct SkyDome{
     M <: GaussianModel, R <: GaussianRasterizer,
@@ -82,9 +103,6 @@ function fibonacci_sphere(n::Int)
     return dirs, sqrt(4f0 * Float32(π) / Float32(n))
 end
 
-# Shapes `sky_dome_shape` selects between.
-const SKY_DOME_SHAPES = (:hemisphere, :sphere)
-
 """
     sky_dome_directions(n, shape, up)
 
@@ -109,13 +127,6 @@ function sky_dome_directions(n::Int, shape::Symbol, up::SVector{3, Float32})
 end
 
 """
-Neighbors per dome Gaussian in the lattice graph [`diffuse_sky!`](@ref) walks.
-Six is the Fibonacci lattice's own coordination number — its cells are
-hexagonal — so this is the full ring around a Gaussian, not a subsample.
-"""
-const SKY_DOME_NEIGHBORS = 6
-
-"""
 The `(k, n)` `Int32` k-NN graph of the dome lattice.
 
 Built on the unit directions, whose chord distance is monotone in angle, so a
@@ -135,17 +146,6 @@ function sky_dome_neighbors(dirs::Matrix{Float32}, k::Int = SKY_DOME_NEIGHBORS)
     end
     return neighbors
 end
-
-"""
-Gaussian std as a multiple of the lattice spacing.
-
-Sized by the *deepest* gap, the circumcenter of three neighboring cells at
-`d/√3 ≈ 0.577·d` from each. At one full spacing (`σ = d`) each of the three
-still contributes `α ≈ 0.84` there, leaving transmittance ≈ 0.004 — a sealed
-shell. Half a spacing leaves ≈ 0.2, which shows up as dark speckle across the
-sky, so the extra screen footprint here is not optional.
-"""
-const SKY_DOME_OVERLAP = 1f0
 
 """
     SkyDome(kab, camera, opt_params; center, radius, color)
@@ -219,18 +219,6 @@ end
 Base.length(sky::SkyDome) = length(sky.gaussians)
 
 """
-How much supervision a dome Gaussian needs before [`diffuse_sky!`](@ref) trusts
-its color, as a fraction of what the median supervised Gaussian got.
-
-Relative, because the count grows with the run: a fifth of the median is the
-same claim at step 1000 & at step 30000, whereas any absolute number is "seen
-by nothing" early and "seen by everything" late. Median rather than mean
-because the distribution has a long tail — the Gaussians at the center of the
-view coverage are seen by an order of magnitude more steps than typical ones.
-"""
-const SKY_SUPERVISED_FRACTION = 0.2f0
-
-"""
     record_sky_supervision!(sky, ∇features_dc)
 
 Count the dome Gaussians this step's gradient actually reached.
@@ -268,31 +256,12 @@ keep `sky_init_color` while their supervised neighbors move to the real sky, and
 the boundary between the two is a visible seam in any view that looks up.
 
 The fix is an inpaint over the lattice graph. Well supervised Gaussians
-([`SKY_SUPERVISED_FRACTION`](@ref)) are Dirichlet boundary values — never
-written — and every other one is a weighted Jacobi average of its neighbors.
+([`SKY_SUPERVISED_FRACTION`](@ref)) are Dirichlet boundary values — never written —
+and every other one is a weighted Jacobi average of its neighbors.
 Confidence starts at 1 on the boundary and 0 elsewhere, so the early sweeps
 advance a front one ring per sweep (the fill) and the later ones relax what is
 behind it (the smoothing): the result is the discrete harmonic extension of the
 observed sky, which meets the boundary with no step in value.
-
-Where the boundary falls is the whole game. A dome Gaussian glimpsed through a
-sliver of foreground gets a handful of steps of a gradient-normalized Adam
-update against an under-determined blend — its neighbors overlap it, so only
-their composite is constrained — and lands on a saturated color. Those
-Gaussians ring the observed sky, which is where a *barely* supervised one must
-count as unknown and be overwritten: admitted to the boundary, each one paints
-a streak of its color across the whole cap, since a harmonic extension takes
-its extremes from its boundary and nowhere else. That is the red/green/purple
-fringe at a seam.
-
-Nor is it enough to admit them *partially* — anchoring such a Gaussian to a
-fraction of its own color and diffusing the rest. Since they ring the sky
-rather than dot it, the part of the average that is not anchored comes right
-back through the region they themselves filled, and the ring converges to
-roughly the color it started with. The boundary is binary for that reason.
-
-Cheap enough to run periodically during training (`sky_dome_fill_every`):
-a few hundred launches of one `n`-wide kernel, all of it on the device.
 """
 function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
     n = length(sky)
@@ -300,9 +269,8 @@ function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
 
     kab = get_backend(sky.gaussians)
     # Nothing has been seen yet on an untrained dome: there is no sky to
-    # extrapolate from, so leave it alone. The median is over the supervised
-    # Gaussians only — the unsupervised ones are the majority in the very case
-    # this pass exists for, and would drag it to zero.
+    # extrapolate from, so leave it alone.
+    # The median is over the supervised Gaussians only.
     seen = filter(>(0f0), adapt(CPU(), sky.hits))
     isempty(seen) && return
     min_hits = SKY_SUPERVISED_FRACTION * median(seen)
@@ -319,9 +287,7 @@ function diffuse_sky!(sky::SkyDome; smooth_sweeps::Int = 32)
 
     diffuse! = _diffuse_sky!(kab)
     for _ in 1:sweeps
-        diffuse!(
-            dst, w_dst, src, w_src, sky.neighbors, sky.hits, min_hits;
-            ndrange=n)
+        diffuse!(dst, w_dst, src, w_src, sky.neighbors, sky.hits, min_hits; ndrange=n)
         src, dst = dst, src
         w_src, w_dst = w_dst, w_src
     end
@@ -357,8 +323,7 @@ end
             j = neighbors[ki, i]
             w = w_src[j]
             w > 0f0 || continue # Nothing has reached this neighbor yet.
-            acc += w * SVector{3, Float32}(
-                features_src[1, 1, j], features_src[2, 1, j], features_src[3, 1, j])
+            acc += w * SVector{3, Float32}(features_src[1, 1, j], features_src[2, 1, j], features_src[3, 1, j])
             Σw += w
         end
 
@@ -509,13 +474,7 @@ end
 function read_state!(sky::SkyDome, ckpt::Checkpoint, prefix::String)
     read_state!(sky.gaussians, ckpt, "$prefix.gaussians")
     read_state!(sky.optimizer, ckpt, "$prefix.optimizer")
-
-    # The lattice is rebuilt from the same params, so `hits` lines up. Without
-    # it — a checkpoint from before it was recorded, or a dome resized since —
-    # nothing is known about who was seen. Uniform is then the safe answer:
-    # every Gaussian is exactly as supervised as the median one, so
-    # `diffuse_sky!` takes all of them as boundary values & leaves the restored
-    # colors alone rather than inpainting over colors it cannot tell were learned.
+    # The lattice is rebuilt from the same params, so `hits` lines up.
     key = "$prefix.hits"
     hits = haskey(ckpt, key) ? tensor(ckpt, key)::Vector{Float32} : Float32[]
     if length(hits) == length(sky.hits)
