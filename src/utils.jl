@@ -58,6 +58,12 @@ Base.@kwdef struct OptimizationParams
     sky_dome_points::Int = 32_768
     sky_dome_radius_factor::Float32 = 100f0 # × the dataset's camera extent.
     sky_dome_lr::Float32 = 25f-4            # Colors only; matches `lr_feature`.
+    # How often to extrapolate the learned sky over the part of the dome no
+    # train view covers — the zenith of a dataset shot from eye level, say.
+    # Without it that part keeps the init color & seams visibly against the
+    # learned sky in any view that looks up (see `diffuse_sky!`).
+    # `0` disables it.
+    sky_dome_fill_every::Int = 1_000
 
     # Sky mask supervision (see `sky_dome.jl`): pulls the scene's accumulated
     # alpha to zero on sky rays, so a floater there costs something.

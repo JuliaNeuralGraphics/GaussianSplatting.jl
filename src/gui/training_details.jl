@@ -21,7 +21,7 @@ const OPT_PARAM_SECTIONS = (
         :depth_loss_final_scale, :depth_loss_gradient_weight)),
     (title="Sky dome", flag=:use_sky_dome, fields=(
         :sky_dome_shape, :sky_dome_points, :sky_dome_radius_factor,
-        :sky_dome_lr)),
+        :sky_dome_lr, :sky_dome_fill_every)),
     (title="Sky mask supervision", flag=:use_sky_loss, fields=(
         :sky_loss_weight, :sky_loss_from_iter)),
     (title="Coverage masks", flag=:use_masks, fields=(

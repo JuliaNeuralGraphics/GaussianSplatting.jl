@@ -351,9 +351,13 @@ function setup_depth_supervision(rast::GaussianRasterizer, dataset::ColmapDatase
 end
 
 """
-Mean color of the top eighth of the train images: a rough sky color to start
+Mean color of the sky pixels of the train images: a rough sky color to start
 the dome from, so it does not have to climb out of mid-grey while the scene is
 also forming.
+
+The sky masks pick the pixels when the dataset has them; a view without one
+falls back to the top eighth of the frame, which is mostly sky in a dataset
+that wants a dome at all.
 
 One streaming pass over the images, since the dataset no longer holds them —
 the only place that still reads all of them at once, and only when the dome is
@@ -367,11 +371,38 @@ function sky_init_color(dataset::ColmapDataset)
     band_height = max(1, height ÷ 8)
 
     totals = zeros(Float64, 3, n_views)
+    # Pixels each view contributed, so views see the sky at different sizes.
+    weights = zeros(Float64, n_views)
     Threads.@threads for idx in 1:n_views
         image = load_image(dataset, idx, :train)
-        totals[:, idx] .= vec(sum(Float64, @view(image[:, :, 1:band_height]); dims=(2, 3)))
+        sky_path = dataset.has_sky_masks ? dataset.train_sky_paths[idx] : nothing
+        # `load_mask` may leave the map small; this one path reads the image at
+        # full resolution, so expand on the host (it runs once per training).
+        mask = sky_path ≡ nothing ?
+            nothing : fit_resolution(load_mask(sky_path, width, height), (width, height))
+
+        if mask ≢ nothing && sum(mask) ≥ 1f0
+            acc = zeros(Float64, 3)
+            weight = 0.0
+            @inbounds for y in 1:height, x in 1:width
+                w = Float64(mask[x, y])
+                w > 0.0 || continue
+                acc[1] += w * image[1, x, y]
+                acc[2] += w * image[2, x, y]
+                acc[3] += w * image[3, x, y]
+                weight += w
+            end
+            totals[:, idx] .= acc
+            weights[idx] = weight
+        else
+            totals[:, idx] .= vec(sum(Float64, @view(image[:, :, 1:band_height]); dims=(2, 3)))
+            weights[idx] = Float64(width * band_height)
+        end
     end
-    mean_color = vec(sum(totals; dims=2)) ./ (255.0 * width * band_height * n_views)
+
+    total_weight = sum(weights)
+    total_weight < 1.0 && return SVector{3, Float32}(0.5f0, 0.5f0, 0.5f0)
+    mean_color = vec(sum(totals; dims=2)) ./ (255.0 * total_weight)
     return SVector{3, Float32}(Float32.(mean_color)...)
 end
 
@@ -907,6 +938,12 @@ function step!(trainer::Trainer)
                     "(train view `$idx`: `$(trainer.dataset.train_image_filenames[idx])`).")
             end
             NU.step!(sky.optimizer, sky.gaussians.features_dc, ∇sky; dispose=false)
+
+            # Views rarely cover the whole sky; what they do not reach keeps
+            # the init color and seams against what they do (see `diffuse_sky!`).
+            record_sky_supervision!(sky, ∇sky)
+            every = params.sky_dome_fill_every
+            every > 0 && trainer.step % every == 0 && diffuse_sky!(sky)
         end
     end
 
