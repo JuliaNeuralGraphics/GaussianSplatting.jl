@@ -1064,7 +1064,8 @@ end
 end
 
 @testset "∇rasterize vs finite differences" begin
-    # The only end-to-end check of the blend backward (`∇render!`): every other
+    # The only end-to-end check of the blend backward (`∇render!`):
+    # every other
     # `∇` testset here covers one of its callees in isolation.
     width, height = 32, 24
     camera = GaussianSplatting.Camera(; fx=120f0, fy=120f0, width, height)
@@ -1121,7 +1122,7 @@ end
         @test sum(Array(∇[i]) .* Array(v)) ≈ fd rtol=2e-2 atol=1e-4
     end
 end
-@testset "Blend backward: `:per_splat` vs `:per_pixel`" begin
+@testset "Blend backward: dense multi-tile scene" begin
     GSP = GaussianSplatting
 
     # A multi-tile scene with many splats per tile: this is what exercises the
@@ -1151,37 +1152,30 @@ end
         args = (gaussians.points, gaussians.opacities, gaussians.scales,
             gaussians.rotations, gaussians.features_dc)
 
-        run(backward) = begin
-            rast = GSP.GaussianRasterizer(kab, camera; mode, backward)
-            abs_grad && GSP.enable_abs_grad!(rast)
-            _, ∇ = Zygote.withgradient(args...) do p, o, s, r, f
-                sum(rast(p, o, s, r, f, gaussians.features_rest;
-                    camera, sh_degree=0) .* weights)
-            end
-            (map(Array, ∇), Array(rast.gstate.radii[1:n]),
-                reshape(reinterpret(Float32, Array(rast.gstate.∇means_2d)), 2, :),
-                reshape(reinterpret(Float32, Array(rast.gstate.∇means_2d_abs)), 2, :))
-        end
-        ref, new = run(:per_pixel), run(:per_splat)
-
-        # Only the summation order differs, so the bar is float agreement, not
-        # bitwise — and note `:per_pixel` is itself non-deterministic run to run
-        # (atomic ordering), while `:per_splat` is deterministic within a tile.
-        for k in 1:5
-            scale = max(maximum(abs, ref[1][k]), 1f-12)
-            @test maximum(abs, ref[1][k] .- new[1][k]) < 1f-4 * scale
-            @test all(isfinite, new[1][k])
-        end
-        for k in (3, 4)
-            scale = max(maximum(abs, ref[k]), 1f-12)
-            @test maximum(abs, ref[k] .- new[k]) < 1f-4 * scale
+        rast = GSP.GaussianRasterizer(kab, camera; mode)
+        abs_grad && GSP.enable_abs_grad!(rast)
+        _, ∇ = Zygote.withgradient(args...) do p, o, s, r, f
+            sum(rast(p, o, s, r, f, gaussians.features_rest;
+                camera, sh_degree=0) .* weights)
         end
 
-        # Culled Gaussians receive nothing, from either kernel.
-        culled = ref[2] .== 0
-        @test all(iszero, new[3][:, culled])
+        @test all(g -> all(isfinite, Array(g)), ∇)
+        # Not a vacuous pass: every parameter block actually receives gradient.
+        @test all(g -> maximum(abs, Array(g)) > 0f0, ∇)
+
+        radii = Array(rast.gstate.radii[1:n])
+        ∇means_2d = reshape(reinterpret(
+            Float32, Array(rast.gstate.∇means_2d)), 2, :)
+        @test all(isfinite, ∇means_2d)
+        # Culled Gaussians receive nothing.
+        @test all(iszero, ∇means_2d[:, radii .== 0])
+
         # `Σₚ|∂L/∂μ|` dominates `|Σₚ ∂L/∂μ|` componentwise, by construction.
-        abs_grad && @test all(new[4] .≥ abs.(new[3]) .- 1f-5)
+        if abs_grad
+            ∇means_2d_abs = reshape(reinterpret(
+                Float32, Array(rast.gstate.∇means_2d_abs)), 2, :)
+            @test all(∇means_2d_abs .≥ abs.(∇means_2d) .- 1f-5)
+        end
     end
 end
 @testset "Partial tiles (resolution not a multiple of the tile size)" begin

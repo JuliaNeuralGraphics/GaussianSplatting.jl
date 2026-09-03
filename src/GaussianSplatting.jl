@@ -100,22 +100,6 @@ blocking_synchronize(kab) = KA.synchronize(kab)
 
 unpin_memory(x) = error("Unpinning memory is not supported for `$(typeof(x))`.")
 
-"""
-Workgroup size for `∇render_wavefront!`: one workgroup per tile, one lane per
-splat. Trades the wavefront ramp (`BLOCK_SIZE - 1` idle diagonals per batch,
-which this amortizes better as it grows) against lane efficiency
-(`BLOCK_SIZE / (g + BLOCK_SIZE - 1)`, which drops as it grows). Must divide
-`BLOCK_SIZE` so the per-pixel prefetch loop is exact, and be a multiple of 64
-to tile an AMD wavefront.
-
-Measured on a 1.55M-Gaussian bicycle scene at 1236×822 (RX 7900 XTX,
-`∇rasterize` end to end): g=64 → 5.49 ms, g=128 → 4.25 ms, g=256 → 4.13 ms,
-against 11.24 ms for `∇render!`. Barrier count dominates lane efficiency there,
-so the largest legal group wins; 256 also matches the workgroup `render!`
-already uses, so it is the size every backend is known to accept.
-"""
-backward_group_size(kab) = 256
-
 # If `true`, then check for NaN values in loss / gradient / params during training.
 # Set via GSP_DEBUG=1 env variable.
 const GSP_DEBUG::Ref{Bool} = Ref(false)
@@ -278,9 +262,8 @@ function benchmark(kab, dataset_path::String;
         # (name="mcmc", strategy=:mcmc, opt_params=OptimizationParams()),
         # (name="mcmc+sparse_adam", strategy=:mcmc, opt_params=OptimizationParams(; use_sparse_adam=true)),
         # (name="mcmc+depth",              strategy=:mcmc,    opt_params=OptimizationParams(; use_depth_loss=true)),
-        # (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_pixel),
-        # (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(), bwd_type=:per_splat),
-        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(; use_sparse_adam=true), bwd_type=:per_splat),
+        # (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams()),
+        (name="improved_gs", strategy=:improved_gs, opt_params=OptimizationParams(; use_sparse_adam=true)),
     ],
 )
     maybe_debug()
@@ -311,10 +294,8 @@ function benchmark(kab, dataset_path::String;
         gaussians = GaussianModel(kab,
             dataset.points, dataset.colors, dataset.scales;
             max_sh_degree=3, isotropic=false)
-        @info "Using `$(config.bwd_type)` blend mode for backward pass."
         rasterizer = GaussianRasterizer(kab, camera;
-            mode=training_rasterizer_mode(config.opt_params),
-            backward=config.bwd_type)
+            mode=training_rasterizer_mode(config.opt_params))
         trainer = Trainer(rasterizer, gaussians, dataset, config.opt_params;
             strategy=create_strategy(config.strategy, gaussians))
         use_depth = !isempty(trainer.depth_anchors)

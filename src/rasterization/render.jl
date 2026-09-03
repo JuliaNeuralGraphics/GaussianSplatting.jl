@@ -163,202 +163,12 @@ end
     ranges::AbstractMatrix{UInt32},
     resolution::SVector{2, Int32},
     bg_color::SVector{channels, Float32},
-    grid::SVector{2, Int32}, block::SVector{2, Int32}, ::Val{block_size},
-) where {block_size, channels, A <: Maybe{AbstractMatrix{Float32}}}
-    gidx = @index(Group, NTuple) # ≡ group_index
-    lidx = @index(Local, NTuple) # ≡ thread_index
-    ridx = @index(Local)         # ≡ thread_rank
-
-    # Get current tile and starting pixel range (0-based indices).
-    # 0-based indices.
-    pix_min = SVector{2, Int32}(
-        (gidx[1] - 1i32) * block[1],
-        (gidx[2] - 1i32) * block[2])
-    pix = SVector{2, Int32}(
-        pix_min[1] + lidx[1] - 1i32,
-        pix_min[2] + lidx[2] - 1i32)
-    px, py = pix .+ 1i32 # 1-based indices.
-
-    # Check if this thread corresponds to a valid pixel or is outside.
-    # If not inside, this thread will help with data fetching,
-    # but will not participate in rasterization.
-    inside = pix[1] < resolution[1] && pix[2] < resolution[2]
-    done::Bool = ifelse(inside, false, true)
-
-    # Load start/end range of IDs to process.
-    horizontal_blocks = gpu_cld(resolution[1], block[1])
-    range_idx = (gidx[2] - 1i32) * horizontal_blocks + gidx[1]
-    range = (Int32(ranges[1, range_idx]), Int32(ranges[2, range_idx]))
-    to_do::Int32 = range[2] - range[1]
-    # If `to_do` > `block_size`, repeat rasterization several times
-    # with workitems in the workgroup.
-    rounds::Int32 = gpu_cld(to_do, block_size)
-
-    # Allocate storage for batches of collectively fetched data.
-    collected_conics = @localmem SVector{3, Float32} block_size
-    collected_colors = @localmem SVector{channels, Float32} block_size
-    collected_xy = @localmem SVector{2, Float32} block_size
-    collected_opacity = @localmem Float32 block_size
-    collected_id = @localmem UInt32 block_size
-
-    # Start rasterization from the back.
-    T_final = inside ? accum_α[px, py] : 0f0
-    T = T_final
-
-    contributor = to_do
-    last_contributor = inside ? n_contrib[px, py] : 0i32
-
-    accum_rec = zeros(SVector{channels, Float32})
-    vpixel = inside ? vpixels[px, py] : zeros(SVector{channels, Float32})
-    last_color = zeros(SVector{channels, Float32})
-    last_α = 0f0
-
-    for round in 0i32:(rounds - 1i32)
-        @synchronize()
-        # Load data into shared memory in reverse order from the back.
-        progress = block_size * round + ridx # 1-based.
-        if range[1] + progress ≤ range[2]
-            # gaussian_id = gaussian_values_sorted[progress]
-            gaussian_id = gaussian_values_sorted[range[2] - progress + 1i32]
-            collected_id[ridx] = gaussian_id
-            collected_xy[ridx] = means_2d[gaussian_id]
-            collected_opacity[ridx] = opacities[gaussian_id]
-            collected_conics[ridx] = conics[gaussian_id]
-            collected_colors[ridx] = rgb_features[gaussian_id]
-        end
-        @synchronize()
-
-        # If `done`, this thread only helps with data fetching.
-        done && continue
-
-        for j in 1i32:min(block_size, to_do)
-            contributor -= 1i32
-            # Skip to the one behind the last.
-            contributor ≥ last_contributor && continue
-
-            xy = collected_xy[j]
-            δ = xy .- pix
-            opacity = collected_opacity[j]
-            conic = collected_conics[j]
-            σ = conic[2] * δ[1] * δ[2] +
-                0.5f0 * (conic[1] * δ[1]^2 + conic[3] * δ[2]^2)
-            σ < 0f0 && continue # TODO replace with `valid` flag and if/else to avoid divergence?
-
-            G = exp(-σ)
-            α = min(0.99f0, opacity * G)
-            α < (1f0 / 255f0) && continue
-
-            T /= 1f0 - α
-            fac = α * T
-
-            gaussian_id = collected_id[j]
-            @unroll for c in 1i32:channels
-                @atomic vcolors[c, gaussian_id] += fac * vpixel[c]
-            end
-
-            color = collected_colors[j]
-            # Update last color (to be used in the next iteration).
-            accum_rec = last_α .* last_color .+ (1f0 - last_α) .* accum_rec
-            last_color = color
-            vα = (color .- accum_rec) ⋅ vpixel
-            # The alpha-map cotangent needs no special handling here: the map
-            # is rendered as a constant-1 feature channel, so it enters `vα`
-            # through the generic per-channel loop above.
-            vα *= T
-            # Account for the fact that `α` also influences how
-            # much of the background is added.
-            vα += (-T_final / (1f0 - α)) * (bg_color ⋅ vpixel)
-
-            last_α = α
-
-            vσ = -opacity * G * vα
-            vconic = SVector{3, Float32}(
-                0.5f0 * vσ * δ[1]^2,
-                0.5f0 * vσ * δ[1] * δ[2],
-                0.5f0 * vσ * δ[2]^2,
-            )
-            vxy = SVector{2, Float32}(
-                vσ * (conic[1] * δ[1] + conic[2] * δ[2]),
-                vσ * (conic[2] * δ[1] + conic[3] * δ[2]),
-            )
-            vopacity = G * vα
-
-            @atomic vmeans_2d[1, gaussian_id] += vxy[1]
-            @atomic vmeans_2d[2, gaussian_id] += vxy[2]
-
-            if A !== Nothing
-                @atomic vmeans_2d_abs[1, gaussian_id] += abs(vxy[1])
-                @atomic vmeans_2d_abs[2, gaussian_id] += abs(vxy[2])
-            end
-
-            @atomic vconics[1, gaussian_id] += vconic[1]
-            @atomic vconics[2, gaussian_id] += vconic[2]
-            @atomic vconics[3, gaussian_id] += vconic[3]
-
-            @atomic vopacities[gaussian_id] += vopacity
-        end
-        to_do -= block_size
-    end
-end
-
-
-"""
-Per-splat blend backward: one workgroup per tile, **one lane per splat**, versus
-`∇render!`'s one thread per pixel.
-
-`∇render!` issues `channels + 6` atomics for every contributing (pixel, Gaussian)
-pair, all contending on the same address across the workgroup. Here each lane
-owns a Gaussian for the whole tile, accumulates in registers, and flushes **one**
-set of atomics per (tile, splat) — `O(instances)` instead of `O(fragments)`.
-
-The blend is serial back-to-front per pixel, so lanes cannot simply run free. A
-skewed **diagonal wavefront** restores the order: at step `d`, lane `l` visits
-pixel `d - l + 1`, so lane `l` only reaches a pixel after lane `l-1` (the splat
-behind it) has already updated that pixel's state. Ported from LichtFeld-Studio's
-`blend_backward_cu` (`fastgs/rasterization/include/kernels_backward.cuh`),
-Taming-3DGS lineage.
-
-Per-pixel state must live in `@localmem`, which is what forces the second change:
-instead of `∇render!`'s per-channel `accum_rec`/`last_color`/`last_α`, each pixel
-carries a **single scalar** `W = ∂L/∂T`. The two are algebraically identical —
-with `Sⱼ` the code's `accum_rec`,
-
-    W_{j+1} = Sⱼ ⋅ g + (bg ⋅ g)·∏_{m>j}(1 - αₘ),   ∏_{m>j}(1 - αₘ) = T_final / T_{j+1}
-
-so `Tⱼ(cⱼ ⋅ g) - Tⱼ·W_{j+1}` expands term for term into the `vα` built at
-`∇render!`'s `accum_rec` loop *plus* its separate background correction. One
-scalar therefore replaces all four quantities. Seed: `W = bg ⋅ g`.
-
-Every loop bound below derives from `tile_n`, which is workgroup-uniform, and no
-guard wraps a `@synchronize()` — the convergence rule KA requires.
-"""
-@kernel unsafe_indices=true cpu=false inbounds=true function ∇render_wavefront!(
-    # Outputs.
-    vcolors::AbstractMatrix{Float32},
-    vopacities::AbstractMatrix{Float32},
-    vconics::AbstractMatrix{Float32},
-    vmeans_2d::AbstractMatrix{Float32},
-    # Component-wise `Σₚ |∂L/∂μ|`, accumulated only when given.
-    vmeans_2d_abs::A,
-    # Inputs.
-    vpixels::AbstractMatrix{SVector{channels, Float32}},
-    n_contrib::AbstractMatrix{UInt32},
-    accum_α::AbstractMatrix{Float32},
-
-    gaussian_values_sorted::AbstractVector{UInt32},
-    means_2d::AbstractVector{SVector{2, Float32}},
-    opacities::AbstractMatrix{Float32},
-    conics::AbstractVector{SVector{3, Float32}},
-    rgb_features::AbstractVector{SVector{channels, Float32}},
-
-    ranges::AbstractMatrix{UInt32},
-    resolution::SVector{2, Int32},
-    bg_color::SVector{channels, Float32},
     grid::SVector{2, Int32}, block::SVector{2, Int32},
-    ::Val{tile_size}, ::Val{group_size},
-) where {tile_size, group_size, channels, A <: Maybe{AbstractMatrix{Float32}}}
+    ::Val{tile_size},
+) where {tile_size, channels, A <: Maybe{AbstractMatrix{Float32}}}
     gid = @index(Group, Linear)  # 1-based tile index ≡ `render!`'s `range_idx`.
     lane = @index(Local, Linear) # 1-based; one splat per lane.
+    group_size = Int32(@groupsize()[1])
 
     range = (Int32(ranges[1, gid]), Int32(ranges[2, gid]))
     tile_n = range[2] - range[1]
@@ -377,7 +187,7 @@ guard wraps a `@synchronize()` — the convergence rule KA requires.
     s_W = @localmem Float32 tile_size
     s_g = @localmem SVector{channels, Float32} tile_size
 
-    @unroll for k in 0i32:(Int32(tile_size ÷ group_size) - 1i32)
+    @unroll for k in 0i32:(Int32(tile_size) ÷ group_size - 1i32)
         p = lane + k * group_size
         px = pix_min[1] + (p - 1i32) % block[1] + 1i32
         py = pix_min[2] + (p - 1i32) ÷ block[1] + 1i32
@@ -392,8 +202,8 @@ guard wraps a `@synchronize()` — the convergence rule KA requires.
     end
     @synchronize()
 
-    for batch_base in 0i32:Int32(group_size):(tile_n - 1i32)
-        n_batch = min(tile_n - batch_base, Int32(group_size))
+    for batch_base in 0i32:group_size:(tile_n - 1i32)
+        n_batch = min(tile_n - batch_base, group_size)
         # 0-based index from the front; lane 1 takes the deepest splat left.
         rank = tile_n - batch_base - lane
         valid = lane ≤ n_batch
